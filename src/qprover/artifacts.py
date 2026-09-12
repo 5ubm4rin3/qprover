@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Self
 
 from qprover.models import TargetManifest
 
@@ -73,12 +75,42 @@ class ArtifactBundle:
     tool_version: str
     build_command: tuple[str, ...]
     artifacts: tuple[ContractArtifact, ...]
+    _evidence_root: Path = field(repr=False, compare=False)
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    @property
+    def evidence_root(self) -> Path:
+        """Directory retaining fresh build evidence for this live bundle."""
+
+        return self._evidence_root
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        """Remove retained compiler evidence; safe to call more than once."""
+
+        if self._closed:
+            return
+        shutil.rmtree(self._evidence_root, ignore_errors=True)
+        object.__setattr__(self, "_closed", True)
+
+    def __enter__(self) -> Self:
+        if self._closed:
+            raise ArtifactError("artifact bundle is closed")
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        del exc_info
+        self.close()
 
 
 def _inside(path: Path, root: Path, label: str) -> Path:
     resolved = path.resolve()
+    resolved_root = root.resolve()
     try:
-        resolved.relative_to(root)
+        resolved.relative_to(resolved_root)
     except ValueError as error:
         raise ArtifactError(f"{label} is outside project root: {resolved}") from error
     return resolved
@@ -246,9 +278,15 @@ def _load_artifact(
             f"{source_name}:{contract_name}"
         )
     output_bytecode = output_contract.get("evm", {}).get("bytecode", {}).get("object")
+    build_storage_layout = output_contract.get("storageLayout")
+    layout_matches = build_storage_layout == storage_layout or (
+        build_storage_layout is None
+        and storage_layout.get("storage") in ([], ())
+        and storage_layout.get("types") in ({}, None)
+    )
     if (
         output_contract.get("abi") != raw["abi"]
-        or output_contract.get("storageLayout") != storage_layout
+        or not layout_matches
         or output_bytecode != bytecode[2:]
         or build_info["output"]["sources"][source_name].get("ast") != ast
     ):
@@ -274,30 +312,12 @@ def _load_artifact(
     )
 
 
-def build_target(manifest: TargetManifest) -> ArtifactBundle:
-    """Build a target in isolated outputs and retain its compiler evidence."""
-
-    root = manifest.target.project_root.resolve()
-    if not root.is_dir():
-        raise ArtifactError(f"project root is missing: {root}")
-    declared_sources = {
-        _inside(source, root, "source file").relative_to(root).as_posix()
-        for source in manifest.target.source_files
-    }
-    requested = sorted({deployment.artifact for deployment in manifest.deployments})
-    parsed_requests: list[tuple[str, str]] = []
-    for reference in requested:
-        try:
-            source_name, contract_name = reference.rsplit(":", maxsplit=1)
-        except ValueError as error:
-            raise ArtifactError(f"invalid artifact reference: {reference}") from error
-        if source_name not in declared_sources:
-            raise ArtifactError(
-                f"deployment artifact source is not declared: {source_name}"
-            )
-        parsed_requests.append((source_name, contract_name))
-
-    build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
+def _build_target_in_workspace(
+    manifest: TargetManifest,
+    root: Path,
+    parsed_requests: list[tuple[str, str]],
+    build_root: Path,
+) -> ArtifactBundle:
     output_root = build_root / "out"
     overrides = {
         "FOUNDRY_OUT": str(output_root),
@@ -317,7 +337,11 @@ def build_target(manifest: TargetManifest) -> ArtifactBundle:
     compiler_versions: set[str] = set()
     evm_versions: set[str] = set()
     for source_name, contract_name in parsed_requests:
-        path = output_root / source_name / f"{contract_name}.json"
+        path = _inside(
+            output_root / source_name / f"{contract_name}.json",
+            output_root,
+            "artifact",
+        )
         if not path.is_file():
             raise ArtifactError(
                 f"requested artifact is missing from fresh build: "
@@ -365,4 +389,42 @@ def build_target(manifest: TargetManifest) -> ArtifactBundle:
         tool_version=tool_version,
         build_command=BUILD_COMMAND,
         artifacts=tuple(artifacts),
+        _evidence_root=build_root,
     )
+
+
+def build_target(manifest: TargetManifest) -> ArtifactBundle:
+    """Build a target in isolated outputs and retain its compiler evidence."""
+
+    root = manifest.target.project_root.resolve()
+    if not root.is_dir():
+        raise ArtifactError(f"project root is missing: {root}")
+    declared_sources = {
+        _inside(source, root, "source file").relative_to(root).as_posix()
+        for source in manifest.target.source_files
+    }
+    requested = sorted({deployment.artifact for deployment in manifest.deployments})
+    parsed_requests: list[tuple[str, str]] = []
+    for reference in requested:
+        try:
+            source_name, contract_name = reference.rsplit(":", maxsplit=1)
+        except ValueError as error:
+            raise ArtifactError(f"invalid artifact reference: {reference}") from error
+        if source_name not in declared_sources:
+            raise ArtifactError(
+                f"deployment artifact source is not declared: {source_name}"
+            )
+        if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", contract_name) is None:
+            raise ArtifactError(
+                f"invalid artifact contract identifier: {contract_name}"
+            )
+        parsed_requests.append((source_name, contract_name))
+
+    build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
+    try:
+        return _build_target_in_workspace(
+            manifest, root, parsed_requests, build_root
+        )
+    except BaseException:
+        shutil.rmtree(build_root, ignore_errors=True)
+        raise

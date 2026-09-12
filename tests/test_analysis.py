@@ -1,5 +1,6 @@
 import json
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from test_artifacts import fixture_manifest_data
 from qprover.analysis import AnalysisReport, analyze
 from qprover.artifacts import ArtifactBundle, build_target
 from qprover.manifest import load_manifest
+from qprover.models import TargetManifest
 
 
 def build_artifact_bundle(tmp_path: Path) -> ArtifactBundle:
@@ -20,12 +22,17 @@ def build_artifact_bundle(tmp_path: Path) -> ArtifactBundle:
 
 
 def build_analysis_report(tmp_path: Path) -> AnalysisReport:
-    return analyze(build_artifact_bundle(tmp_path))
+    with build_artifact_bundle(tmp_path) as bundle:
+        return analyze(bundle)
 
 
 @pytest.fixture
-def artifact_bundle(tmp_path: Path) -> ArtifactBundle:
-    return build_artifact_bundle(tmp_path)
+def artifact_bundle(tmp_path: Path) -> Iterator[ArtifactBundle]:
+    bundle = build_artifact_bundle(tmp_path)
+    try:
+        yield bundle
+    finally:
+        bundle.close()
 
 
 @pytest.fixture
@@ -45,6 +52,7 @@ def test_analysis_extracts_exact_functions_and_storage(report: AnalysisReport) -
         "pairwiseOrdering(address,address)",
         "setOperator(address)",
         "tokenTransfer(address,address,uint256)",
+        "uncorrelatedOrdering(address,address)",
         "updatePrice(address)",
         "withdraw()",
     )
@@ -175,7 +183,24 @@ def _zero_arg_action(action_id: str, target_id: str, signature: str) -> dict:
     }
 
 
-def build_multi_source_report(tmp_path: Path) -> AnalysisReport:
+def _address_action(action_id: str, target_id: str, signature: str) -> dict:
+    action = _zero_arg_action(action_id, target_id, signature)
+    action["arguments"] = [
+        {
+            "name": "recipient",
+            "type": "address",
+            "domain": {
+                "kind": "finite",
+                "values": ["0x0000000000000000000000000000000000000001"],
+            },
+        }
+    ]
+    return action
+
+
+def build_multi_source_target(
+    tmp_path: Path,
+) -> tuple[AnalysisReport, TargetManifest]:
     project = tmp_path / "multi"
     project.mkdir()
     (project / "foundry.toml").write_text(
@@ -185,13 +210,19 @@ def build_multi_source_report(tmp_path: Path) -> AnalysisReport:
     )
     (project / "Base.sol").write_text(
         "pragma solidity 0.8.34; contract Base { uint256 internal total; "
-        "function _credit() internal { total += 1; } }",
+        "function _credit() internal { total += 1; } "
+        "function inheritedSink(address payable recipient) public { "
+        "recipient.transfer(1); } "
+        "function overriddenSink(address payable recipient) public virtual { "
+        "recipient.transfer(1); } }",
         encoding="utf-8",
     )
     (project / "Derived.sol").write_text(
         'pragma solidity 0.8.34; import "./Base.sol"; contract Derived is Base {'
         "function deposit() external { _credit(); } "
-        "function withdraw() external view returns (uint256) { return total; } }",
+        "function withdraw() external view returns (uint256) { return total; } "
+        "function overriddenSink(address payable recipient) public override { "
+        "recipient.transfer(1); } }",
         encoding="utf-8",
     )
     (project / "A.sol").write_text(
@@ -234,10 +265,23 @@ def build_multi_source_report(tmp_path: Path) -> AnalysisReport:
         _zero_arg_action("b_read", "b", "read()"),
         _zero_arg_action("deposit", "derived", "deposit()"),
         _zero_arg_action("withdraw", "derived", "withdraw()"),
+        _address_action(
+            "inherited_sink", "derived", "inheritedSink(address)"
+        ),
+        _address_action(
+            "overridden_sink", "derived", "overriddenSink(address)"
+        ),
     ]
     manifest_path = tmp_path / "target.json"
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")
-    return analyze(build_target(load_manifest(manifest_path)))
+    manifest = load_manifest(manifest_path)
+    with build_target(manifest) as bundle:
+        return analyze(bundle), manifest
+
+
+def build_multi_source_report(tmp_path: Path) -> AnalysisReport:
+    report, _ = build_multi_source_target(tmp_path)
+    return report
 
 
 def test_analysis_resolves_inherited_storage_and_internal_calls(
@@ -264,3 +308,10 @@ def test_analysis_keeps_duplicate_contract_names_source_qualified(
     assert first.canonical_id != second.canonical_id
     assert first.source_name == "A.sol"
     assert second.source_name == "B.sol"
+
+
+def test_unknown_source_offsets_never_create_ordering() -> None:
+    import qprover.analysis as analysis_module
+
+    assert analysis_module._known_before("unknown", "10:2:0") is False
+    assert analysis_module._known_before("1:2:0", "unknown") is False

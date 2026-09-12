@@ -34,6 +34,12 @@ def _src_start(source_span: str) -> int:
         return -1
 
 
+def _known_before(first_span: str, second_span: str) -> bool:
+    first = _src_start(first_span)
+    second = _src_start(second_span)
+    return first >= 0 and second >= 0 and first < second
+
+
 def _walk(value: object) -> Iterator[Mapping[str, Any]]:
     if isinstance(value, Mapping):
         yield value
@@ -167,6 +173,8 @@ class ContractFacts:
     declaration_id: int
     kind: str
     source_span: str
+    linearized_base_contracts: tuple[str, ...]
+    abi_signatures: tuple[str, ...]
     storage: tuple[StorageFacts, ...]
     functions: tuple[FunctionFacts, ...]
 
@@ -489,7 +497,7 @@ def _extract_function(
                 )
                 for call in external_calls
                 for storage_id, write_span in write_events
-                if _src_start(call.source_span) < _src_start(write_span)
+                if _known_before(call.source_span, write_span)
             ),
             key=lambda item: (
                 _src_start(item.call_source_span),
@@ -589,6 +597,33 @@ def _with_transitive(functions: Iterable[FunctionFacts]) -> dict[str, FunctionFa
     }
 
 
+def _abi_type(parameter: Mapping[str, Any]) -> str:
+    type_name = parameter.get("type")
+    if not isinstance(type_name, str):
+        return "unknown"
+    if not type_name.startswith("tuple"):
+        return type_name
+    components = parameter.get("components")
+    if not isinstance(components, (tuple, list)):
+        return type_name
+    suffix = type_name[len("tuple") :]
+    return f"({','.join(_abi_type(item) for item in components)}){suffix}"
+
+
+def _abi_signatures(abi: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
+    signatures = set()
+    for item in abi:
+        if item.get("type") != "function" or not isinstance(item.get("name"), str):
+            continue
+        inputs = item.get("inputs", ())
+        if not isinstance(inputs, (tuple, list)):
+            continue
+        signatures.add(
+            f"{item['name']}({','.join(_abi_type(parameter) for parameter in inputs)})"
+        )
+    return tuple(sorted(signatures))
+
+
 def analyze(bundle: ArtifactBundle) -> AnalysisReport:
     """Extract deterministic, source-qualified facts from the full compiler closure."""
 
@@ -612,6 +647,10 @@ def analyze(bundle: ArtifactBundle) -> AnalysisReport:
             source_name, str(node["name"]), int(node["id"])
         )
         for source_name, node in contract_nodes
+    }
+    abi_by_artifact = {
+        artifact.compilation_target: _abi_signatures(artifact.abi)
+        for artifact in bundle.artifacts
     }
     function_identities: dict[int, tuple[_ContractIdentity, str, str]] = {}
     function_contract: dict[int, _ContractIdentity] = {}
@@ -718,6 +757,14 @@ def analyze(bundle: ArtifactBundle) -> AnalysisReport:
                 declaration_id=identity.declaration_id,
                 kind=str(node.get("contractKind", "unknown")),
                 source_span=str(node.get("src", "unknown")),
+                linearized_base_contracts=tuple(
+                    contract_identities[declaration_id].canonical_id
+                    for declaration_id in node.get("linearizedBaseContracts", ())
+                    if declaration_id in contract_identities
+                ),
+                abi_signatures=abi_by_artifact.get(
+                    f"{source_name}:{identity.name}", ()
+                ),
                 storage=storage,
                 functions=functions,
             )

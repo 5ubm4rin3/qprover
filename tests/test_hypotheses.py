@@ -1,7 +1,7 @@
 import dataclasses
 
 import pytest
-from test_analysis import build_analysis_report
+from test_analysis import build_analysis_report, build_multi_source_target
 from test_artifacts import fixture_manifest_data
 
 from qprover.analysis import AnalysisReport
@@ -25,15 +25,17 @@ def fixture_manifest(report: AnalysisReport) -> TargetManifest:
 def test_graph_dependency_is_consumed_by_hypothesis(report: AnalysisReport) -> None:
     graph = build_program_graph(report)
     hypotheses = generate_hypotheses(graph, fixture_manifest(report))
+    hypothesis = next(
+        item for item in hypotheses if item.action_ids == ("deposit", "withdraw")
+    )
 
-    assert hypotheses[0].kind == "external-call-before-state-write"
-    assert hypotheses[0].action_ids == ("deposit", "withdraw")
-    assert hypotheses[0].action_signatures == ("deposit()", "withdraw()")
-    assert hypotheses[0].evidence
-    assert hypotheses[0].provenance
-    assert hypotheses[0].assumed_ordering == ("deposit", "withdraw")
+    assert hypothesis.kind == "external-call-before-state-write"
+    assert hypothesis.action_signatures == ("deposit()", "withdraw()")
+    assert hypothesis.evidence
+    assert hypothesis.provenance
+    assert hypothesis.assumed_ordering == ("deposit", "withdraw")
     assert all(
-        "Fixture.sol" in function_id for function_id in hypotheses[0].function_ids
+        "Fixture.sol" in function_id for function_id in hypothesis.function_ids
     )
 
 
@@ -94,3 +96,75 @@ def test_hypothesis_deduplication_preserves_action_aliases(
     }
 
     assert weak_sink_actions == {("withdraw",), ("withdraw_alias",)}
+
+
+def test_hypotheses_map_inherited_and_overridden_deployment_actions(
+    tmp_path,
+) -> None:
+    report, manifest = build_multi_source_target(tmp_path)
+    graph = build_program_graph(report)
+    hypotheses = generate_hypotheses(graph, manifest)
+    weak = {
+        hypothesis.action_ids[0]: hypothesis.function_ids[0]
+        for hypothesis in hypotheses
+        if hypothesis.kind == "public-value-sink-with-weak-or-unknown-guard"
+    }
+
+    assert weak["inherited_sink"] == report.function(
+        "Base.sol", "Base", "inheritedSink(address)"
+    ).canonical_id
+    assert weak["overridden_sink"] == report.function(
+        "Derived.sol", "Derived", "overriddenSink(address)"
+    ).canonical_id
+
+
+def test_hypotheses_fail_closed_for_unresolved_allowed_action(
+    report: AnalysisReport,
+) -> None:
+    raw = fixture_manifest_data(".")
+    raw["target"]["source_files"] = ["tests/fixtures/analysis/Fixture.sol"]
+    raw["actions"].append(
+        {
+            "id": "missing",
+            "target_id": "fixture",
+            "signature": "missing()",
+            "mutability": "nonpayable",
+            "sender_slots": [1],
+            "arguments": [],
+            "value_domain": {"kind": "finite", "values": [0]},
+            "max_repetitions": 1,
+        }
+    )
+    manifest = TargetManifest.model_validate(raw)
+
+    with pytest.raises(ValueError, match="allowed action.*missing"):
+        generate_hypotheses(build_program_graph(report), manifest)
+
+
+def test_hypotheses_fail_closed_for_ambiguous_deployment_artifact(
+    report: AnalysisReport,
+) -> None:
+    fixture = report.contract("Fixture.sol", "Fixture")
+    duplicate = dataclasses.replace(
+        fixture, canonical_id=f"{fixture.canonical_id}:duplicate"
+    )
+    ambiguous = dataclasses.replace(report, contracts=report.contracts + (duplicate,))
+
+    with pytest.raises(ValueError, match="ambiguous deployment artifact"):
+        generate_hypotheses(
+            build_program_graph(ambiguous), fixture_manifest(ambiguous)
+        )
+
+
+def test_external_call_before_write_hypothesis_requires_same_value_call(
+    report: AnalysisReport,
+) -> None:
+    hypotheses = generate_hypotheses(
+        build_program_graph(report), fixture_manifest(report)
+    )
+
+    assert not any(
+        hypothesis.kind == "external-call-before-state-write"
+        and hypothesis.action_ids[-1] == "uncorrelated_ordering"
+        for hypothesis in hypotheses
+    )

@@ -9,6 +9,10 @@ interface IERC20 {
     function transfer(address recipient, uint256 amount) external returns (bool);
 }
 
+interface PingTarget {
+    function ping() external;
+}
+
 contract Child {}
 
 contract Fixture {
@@ -64,5 +68,12 @@ contract Fixture {
 
     function createChild() external returns (Child) {
         return new Child();
+    }
+
+    function uncorrelatedOrdering(PingTarget target, address payable recipient) external {
+        uint256 prior = balances[msg.sender];
+        target.ping();
+        balances[msg.sender] = prior + 1;
+        recipient.transfer(1 wei);
     }
 }

@@ -29,6 +29,10 @@ def _function_nodes(graph: ProgramGraph) -> tuple[GraphNode, ...]:
     return tuple(node for node in graph.nodes if node.kind == "function")
 
 
+def _contract_nodes(graph: ProgramGraph) -> tuple[GraphNode, ...]:
+    return tuple(node for node in graph.nodes if node.kind == "contract")
+
+
 def _actions_by_function(
     graph: ProgramGraph,
     manifest: TargetManifest,
@@ -36,19 +40,55 @@ def _actions_by_function(
     deployment_artifact = {
         deployment.id: deployment.artifact for deployment in manifest.deployments
     }
-    function_ids = {
-        (
-            str(node.attributes["artifact_ref"]),
+    contract_nodes: dict[str, list[GraphNode]] = {}
+    for node in _contract_nodes(graph):
+        contract_nodes.setdefault(str(node.attributes["artifact_ref"]), []).append(node)
+    functions: dict[tuple[str, str], list[str]] = {}
+    for node in _function_nodes(graph):
+        key = (
+            str(node.attributes["contract_id"]),
             str(node.attributes["signature"]),
-        ): node.id
-        for node in _function_nodes(graph)
-    }
+        )
+        functions.setdefault(key, []).append(node.id)
+
     grouped: dict[str, list[ActionSpec]] = {}
     for action in manifest.actions:
-        key = (deployment_artifact[action.target_id], action.signature)
-        function_id = function_ids.get(key)
-        if function_id is not None:
-            grouped.setdefault(function_id, []).append(action)
+        artifact_ref = deployment_artifact[action.target_id]
+        deployments = contract_nodes.get(artifact_ref, ())
+        if len(deployments) != 1:
+            qualifier = "ambiguous" if deployments else "missing"
+            raise ValueError(
+                f"{qualifier} deployment artifact for allowed action "
+                f"{action.id}: {artifact_ref}"
+            )
+        deployed_contract = deployments[0]
+        abi_signatures = set(deployed_contract.attributes.get("abi_signatures", ()))
+        if action.signature not in abi_signatures:
+            raise ValueError(
+                f"allowed action {action.id} signature absent from deployed ABI: "
+                f"{artifact_ref}:{action.signature}"
+            )
+
+        function_id: str | None = None
+        linearization = deployed_contract.attributes.get(
+            "linearized_base_contracts", (deployed_contract.id,)
+        )
+        for contract_id in linearization:
+            candidates = functions.get((str(contract_id), action.signature), ())
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"ambiguous effective function for allowed action "
+                    f"{action.id}: {artifact_ref}:{action.signature}"
+                )
+            if candidates:
+                function_id = candidates[0]
+                break
+        if function_id is None:
+            raise ValueError(
+                f"allowed action {action.id} has no effective function declaration: "
+                f"{artifact_ref}:{action.signature}"
+            )
+        grouped.setdefault(function_id, []).append(action)
     return {
         function_id: tuple(sorted(actions, key=lambda item: item.id))
         for function_id, actions in grouped.items()
@@ -130,33 +170,37 @@ def generate_hypotheses(
         function_ids = (edge.source, edge.target)
         base_evidence = _edge_evidence(edge)
 
-        if sink_attributes.get("external_call_before_write") and sink_attributes.get(
-            "value_flow"
-        ):
+        value_call_ids = set(sink_attributes.get("value_flow_call_ids", ()))
+        if value_call_ids:
             before_edges = tuple(
                 before
                 for call in graph.out_edges(edge.target, "calls")
+                if graph.node(call.target).attributes.get("ast_id") in value_call_ids
                 for before in graph.out_edges(call.target, "before")
             )
-            evidence = base_evidence + tuple(
-                f"edge:{item.source}->{item.target}:before" for item in before_edges
-            )
-            provenance = edge.provenance + tuple(
-                value for item in before_edges for value in item.provenance
-            )
-            candidates.append(
-                _create(
-                    "external-call-before-state-write",
-                    pair,
-                    function_ids,
-                    evidence,
-                    provenance,
-                    0.9 + 0.05 * graph.transition_benefit(edge.source, edge.target),
-                    "Prioritize a state-establishing action before a value call "
-                    "that precedes its state update; execution is required to "
-                    "validate impact.",
+            if before_edges:
+                evidence = base_evidence + tuple(
+                    f"edge:{item.source}->{item.target}:before"
+                    for item in before_edges
                 )
-            )
+                provenance = edge.provenance + tuple(
+                    value for item in before_edges for value in item.provenance
+                )
+                candidates.append(
+                    _create(
+                        "external-call-before-state-write",
+                        pair,
+                        function_ids,
+                        evidence,
+                        provenance,
+                        0.9
+                        + 0.05
+                        * graph.transition_benefit(edge.source, edge.target),
+                        "Prioritize a state-establishing action before a value call "
+                        "that precedes its state update; execution is required to "
+                        "validate impact.",
+                    )
+                )
 
         guard_storage = set(sink_attributes.get("role_guards", ()))
         dependency_storage = set(edge.attributes.get("storage", ()))

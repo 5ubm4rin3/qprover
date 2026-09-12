@@ -232,7 +232,13 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
             contract.canonical_id,
             "contract",
             (contract.source_name, contract.source_span),
-            {"source_name": contract.source_name, "contract": contract.name},
+            {
+                "source_name": contract.source_name,
+                "contract": contract.name,
+                "artifact_ref": f"{contract.source_name}:{contract.name}",
+                "linearized_base_contracts": contract.linearized_base_contracts,
+                "abi_signatures": contract.abi_signatures,
+            },
         )
         for storage in contract.storage:
             _add_node(
@@ -259,6 +265,7 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                     "contract": function.contract,
                     "source_name": function.source_name,
                     "artifact_ref": f"{function.source_name}:{function.contract}",
+                    "contract_id": contract.canonical_id,
                     "visibility": function.visibility,
                     "storage_reads": function.storage_reads,
                     "storage_writes": function.storage_writes,
@@ -267,6 +274,9 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                     "role_guards": function.role_guards,
                     "oracle_calls": function.oracle_calls,
                     "value_flow": bool(function.value_flows),
+                    "value_flow_call_ids": tuple(
+                        sorted(flow.ast_id for flow in function.value_flows)
+                    ),
                     "external_call_before_write": function.external_call_before_write,
                 },
             )
@@ -291,6 +301,7 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                         "member_name": call.member_name,
                         "call_kind": call.kind,
                         "receiver_type": call.receiver_type,
+                        "ast_id": call.ast_id,
                     },
                 )
             for guard_storage_id in function.role_guards:
@@ -316,6 +327,7 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                         "asset": flow.asset,
                         "operation": flow.operation,
                         "direction": flow.direction,
+                        "call_ast_id": flow.ast_id,
                     },
                 )
             for oracle_name in function.oracle_calls:
