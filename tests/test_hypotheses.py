@@ -32,6 +32,9 @@ def test_graph_dependency_is_consumed_by_hypothesis(report: AnalysisReport) -> N
     assert hypotheses[0].evidence
     assert hypotheses[0].provenance
     assert hypotheses[0].assumed_ordering == ("deposit", "withdraw")
+    assert all(
+        "Fixture.sol" in function_id for function_id in hypotheses[0].function_ids
+    )
 
 
 def test_hypotheses_cover_role_and_oracle_dependency_motifs(
@@ -68,3 +71,26 @@ def test_hypotheses_are_ranked_deduplicated_non_verdict_records(
     )
     assert all(0 <= hypothesis.score <= 1 for hypothesis in hypotheses)
     assert all("confirmed" not in dataclasses.asdict(item) for item in hypotheses)
+
+
+def test_hypothesis_deduplication_preserves_action_aliases(
+    report: AnalysisReport,
+) -> None:
+    raw = fixture_manifest_data(".")
+    raw["target"]["source_files"] = ["tests/fixtures/analysis/Fixture.sol"]
+    alias = dict(
+        next(action for action in raw["actions"] if action["id"] == "withdraw")
+    )
+    alias["id"] = "withdraw_alias"
+    raw["actions"].append(alias)
+    manifest = TargetManifest.model_validate(raw)
+
+    hypotheses = generate_hypotheses(build_program_graph(report), manifest)
+    weak_sink_actions = {
+        hypothesis.action_ids
+        for hypothesis in hypotheses
+        if hypothesis.kind == "public-value-sink-with-weak-or-unknown-guard"
+        and hypothesis.action_signatures == ("withdraw()",)
+    }
+
+    assert weak_sink_actions == {("withdraw",), ("withdraw_alias",)}

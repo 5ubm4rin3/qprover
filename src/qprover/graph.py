@@ -10,7 +10,7 @@ from typing import Any
 
 import networkx as nx
 
-from qprover.analysis import AnalysisReport, FunctionFacts
+from qprover.analysis import AnalysisReport
 
 NODE_KINDS = frozenset(
     {
@@ -73,6 +73,10 @@ class ProgramGraph:
 
     def __init__(self, graph: nx.MultiDiGraph) -> None:
         self._graph = graph.copy()
+
+    @property
+    def node_kinds(self) -> frozenset[str]:
+        return NODE_KINDS
 
     @property
     def nodes(self) -> tuple[GraphNode, ...]:
@@ -202,46 +206,59 @@ def _add_edge(
 ) -> None:
     if kind not in EDGE_KINDS:
         raise ValueError(f"unsupported graph edge kind: {kind}")
+    missing = [node_id for node_id in (source, target) if node_id not in graph]
+    if missing:
+        raise ValueError(
+            f"graph edge {kind} references untyped node: {sorted(missing)[0]}"
+        )
     record = GraphEdge(source, target, kind, provenance, _immutable(attributes))
     key = f"{kind}:{len(graph.get_edge_data(source, target, default={}))}"
     graph.add_edge(source, target, key=key, record=record)
-
-
-def _function_id(function: FunctionFacts) -> str:
-    return f"function:{function.contract}:{function.signature}"
 
 
 def build_program_graph(report: AnalysisReport) -> ProgramGraph:
     """Build a graph whose transitions are backed by compiler AST provenance."""
 
     graph = nx.MultiDiGraph()
-    functions: list[FunctionFacts] = []
+    functions = [
+        function for contract in report.contracts for function in contract.functions
+    ]
+
+    # Define every typed endpoint before adding any edge. NetworkX must never
+    # create an implicit node as a side effect of an edge insertion.
     for contract in report.contracts:
-        contract_id = f"contract:{contract.name}"
-        _add_node(graph, contract_id, "contract", (contract.source_span,))
+        _add_node(
+            graph,
+            contract.canonical_id,
+            "contract",
+            (contract.source_name, contract.source_span),
+            {"source_name": contract.source_name, "contract": contract.name},
+        )
         for storage in contract.storage:
-            storage_id = f"storage:{contract.name}:{storage.name}"
             _add_node(
                 graph,
-                storage_id,
+                storage.canonical_id,
                 "storage",
-                (storage.source_span,),
-                {"slot": storage.slot, "type": storage.type_name},
-            )
-            _add_edge(
-                graph, contract_id, storage_id, "contains", (storage.source_span,)
+                (storage.source_name, storage.source_span),
+                {
+                    "source_name": storage.source_name,
+                    "contract": storage.contract,
+                    "name": storage.name,
+                    "slot": storage.slot,
+                    "type": storage.type_name,
+                },
             )
         for function in contract.functions:
-            functions.append(function)
-            function_id = _function_id(function)
             _add_node(
                 graph,
-                function_id,
+                function.canonical_id,
                 "function",
-                (function.source_span,),
+                (function.source_name, function.source_span),
                 {
                     "signature": function.signature,
                     "contract": function.contract,
+                    "source_name": function.source_name,
+                    "artifact_ref": f"{function.source_name}:{function.contract}",
                     "visibility": function.visibility,
                     "storage_reads": function.storage_reads,
                     "storage_writes": function.storage_writes,
@@ -253,110 +270,155 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                     "external_call_before_write": function.external_call_before_write,
                 },
             )
-            _add_edge(
-                graph, contract_id, function_id, "contains", (function.source_span,)
-            )
-            for storage_name in function.storage_reads:
-                _add_edge(
-                    graph,
-                    function_id,
-                    f"storage:{function.contract}:{storage_name}",
-                    "reads",
-                    (function.source_span,),
-                )
-            for storage_name in function.storage_writes:
-                _add_edge(
-                    graph,
-                    function_id,
-                    f"storage:{function.contract}:{storage_name}",
-                    "writes",
-                    (function.source_span,),
-                )
-            call_nodes: list[tuple[str, int]] = []
+
+    external_call_ids: dict[tuple[str, int], str] = {}
+    for contract in report.contracts:
+        for function in contract.functions:
             for call in function.calls:
-                if call.kind == "internal" and call.callee_signature:
-                    target_id = (
-                        f"function:{call.callee_contract}:{call.callee_signature}"
-                    )
-                elif call.kind == "builtin":
+                if call.kind in {"internal", "builtin", "creation"}:
                     continue
-                else:
-                    target_id = (
-                        f"external_call:{function.contract}:{function.signature}:"
-                        f"{call.member_name}:{call.ast_id}"
-                    )
-                    _add_node(
-                        graph,
-                        target_id,
-                        "external_call",
-                        (call.source_span,),
-                        {"member_name": call.member_name, "call_kind": call.kind},
-                    )
-                    call_nodes.append((target_id, int(call.source_span.split(":")[0])))
-                _add_edge(
+                call_id = (
+                    f"external_call:{function.canonical_id}:"
+                    f"{call.member_name}:{call.ast_id}"
+                )
+                external_call_ids[(function.canonical_id, call.ast_id)] = call_id
+                _add_node(
                     graph,
-                    function_id,
-                    target_id,
-                    "calls",
-                    (call.source_span,),
-                    {"call_kind": call.kind},
+                    call_id,
+                    "external_call",
+                    (function.source_name, call.source_span),
+                    {
+                        "member_name": call.member_name,
+                        "call_kind": call.kind,
+                        "receiver_type": call.receiver_type,
+                    },
                 )
-            for guard_name in function.role_guards:
-                guard_id = (
-                    f"actor_guard:{function.contract}:{function.signature}:{guard_name}"
-                )
+            for guard_storage_id in function.role_guards:
+                guard_id = f"actor_guard:{function.canonical_id}:{guard_storage_id}"
                 _add_node(
                     graph,
                     guard_id,
                     "actor_guard",
-                    (function.source_span,),
-                    {"storage": guard_name},
-                )
-                _add_edge(
-                    graph, function_id, guard_id, "guards", (function.source_span,)
+                    (function.source_name, function.source_span),
+                    {"storage": guard_storage_id},
                 )
             for index, flow in enumerate(function.value_flows):
                 flow_id = (
-                    f"value_flow:{function.contract}:{function.signature}:"
+                    f"value_flow:{function.canonical_id}:"
                     f"{flow.operation}:{flow.ast_id}:{index}"
                 )
                 _add_node(
                     graph,
                     flow_id,
                     "value_flow",
-                    (flow.source_span,),
-                    {"asset": flow.asset, "operation": flow.operation},
+                    (function.source_name, flow.source_span),
+                    {
+                        "asset": flow.asset,
+                        "operation": flow.operation,
+                        "direction": flow.direction,
+                    },
                 )
-                _add_edge(graph, function_id, flow_id, "transfers", (flow.source_span,))
             for oracle_name in function.oracle_calls:
-                oracle_id = (
-                    f"oracle:{function.contract}:{function.signature}:{oracle_name}"
-                )
+                oracle_id = f"oracle:{function.canonical_id}:{oracle_name}"
                 _add_node(
                     graph,
                     oracle_id,
                     "oracle",
-                    (function.source_span,),
+                    (function.source_name, function.source_span),
                     {"selector": oracle_name},
                 )
+
+    for contract in report.contracts:
+        for storage in contract.storage:
+            _add_edge(
+                graph,
+                contract.canonical_id,
+                storage.canonical_id,
+                "contains",
+                (storage.source_name, storage.source_span),
+            )
+        for function in contract.functions:
+            function_id = function.canonical_id
+            _add_edge(
+                graph,
+                contract.canonical_id,
+                function_id,
+                "contains",
+                (function.source_name, function.source_span),
+            )
+            for storage_id in function.storage_reads:
+                _add_edge(
+                    graph,
+                    function_id,
+                    storage_id,
+                    "reads",
+                    (function.source_name, function.source_span),
+                )
+            for storage_id in function.storage_writes:
+                _add_edge(
+                    graph,
+                    function_id,
+                    storage_id,
+                    "writes",
+                    (function.source_name, function.source_span),
+                )
+            for call in function.calls:
+                if call.kind in {"internal", "creation"} and call.callee_id:
+                    target_id = call.callee_id
+                elif call.kind == "builtin":
+                    continue
+                else:
+                    target_id = external_call_ids[(function_id, call.ast_id)]
+                _add_edge(
+                    graph,
+                    function_id,
+                    target_id,
+                    "calls",
+                    (function.source_name, call.source_span),
+                    {"call_kind": call.kind},
+                )
+            for guard_storage_id in function.role_guards:
+                guard_id = f"actor_guard:{function_id}:{guard_storage_id}"
+                _add_edge(
+                    graph,
+                    function_id,
+                    guard_id,
+                    "guards",
+                    (function.source_name, function.source_span),
+                )
+            for index, flow in enumerate(function.value_flows):
+                flow_id = (
+                    f"value_flow:{function_id}:{flow.operation}:{flow.ast_id}:{index}"
+                )
+                _add_edge(
+                    graph,
+                    function_id,
+                    flow_id,
+                    "transfers",
+                    (function.source_name, flow.source_span),
+                )
+            for oracle_name in function.oracle_calls:
+                oracle_id = f"oracle:{function_id}:{oracle_name}"
                 _add_edge(
                     graph,
                     function_id,
                     oracle_id,
                     "prices_from",
-                    (function.source_span,),
+                    (function.source_name, function.source_span),
                 )
-            if function.external_call_before_write:
-                for call_id, call_position in call_nodes:
-                    for storage_name in function.storage_writes:
-                        storage_id = f"storage:{function.contract}:{storage_name}"
-                        _add_edge(
-                            graph,
-                            call_id,
-                            storage_id,
-                            "before",
-                            (f"source-offset:{call_position}", function.source_span),
-                        )
+            for ordered in function.ordered_call_writes:
+                call_id = external_call_ids[(function_id, ordered.call_ast_id)]
+                _add_edge(
+                    graph,
+                    call_id,
+                    ordered.storage_id,
+                    "before",
+                    (
+                        function.source_name,
+                        ordered.call_source_span,
+                        ordered.write_source_span,
+                    ),
+                )
 
     public_functions = [
         function
@@ -378,16 +440,18 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
             provenance = tuple(
                 sorted(
                     {
+                        writer.source_name,
                         writer.source_span,
+                        reader.source_name,
                         reader.source_span,
-                        *(f"storage:{writer.contract}:{name}" for name in dependency),
+                        *dependency,
                     }
                 )
             )
             _add_edge(
                 graph,
-                _function_id(writer),
-                _function_id(reader),
+                writer.canonical_id,
+                reader.canonical_id,
                 "depends_on",
                 provenance,
                 {"storage": dependency},

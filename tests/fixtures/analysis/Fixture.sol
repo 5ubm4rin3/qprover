@@ -5,6 +5,12 @@ interface PriceOracle {
     function getPrice() external view returns (uint256);
 }
 
+interface IERC20 {
+    function transfer(address recipient, uint256 amount) external returns (bool);
+}
+
+contract Child {}
+
 contract Fixture {
     mapping(address account => uint256 amount) public balances;
     address public operator;
@@ -42,5 +48,21 @@ contract Fixture {
     function oracleSink(address payable recipient) external {
         require(cachedPrice > 0);
         recipient.transfer(1 wei);
+    }
+
+    function pairwiseOrdering(address payable first, address payable second) external {
+        operator = msg.sender;
+        (bool firstSuccess,) = first.call{value: 1 wei}("");
+        balances[msg.sender] = 1;
+        (bool secondSuccess,) = second.call{value: 1 wei}("");
+        require(firstSuccess && secondSuccess);
+    }
+
+    function tokenTransfer(IERC20 token, address recipient, uint256 amount) external {
+        require(token.transfer(recipient, amount));
+    }
+
+    function createChild() external returns (Child) {
+        return new Child();
     }
 }

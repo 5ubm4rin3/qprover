@@ -159,8 +159,13 @@ def test_build_target_preserves_compiler_evidence(analysis_manifest: Path) -> No
     assert bundle.artifacts[0].bytecode.startswith("0x")
     assert len(bundle.source_sha256) == 64
     assert len(bundle.manifest_sha256) == 64
+    assert len(bundle.build_info_sha256) == 64
+    assert bundle.build_info_path.is_file()
+    assert bundle.source_names == ("Fixture.sol",)
     assert len(bundle.artifacts[0].artifact_sha256) == 64
     assert len(bundle.artifacts[0].bytecode_sha256) == 64
+    assert bundle.artifacts[0].compilation_target == "Fixture.sol:Fixture"
+    assert bundle.artifacts[0].build_info_id == bundle.build_info_id
 
 
 def test_build_target_source_hash_changes_with_source(
@@ -189,10 +194,9 @@ def test_build_target_rejects_artifact_missing_required_evidence(
     analysis_manifest: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest = load_manifest(analysis_manifest)
-    build_target(manifest)
-    artifact_path = (
-        manifest.target.project_root / "out" / "Fixture.sol" / "Fixture.json"
-    )
+    bundle = build_target(manifest)
+    artifact_path = bundle.artifacts[0].artifact_path
+    build_root = bundle.build_info_path.parents[2]
     raw = json.loads(artifact_path.read_text(encoding="utf-8"))
     raw.pop("abi")
     artifact_path.write_text(json.dumps(raw), encoding="utf-8")
@@ -206,6 +210,9 @@ def test_build_target_rejects_artifact_missing_required_evidence(
         )()
 
     monkeypatch.setattr("qprover.artifacts.subprocess.run", preserve_modified_artifact)
+    monkeypatch.setattr(
+        "qprover.artifacts.tempfile.mkdtemp", lambda **kwargs: str(build_root)
+    )
 
     with pytest.raises(ArtifactError, match="missing ABI"):
         build_target(manifest)
@@ -219,3 +226,60 @@ def test_recorded_artifact_hash_matches_raw_file(analysis_manifest: Path) -> Non
         artifact.artifact_sha256
         == hashlib.sha256(artifact.artifact_path.read_bytes()).hexdigest()
     )
+
+
+def test_build_target_rejects_undeclared_deployment_source(
+    analysis_manifest: Path,
+) -> None:
+    raw = json.loads(analysis_manifest.read_text(encoding="utf-8"))
+    project = analysis_manifest.parent / "fixture"
+    (project / "Extra.sol").write_text(
+        "pragma solidity 0.8.34; contract Extra {}", encoding="utf-8"
+    )
+    raw["deployments"][0]["artifact"] = "Extra.sol:Extra"
+    analysis_manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(
+        ArtifactError, match="deployment artifact source is not declared"
+    ):
+        build_target(load_manifest(analysis_manifest))
+
+
+def test_source_hash_covers_transitive_compiler_inputs(
+    analysis_manifest: Path,
+) -> None:
+    project = analysis_manifest.parent / "fixture"
+    dependency = project / "Dependency.sol"
+    dependency.write_text(
+        "pragma solidity 0.8.34; library Dependency { uint256 constant X = 1; }",
+        encoding="utf-8",
+    )
+    fixture = project / "Fixture.sol"
+    fixture.write_text(
+        'import "./Dependency.sol";\n' + fixture.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    manifest = load_manifest(analysis_manifest)
+    first = build_target(manifest)
+
+    dependency.write_text(
+        "pragma solidity 0.8.34; library Dependency { uint256 constant X = 2; }",
+        encoding="utf-8",
+    )
+    second = build_target(manifest)
+
+    assert first.source_sha256 != second.source_sha256
+    assert first.source_names == ("Dependency.sol", "Fixture.sol")
+
+
+def test_each_build_is_bound_to_fresh_isolated_build_info(
+    analysis_manifest: Path,
+) -> None:
+    manifest = load_manifest(analysis_manifest)
+
+    first = build_target(manifest)
+    second = build_target(manifest)
+
+    assert first.build_info_path != second.build_info_path
+    assert first.artifacts[0].artifact_path != second.artifacts[0].artifact_path
+    assert first.build_info_sha256 == second.build_info_sha256

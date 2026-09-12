@@ -10,19 +10,20 @@ from typing import Any
 
 from qprover.artifacts import ArtifactBundle
 
-_LOW_LEVEL_MEMBERS = {
-    "call",
-    "delegatecall",
-    "send",
-    "transfer",
-    "selfdestruct",
-}
 _ORACLE_MEMBERS = {
     "getprice",
     "latestanswer",
     "latestrounddata",
     "getreserves",
     "price",
+}
+_TOKEN_MEMBERS = {
+    "approve",
+    "burn",
+    "mint",
+    "safetransferfrom",
+    "transfer",
+    "transferfrom",
 }
 
 
@@ -43,19 +44,10 @@ def _walk(value: object) -> Iterator[Mapping[str, Any]]:
             yield from _walk(child)
 
 
-def _state_identifiers(
-    value: object, state_declarations: Mapping[int, Mapping[str, Any]]
-) -> Iterator[Mapping[str, Any]]:
-    for node in _walk(value):
-        declaration = node.get("referencedDeclaration")
-        if node.get("nodeType") == "Identifier" and declaration in state_declarations:
-            yield node
-
-
 def _parameter_type(parameter: Mapping[str, Any]) -> str:
     description = parameter.get("typeDescriptions")
     type_string = description.get("typeString", "unknown") if description else "unknown"
-    if type_string.startswith("contract ") or type_string.startswith("interface "):
+    if type_string.startswith(("contract ", "interface ")):
         return "address"
     if type_string == "address payable":
         return "address"
@@ -77,9 +69,30 @@ def _parameter_records(node: Mapping[str, Any], field: str) -> tuple[str, ...]:
     return tuple(_parameter_type(item) for item in parameters)
 
 
+def _contract_id(source_name: str, name: str, declaration_id: int) -> str:
+    return f"contract:{source_name}:{name}:{declaration_id}"
+
+
+def _storage_id(
+    source_name: str, contract_name: str, declaration_id: int, name: str
+) -> str:
+    return f"storage:{source_name}:{contract_name}:{declaration_id}:{name}"
+
+
+def _function_id(
+    source_name: str,
+    contract_name: str,
+    declaration_id: int,
+    signature: str,
+) -> str:
+    return f"function:{source_name}:{contract_name}:{declaration_id}:{signature}"
+
+
 @dataclass(frozen=True, slots=True)
 class StorageFacts:
+    source_name: str
     contract: str
+    canonical_id: str
     name: str
     declaration_id: int
     type_name: str
@@ -94,6 +107,8 @@ class CallFact:
     member_name: str
     callee_contract: str | None
     callee_signature: str | None
+    callee_id: str | None
+    receiver_type: str | None
     ast_id: int
     source_span: str
 
@@ -108,9 +123,20 @@ class ValueFlowFact:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderedCallWriteFact:
+    call_ast_id: int
+    call_member_name: str
+    call_source_span: str
+    storage_id: str
+    write_source_span: str
+
+
+@dataclass(frozen=True, slots=True)
 class FunctionFacts:
+    source_name: str
     contract: str
     canonical_name: str
+    canonical_id: str
     signature: str
     declaration_id: int
     visibility: str
@@ -125,6 +151,7 @@ class FunctionFacts:
     value_flows: tuple[ValueFlowFact, ...]
     role_guards: tuple[str, ...]
     oracle_calls: tuple[str, ...]
+    ordered_call_writes: tuple[OrderedCallWriteFact, ...]
     external_call_before_write: bool
     transitive_storage_reads: tuple[str, ...]
     transitive_storage_writes: tuple[str, ...]
@@ -133,8 +160,10 @@ class FunctionFacts:
 
 @dataclass(frozen=True, slots=True)
 class ContractFacts:
+    source_name: str
     name: str
     canonical_name: str
+    canonical_id: str
     declaration_id: int
     kind: str
     source_span: str
@@ -148,26 +177,76 @@ class AnalysisReport:
     artifact_sha256: tuple[str, ...]
     contracts: tuple[ContractFacts, ...]
 
-    def contract(self, name: str) -> ContractFacts:
-        matches = [item for item in self.contracts if item.name == name]
-        if len(matches) != 1:
-            raise KeyError(f"contract not found or ambiguous: {name}")
-        return matches[0]
-
-    def function(self, contract: str, signature: str) -> FunctionFacts:
+    def contract(self, *identity: str) -> ContractFacts:
+        if len(identity) == 1:
+            source_name = None
+            name = identity[0]
+        elif len(identity) == 2:
+            source_name, name = identity
+        else:
+            raise TypeError("contract expects name or source_name, name")
         matches = [
             item
-            for item in self.contract(contract).functions
-            if item.signature == signature
+            for item in self.contracts
+            if item.name == name
+            and (source_name is None or item.source_name == source_name)
         ]
         if len(matches) != 1:
-            raise KeyError(f"function not found or ambiguous: {contract}:{signature}")
+            raise KeyError(f"contract not found or ambiguous: {identity}")
+        return matches[0]
+
+    def function(self, *identity: str) -> FunctionFacts:
+        if len(identity) == 2:
+            contract_name, signature = identity
+            contract = self.contract(contract_name)
+        elif len(identity) == 3:
+            source_name, contract_name, signature = identity
+            contract = self.contract(source_name, contract_name)
+        else:
+            raise TypeError(
+                "function expects contract, signature or source, contract, signature"
+            )
+        matches = [item for item in contract.functions if item.signature == signature]
+        if len(matches) != 1:
+            raise KeyError(f"function not found or ambiguous: {identity}")
+        return matches[0]
+
+    def storage(self, source: str, contract: str, name: str) -> StorageFacts:
+        matches = [
+            item
+            for item in self.contract(source, contract).storage
+            if item.name == name
+        ]
+        if len(matches) != 1:
+            raise KeyError(
+                f"storage not found or ambiguous: {source}:{contract}:{name}"
+            )
         return matches[0]
 
     def to_json(self) -> str:
         return json.dumps(
             dataclasses.asdict(self), sort_keys=True, separators=(",", ":")
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _ContractIdentity:
+    source_name: str
+    name: str
+    declaration_id: int
+
+    @property
+    def canonical_id(self) -> str:
+        return _contract_id(self.source_name, self.name, self.declaration_id)
+
+
+def _state_identifiers(
+    value: object, state_facts: Mapping[int, StorageFacts]
+) -> Iterator[Mapping[str, Any]]:
+    for node in _walk(value):
+        declaration = node.get("referencedDeclaration")
+        if node.get("nodeType") == "Identifier" and declaration in state_facts:
+            yield node
 
 
 def _call_expression(node: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -180,10 +259,22 @@ def _call_expression(node: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return expression
 
 
+def _receiver_type(expression: Mapping[str, Any]) -> str | None:
+    receiver = expression.get("expression")
+    if not isinstance(receiver, Mapping):
+        return None
+    descriptions = receiver.get("typeDescriptions")
+    value = (
+        descriptions.get("typeString") if isinstance(descriptions, Mapping) else None
+    )
+    return value if isinstance(value, str) else None
+
+
 def _call_fact(
     node: Mapping[str, Any],
     declarations: Mapping[int, Mapping[str, Any]],
-    function_contract: Mapping[int, str],
+    function_identities: Mapping[int, tuple[_ContractIdentity, str, str]],
+    contract_identities: Mapping[int, _ContractIdentity],
 ) -> CallFact | None:
     if node.get("kind") == "typeConversion":
         return None
@@ -194,29 +285,56 @@ def _call_fact(
             "<unknown>",
             None,
             None,
+            None,
+            None,
             int(node.get("id", -1)),
             str(node.get("src", "unknown")),
         )
 
-    member_name: str
+    if expression.get("nodeType") == "NewExpression":
+        type_name = expression.get("typeName")
+        reference = (
+            type_name.get("referencedDeclaration")
+            if isinstance(type_name, Mapping)
+            else None
+        )
+        target = (
+            contract_identities.get(reference) if isinstance(reference, int) else None
+        )
+        return CallFact(
+            kind="creation",
+            member_name="new",
+            callee_contract=target.name if target else None,
+            callee_signature=None,
+            callee_id=target.canonical_id if target else None,
+            receiver_type=None,
+            ast_id=int(node.get("id", -1)),
+            source_span=str(node.get("src", "unknown")),
+        )
+
     if expression.get("nodeType") == "MemberAccess":
         member_name = str(expression.get("memberName", "<unknown>"))
+        receiver_type = _receiver_type(expression)
     else:
         member_name = str(expression.get("name", "<unknown>"))
+        receiver_type = None
     reference = expression.get("referencedDeclaration")
-    target = declarations.get(reference) if isinstance(reference, int) else None
-    callee_signature = (
-        _signature(target)
-        if target is not None and target.get("nodeType") == "FunctionDefinition"
-        else None
-    )
-    callee_contract = (
-        function_contract.get(reference) if isinstance(reference, int) else None
-    )
+    target = function_identities.get(reference) if isinstance(reference, int) else None
+    if target:
+        target_contract, callee_signature, callee_id = target
+        callee_contract = target_contract.name
+    else:
+        callee_signature = None
+        callee_id = None
+        callee_contract = None
 
+    native_receiver = receiver_type in {"address", "address payable"}
     if member_name in {"require", "assert"}:
         kind = "builtin"
-    elif member_name in _LOW_LEVEL_MEMBERS:
+    elif (
+        member_name in {"call", "delegatecall", "send", "transfer"}
+        and native_receiver
+    ) or member_name == "selfdestruct":
         kind = "low_level"
     elif expression.get("nodeType") == "MemberAccess":
         kind = "external" if callee_signature is not None else "unknown"
@@ -229,6 +347,8 @@ def _call_fact(
         member_name=member_name,
         callee_contract=callee_contract,
         callee_signature=callee_signature,
+        callee_id=callee_id,
+        receiver_type=receiver_type,
         ast_id=int(node.get("id", -1)),
         source_span=str(node.get("src", "unknown")),
     )
@@ -244,59 +364,92 @@ def _has_msg_sender(value: object) -> bool:
     )
 
 
+def _value_flow(
+    call: CallFact, declarations: Mapping[int, Mapping[str, Any]]
+) -> ValueFlowFact | None:
+    if call.kind == "low_level":
+        if call.member_name in {"send", "transfer", "selfdestruct"}:
+            return ValueFlowFact(
+                "native", call.member_name, "out", call.ast_id, call.source_span
+            )
+        if call.member_name == "call":
+            call_node = declarations.get(call.ast_id)
+            expression = call_node.get("expression") if call_node else None
+            names = (
+                expression.get("names", ()) if isinstance(expression, Mapping) else ()
+            )
+            if "value" in names:
+                return ValueFlowFact(
+                    "native", "call", "out", call.ast_id, call.source_span
+                )
+    if call.kind == "external" and call.member_name.lower() in _TOKEN_MEMBERS:
+        operation = call.member_name
+        if operation.lower() == "approve":
+            direction = "approval"
+        elif operation.lower() in {"mint", "burn", "transferfrom"}:
+            direction = "unknown"
+        else:
+            direction = "out"
+        return ValueFlowFact(
+            "token", operation, direction, call.ast_id, call.source_span
+        )
+    return None
+
+
 def _extract_function(
-    contract_name: str,
+    source_name: str,
+    contract: _ContractIdentity,
     node: Mapping[str, Any],
     declarations: Mapping[int, Mapping[str, Any]],
-    function_contract: Mapping[int, str],
-    state_declarations: Mapping[int, Mapping[str, Any]],
+    function_identities: Mapping[int, tuple[_ContractIdentity, str, str]],
+    contract_identities: Mapping[int, _ContractIdentity],
+    state_facts: Mapping[int, StorageFacts],
 ) -> FunctionFacts:
     body = node.get("body")
     write_occurrences: set[int] = set()
-    write_names: set[str] = set()
+    write_ids: set[str] = set()
     compound_reads: set[str] = set()
-    write_positions: list[int] = []
+    write_events: list[tuple[str, str]] = []
     for candidate in _walk(body):
+        target: object | None = None
+        compound = False
         if candidate.get("nodeType") == "Assignment":
-            identifiers = tuple(
-                _state_identifiers(candidate.get("leftHandSide"), state_declarations)
-            )
-            for identifier in identifiers:
-                write_occurrences.add(int(identifier.get("id", -1)))
-                declaration = state_declarations[identifier["referencedDeclaration"]]
-                write_names.add(str(declaration["name"]))
-                if candidate.get("operator") != "=":
-                    compound_reads.add(str(declaration["name"]))
-            if identifiers:
-                write_positions.append(_src_start(str(candidate.get("src", "-1"))))
+            target = candidate.get("leftHandSide")
+            compound = candidate.get("operator") != "="
         elif candidate.get("nodeType") == "UnaryOperation" and candidate.get(
             "operator"
         ) in {"++", "--", "delete"}:
-            identifiers = tuple(
-                _state_identifiers(candidate.get("subExpression"), state_declarations)
+            target = candidate.get("subExpression")
+            compound = candidate.get("operator") != "delete"
+        if target is None:
+            continue
+        identifiers = tuple(_state_identifiers(target, state_facts))
+        for identifier in identifiers:
+            write_occurrences.add(int(identifier.get("id", -1)))
+            storage = state_facts[identifier["referencedDeclaration"]]
+            write_ids.add(storage.canonical_id)
+            write_events.append(
+                (storage.canonical_id, str(candidate.get("src", "unknown")))
             )
-            for identifier in identifiers:
-                write_occurrences.add(int(identifier.get("id", -1)))
-                declaration = state_declarations[identifier["referencedDeclaration"]]
-                write_names.add(str(declaration["name"]))
-                if candidate.get("operator") != "delete":
-                    compound_reads.add(str(declaration["name"]))
-            if identifiers:
-                write_positions.append(_src_start(str(candidate.get("src", "-1"))))
+            if compound:
+                compound_reads.add(storage.canonical_id)
 
-    read_names = set(compound_reads)
-    for identifier in _state_identifiers(body, state_declarations):
+    read_ids = set(compound_reads)
+    for identifier in _state_identifiers(body, state_facts):
         if int(identifier.get("id", -1)) not in write_occurrences:
-            read_names.add(
-                str(state_declarations[identifier["referencedDeclaration"]]["name"])
-            )
+            read_ids.add(state_facts[identifier["referencedDeclaration"]].canonical_id)
 
     calls = tuple(
         sorted(
             filter(
                 None,
                 (
-                    _call_fact(item, declarations, function_contract)
+                    _call_fact(
+                        item,
+                        declarations,
+                        function_identities,
+                        contract_identities,
+                    )
                     for item in _walk(body)
                     if item.get("nodeType") == "FunctionCall"
                 ),
@@ -304,27 +457,11 @@ def _extract_function(
             key=lambda item: (_src_start(item.source_span), item.ast_id),
         )
     )
-    value_flows: list[ValueFlowFact] = []
-    for call in calls:
-        if call.member_name in {"send", "transfer"}:
-            value_flows.append(
-                ValueFlowFact(
-                    "native", call.member_name, "out", call.ast_id, call.source_span
-                )
-            )
-        elif call.member_name == "call":
-            call_node = declarations.get(call.ast_id)
-            expression = call_node.get("expression") if call_node else None
-            names = (
-                expression.get("names", ()) if isinstance(expression, Mapping) else ()
-            )
-            if "value" in names:
-                value_flows.append(
-                    ValueFlowFact(
-                        "native", "call", "out", call.ast_id, call.source_span
-                    )
-                )
-
+    value_flows = tuple(
+        flow
+        for flow in (_value_flow(call, declarations) for call in calls)
+        if flow is not None
+    )
     role_guards: set[str] = set()
     for candidate in _walk(body):
         if candidate.get("nodeType") != "FunctionCall":
@@ -335,19 +472,31 @@ def _extract_function(
         arguments = candidate.get("arguments", ())
         if _has_msg_sender(arguments):
             role_guards.update(
-                str(state_declarations[item["referencedDeclaration"]]["name"])
-                for item in _state_identifiers(arguments, state_declarations)
+                state_facts[item["referencedDeclaration"]].canonical_id
+                for item in _state_identifiers(arguments, state_facts)
             )
 
-    external_positions = [
-        _src_start(call.source_span)
-        for call in calls
-        if call.kind in {"external", "low_level"}
-    ]
-    before_write = any(
-        call_position >= 0 and write_position >= 0 and call_position < write_position
-        for call_position in external_positions
-        for write_position in write_positions
+    external_calls = [call for call in calls if call.kind in {"external", "low_level"}]
+    ordered_call_writes = tuple(
+        sorted(
+            (
+                OrderedCallWriteFact(
+                    call.ast_id,
+                    call.member_name,
+                    call.source_span,
+                    storage_id,
+                    write_span,
+                )
+                for call in external_calls
+                for storage_id, write_span in write_events
+                if _src_start(call.source_span) < _src_start(write_span)
+            ),
+            key=lambda item: (
+                _src_start(item.call_source_span),
+                _src_start(item.write_source_span),
+                item.storage_id,
+            ),
+        )
     )
     modifiers = tuple(
         sorted(
@@ -367,9 +516,12 @@ def _extract_function(
         )
     )
     signature = _signature(node)
+    canonical_id = _function_id(source_name, contract.name, int(node["id"]), signature)
     return FunctionFacts(
-        contract=contract_name,
-        canonical_name=f"{contract_name}.{signature}",
+        source_name=source_name,
+        contract=contract.name,
+        canonical_name=f"{source_name}:{contract.name}.{signature}",
+        canonical_id=canonical_id,
         signature=signature,
         declaration_id=int(node["id"]),
         visibility=str(node.get("visibility", "unknown")),
@@ -378,161 +530,202 @@ def _extract_function(
         parameters=_parameter_records(node, "parameters"),
         returns=_parameter_records(node, "returnParameters"),
         source_span=str(node.get("src", "unknown")),
-        storage_reads=tuple(sorted(read_names)),
-        storage_writes=tuple(sorted(write_names)),
+        storage_reads=tuple(sorted(read_ids)),
+        storage_writes=tuple(sorted(write_ids)),
         calls=calls,
-        value_flows=tuple(
-            sorted(
-                value_flows,
-                key=lambda item: (_src_start(item.source_span), item.ast_id),
-            )
-        ),
+        value_flows=value_flows,
         role_guards=tuple(sorted(role_guards)),
         oracle_calls=oracle_calls,
-        external_call_before_write=before_write,
-        transitive_storage_reads=tuple(sorted(read_names)),
-        transitive_storage_writes=tuple(sorted(write_names)),
+        ordered_call_writes=ordered_call_writes,
+        external_call_before_write=bool(ordered_call_writes),
+        transitive_storage_reads=tuple(sorted(read_ids)),
+        transitive_storage_writes=tuple(sorted(write_ids)),
         transitive_calls=(),
     )
 
 
-def _with_transitive(functions: Iterable[FunctionFacts]) -> tuple[FunctionFacts, ...]:
-    by_signature = {function.signature: function for function in functions}
-    reads = {
-        signature: set(function.storage_reads)
-        for signature, function in by_signature.items()
-    }
-    writes = {
-        signature: set(function.storage_writes)
-        for signature, function in by_signature.items()
-    }
-    reached = {signature: set() for signature in by_signature}
+def _with_transitive(functions: Iterable[FunctionFacts]) -> dict[str, FunctionFacts]:
+    by_id = {function.canonical_id: function for function in functions}
+    reads = {key: set(value.storage_reads) for key, value in by_id.items()}
+    writes = {key: set(value.storage_writes) for key, value in by_id.items()}
+    reached = {key: set() for key in by_id}
     direct = {
-        signature: {
-            call.callee_signature
+        key: {
+            call.callee_id
             for call in function.calls
-            if call.kind == "internal" and call.callee_signature in by_signature
+            if call.kind == "internal" and call.callee_id in by_id
         }
-        for signature, function in by_signature.items()
+        for key, function in by_id.items()
     }
     changed = True
     while changed:
         changed = False
-        for signature in sorted(by_signature):
+        for function_id in sorted(by_id):
             previous = (
-                set(reads[signature]),
-                set(writes[signature]),
-                set(reached[signature]),
+                set(reads[function_id]),
+                set(writes[function_id]),
+                set(reached[function_id]),
             )
-            for target in direct[signature] | reached[signature]:
-                reads[signature].update(reads[target])
-                writes[signature].update(writes[target])
-                reached[signature].add(target)
-                reached[signature].update(reached[target])
-            reached[signature].discard(signature)
-            if previous != (reads[signature], writes[signature], reached[signature]):
+            for target in direct[function_id] | reached[function_id]:
+                reads[function_id].update(reads[target])
+                writes[function_id].update(writes[target])
+                reached[function_id].add(target)
+                reached[function_id].update(reached[target])
+            reached[function_id].discard(function_id)
+            if previous != (
+                reads[function_id],
+                writes[function_id],
+                reached[function_id],
+            ):
                 changed = True
-    return tuple(
-        replace(
+    return {
+        function_id: replace(
             function,
-            transitive_storage_reads=tuple(sorted(reads[function.signature])),
-            transitive_storage_writes=tuple(sorted(writes[function.signature])),
-            transitive_calls=tuple(
-                sorted(reached[function.signature] | direct[function.signature])
-            ),
+            transitive_storage_reads=tuple(sorted(reads[function_id])),
+            transitive_storage_writes=tuple(sorted(writes[function_id])),
+            transitive_calls=tuple(sorted(reached[function_id] | direct[function_id])),
         )
-        for function in sorted(by_signature.values(), key=lambda item: item.signature)
-    )
+        for function_id, function in by_id.items()
+    }
 
 
 def analyze(bundle: ArtifactBundle) -> AnalysisReport:
-    """Extract deterministic, provenance-bearing facts from compiler ASTs."""
+    """Extract deterministic, source-qualified facts from the full compiler closure."""
+
+    declarations: dict[int, Mapping[str, Any]] = {}
+    declaration_sources: dict[int, str] = {}
+    contract_nodes: list[tuple[str, Mapping[str, Any]]] = []
+    for source_unit in bundle.source_units:
+        for node in _walk(source_unit.ast):
+            declaration_id = node.get("id")
+            if isinstance(declaration_id, int):
+                declarations[declaration_id] = node
+                declaration_sources[declaration_id] = source_unit.source_name
+        contract_nodes.extend(
+            (source_unit.source_name, node)
+            for node in source_unit.ast.get("nodes", ())
+            if node.get("nodeType") == "ContractDefinition"
+        )
+
+    contract_identities = {
+        int(node["id"]): _ContractIdentity(
+            source_name, str(node["name"]), int(node["id"])
+        )
+        for source_name, node in contract_nodes
+    }
+    function_identities: dict[int, tuple[_ContractIdentity, str, str]] = {}
+    function_contract: dict[int, _ContractIdentity] = {}
+    for _, contract_node in contract_nodes:
+        contract = contract_identities[int(contract_node["id"])]
+        for child in contract_node.get("nodes", ()):
+            if (
+                child.get("nodeType") != "FunctionDefinition"
+                or child.get("kind") != "function"
+            ):
+                continue
+            signature = _signature(child)
+            canonical_id = _function_id(
+                contract.source_name, contract.name, int(child["id"]), signature
+            )
+            function_identities[int(child["id"])] = (
+                contract,
+                signature,
+                canonical_id,
+            )
+            function_contract[int(child["id"])] = contract
+
+    layout_by_id: dict[int, Mapping[str, Any]] = {}
+    for artifact in bundle.artifacts:
+        for item in artifact.storage_layout.get("storage", ()):
+            if isinstance(item, Mapping) and isinstance(item.get("astId"), int):
+                layout_by_id[int(item["astId"])] = item
+
+    state_facts: dict[int, StorageFacts] = {}
+    for declaration_id, node in declarations.items():
+        if (
+            node.get("nodeType") != "VariableDeclaration"
+            or node.get("stateVariable") is not True
+        ):
+            continue
+        scope = node.get("scope")
+        contract = contract_identities.get(scope) if isinstance(scope, int) else None
+        if contract is None:
+            continue
+        layout = layout_by_id.get(declaration_id, {})
+        description = node.get("typeDescriptions", {})
+        name = str(node["name"])
+        state_facts[declaration_id] = StorageFacts(
+            source_name=contract.source_name,
+            contract=contract.name,
+            canonical_id=_storage_id(
+                contract.source_name, contract.name, declaration_id, name
+            ),
+            name=name,
+            declaration_id=declaration_id,
+            type_name=str(description.get("typeString", "unknown")),
+            slot=str(layout["slot"]) if "slot" in layout else None,
+            offset=int(layout["offset"]) if "offset" in layout else None,
+            source_span=str(node.get("src", "unknown")),
+        )
+
+    extracted: list[FunctionFacts] = []
+    for declaration_id, (_, _, _) in function_identities.items():
+        contract = function_contract[declaration_id]
+        extracted.append(
+            _extract_function(
+                declaration_sources[declaration_id],
+                contract,
+                declarations[declaration_id],
+                declarations,
+                function_identities,
+                contract_identities,
+                state_facts,
+            )
+        )
+    transitive = _with_transitive(extracted)
 
     contracts: list[ContractFacts] = []
-    seen_contracts: set[tuple[str, int]] = set()
-    for artifact in bundle.artifacts:
-        declarations = {
-            int(node["id"]): node
-            for node in _walk(artifact.ast)
-            if isinstance(node.get("id"), int)
-        }
-        contract_nodes = [
-            node
-            for node in _walk(artifact.ast)
-            if node.get("nodeType") == "ContractDefinition"
-        ]
-        function_contract = {
-            int(function["id"]): str(contract["name"])
-            for contract in contract_nodes
-            for function in contract.get("nodes", ())
-            if function.get("nodeType") == "FunctionDefinition"
-        }
-        state_declarations = {
-            declaration_id: node
-            for declaration_id, node in declarations.items()
-            if node.get("nodeType") == "VariableDeclaration"
-            and node.get("stateVariable") is True
-        }
-        layout_by_id = {
-            int(item["astId"]): item
-            for item in artifact.storage_layout.get("storage", ())
-            if isinstance(item, Mapping) and isinstance(item.get("astId"), int)
-        }
-        for contract in contract_nodes:
-            contract_key = (str(contract["name"]), int(contract["id"]))
-            if contract_key in seen_contracts:
-                continue
-            seen_contracts.add(contract_key)
-            storage: list[StorageFacts] = []
-            functions: list[FunctionFacts] = []
-            for child in contract.get("nodes", ()):
-                if (
-                    child.get("nodeType") == "VariableDeclaration"
-                    and child.get("stateVariable") is True
-                ):
-                    layout = layout_by_id.get(int(child["id"]), {})
-                    description = child.get("typeDescriptions", {})
-                    storage.append(
-                        StorageFacts(
-                            contract=str(contract["name"]),
-                            name=str(child["name"]),
-                            declaration_id=int(child["id"]),
-                            type_name=str(description.get("typeString", "unknown")),
-                            slot=str(layout["slot"]) if "slot" in layout else None,
-                            offset=int(layout["offset"])
-                            if "offset" in layout
-                            else None,
-                            source_span=str(child.get("src", "unknown")),
-                        )
-                    )
-                elif (
-                    child.get("nodeType") == "FunctionDefinition"
-                    and child.get("kind") == "function"
-                ):
-                    functions.append(
-                        _extract_function(
-                            str(contract["name"]),
-                            child,
-                            declarations,
-                            function_contract,
-                            state_declarations,
-                        )
-                    )
-            contracts.append(
-                ContractFacts(
-                    name=str(contract["name"]),
-                    canonical_name=str(contract.get("canonicalName", contract["name"])),
-                    declaration_id=int(contract["id"]),
-                    kind=str(contract.get("contractKind", "unknown")),
-                    source_span=str(contract.get("src", "unknown")),
-                    storage=tuple(sorted(storage, key=lambda item: item.name)),
-                    functions=_with_transitive(functions),
-                )
+    for source_name, node in contract_nodes:
+        identity = contract_identities[int(node["id"])]
+        functions = tuple(
+            sorted(
+                (
+                    transitive[function_identities[int(child["id"])][2]]
+                    for child in node.get("nodes", ())
+                    if int(child.get("id", -1)) in function_identities
+                ),
+                key=lambda item: item.signature,
             )
+        )
+        storage = tuple(
+            sorted(
+                (
+                    state_facts[int(child["id"])]
+                    for child in node.get("nodes", ())
+                    if int(child.get("id", -1)) in state_facts
+                ),
+                key=lambda item: item.name,
+            )
+        )
+        contracts.append(
+            ContractFacts(
+                source_name=source_name,
+                name=identity.name,
+                canonical_name=(
+                    f"{source_name}:{node.get('canonicalName', identity.name)}"
+                ),
+                canonical_id=identity.canonical_id,
+                declaration_id=identity.declaration_id,
+                kind=str(node.get("contractKind", "unknown")),
+                source_span=str(node.get("src", "unknown")),
+                storage=storage,
+                functions=functions,
+            )
+        )
     return AnalysisReport(
         source_sha256=bundle.source_sha256,
         artifact_sha256=tuple(
             sorted(artifact.artifact_sha256 for artifact in bundle.artifacts)
         ),
-        contracts=tuple(sorted(contracts, key=lambda item: item.canonical_name)),
+        contracts=tuple(sorted(contracts, key=lambda item: item.canonical_id)),
     )

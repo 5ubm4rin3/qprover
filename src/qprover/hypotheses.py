@@ -30,16 +30,25 @@ def _function_nodes(graph: ProgramGraph) -> tuple[GraphNode, ...]:
 
 
 def _actions_by_function(
+    graph: ProgramGraph,
     manifest: TargetManifest,
 ) -> dict[str, tuple[ActionSpec, ...]]:
-    deployment_contract = {
-        deployment.id: deployment.artifact.rsplit(":", maxsplit=1)[-1]
-        for deployment in manifest.deployments
+    deployment_artifact = {
+        deployment.id: deployment.artifact for deployment in manifest.deployments
+    }
+    function_ids = {
+        (
+            str(node.attributes["artifact_ref"]),
+            str(node.attributes["signature"]),
+        ): node.id
+        for node in _function_nodes(graph)
     }
     grouped: dict[str, list[ActionSpec]] = {}
     for action in manifest.actions:
-        contract = deployment_contract[action.target_id]
-        grouped.setdefault(f"function:{contract}:{action.signature}", []).append(action)
+        key = (deployment_artifact[action.target_id], action.signature)
+        function_id = function_ids.get(key)
+        if function_id is not None:
+            grouped.setdefault(function_id, []).append(action)
     return {
         function_id: tuple(sorted(actions, key=lambda item: item.id))
         for function_id, actions in grouped.items()
@@ -60,6 +69,7 @@ def _create(
     payload = json.dumps(
         {
             "kind": kind,
+            "actions": tuple(action.id for action in actions),
             "functions": function_ids,
             "evidence": evidence,
             "provenance": provenance,
@@ -99,9 +109,7 @@ def _dependency_candidates(
 
 def _edge_evidence(edge: GraphEdge) -> tuple[str, ...]:
     storage = tuple(str(item) for item in edge.attributes.get("storage", ()))
-    return (f"edge:{edge.source}->{edge.target}:depends_on",) + tuple(
-        f"storage:{item}" for item in storage
-    )
+    return (f"edge:{edge.source}->{edge.target}:depends_on",) + storage
 
 
 def generate_hypotheses(
@@ -109,7 +117,7 @@ def generate_hypotheses(
 ) -> tuple[Hypothesis, ...]:
     """Generate deterministic leads that prioritize executable regression tests."""
 
-    actions = _actions_by_function(manifest)
+    actions = _actions_by_function(graph, manifest)
     nodes = {node.id: node for node in _function_nodes(graph)}
     candidates: list[Hypothesis] = []
     dependencies = _dependency_candidates(graph, actions)
@@ -222,7 +230,7 @@ def generate_hypotheses(
             name
             for name in dependency_storage
             if any(
-                token in name.lower()
+                token in name.rsplit(":", maxsplit=1)[-1].lower()
                 for token in ("nonce", "signature", "permit", "digest", "used")
             )
         }
