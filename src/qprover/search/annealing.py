@@ -19,31 +19,51 @@ class AnnealingConfig:
     temperature_end: float = 0.01
 
     def __post_init__(self) -> None:
-        if self.reads <= 0:
-            raise ValueError("reads must be positive")
-        if self.sweeps <= 0:
-            raise ValueError("sweeps must be positive")
+        if type(self.seed) is not int:
+            raise ValueError("seed must be an exact integer")
+        if type(self.reads) is not int or self.reads <= 0:
+            raise ValueError("reads must be an exact positive integer")
+        if type(self.sweeps) is not int or self.sweeps <= 0:
+            raise ValueError("sweeps must be an exact positive integer")
+        if type(self.temperature_start) not in (int, float) or type(
+            self.temperature_end
+        ) not in (int, float):
+            raise ValueError("temperatures must be finite positive int or float values")
+        try:
+            temperature_start = float(self.temperature_start)
+            temperature_end = float(self.temperature_end)
+        except OverflowError as error:
+            raise ValueError("temperatures must be finite and positive") from error
         if (
-            not math.isfinite(self.temperature_start)
-            or not math.isfinite(self.temperature_end)
-            or self.temperature_start <= 0
-            or self.temperature_end <= 0
+            not math.isfinite(temperature_start)
+            or not math.isfinite(temperature_end)
+            or temperature_start <= 0
+            or temperature_end <= 0
         ):
             raise ValueError("temperatures must be finite and positive")
-        if self.temperature_end > self.temperature_start:
+        if temperature_end > temperature_start:
             raise ValueError("temperature_end cannot exceed temperature_start")
+        object.__setattr__(self, "temperature_start", temperature_start)
+        object.__setattr__(self, "temperature_end", temperature_end)
 
 
 def _flip_delta(bqm: BinaryQuadraticModel, bits: list[int], index: int) -> float:
-    field = bqm.linear.get(index, 0.0)
+    terms = [bqm.linear.get(index, 0.0)]
     for (first, second), coefficient in bqm.quadratic.items():
         if first == second == index:
-            field += coefficient
+            terms.append(coefficient)
         elif first == index:
-            field += coefficient * bits[second]
+            terms.append(coefficient * bits[second])
         elif second == index:
-            field += coefficient * bits[first]
-    return (1 - 2 * bits[index]) * field
+            terms.append(coefficient * bits[first])
+    try:
+        field = math.fsum(terms)
+    except OverflowError as error:
+        raise ValueError("non-finite annealing flip energy") from error
+    delta = (1 - 2 * bits[index]) * field
+    if not math.isfinite(delta):
+        raise ValueError("non-finite annealing flip energy")
+    return delta
 
 
 class SimulatedAnnealingBackend:
@@ -64,12 +84,18 @@ class SimulatedAnnealingBackend:
         if config.sweeps == 1:
             temperatures = (config.temperature_start,)
         else:
-            ratio = (config.temperature_end / config.temperature_start) ** (
-                1 / (config.sweeps - 1)
+            start_log = math.log(config.temperature_start)
+            end_log = math.log(config.temperature_end)
+            interior = tuple(
+                math.exp(
+                    start_log + (end_log - start_log) * sweep / (config.sweeps - 1)
+                )
+                for sweep in range(1, config.sweeps - 1)
             )
-            temperatures = tuple(
-                config.temperature_start * ratio**sweep
-                for sweep in range(config.sweeps)
+            temperatures = (
+                config.temperature_start,
+                *interior,
+                config.temperature_end,
             )
         for _ in range(config.reads):
             bits = [generator.randrange(2) for _ in bqm.variables]
@@ -94,7 +120,7 @@ class SimulatedAnnealingBackend:
                 "start_policy": "random-binary",
                 "sweeps": config.sweeps,
                 "temperature_end": config.temperature_end,
-                "temperature_schedule": "geometric",
+                "temperature_schedule": "geometric-log-space",
                 "temperature_start": config.temperature_start,
                 "update_order": "random-permutation",
                 "wall_seconds": elapsed,

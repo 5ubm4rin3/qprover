@@ -270,6 +270,152 @@ def test_z3_domain_rejects_non_whitelisted_or_unknown_syntax(
         )
 
 
+@pytest.mark.parametrize("constraint", ["arg0 / 2 == 1", "~arg0 == -2"])
+def test_z3_domain_matches_invariant_operator_whitelist(constraint: str) -> None:
+    with pytest.raises(ParameterError, match="unsupported"):
+        solve_integer_domain(
+            names=("arg0",),
+            constraints=(constraint,),
+            bounds={"arg0": (0, 5)},
+            max_models=2,
+        )
+
+
+def test_z3_floor_division_and_modulus_match_python_for_negative_divisors() -> None:
+    division = solve_integer_domain(
+        names=("arg0",),
+        constraints=("arg0 // -2 == -3",),
+        bounds={"arg0": (-5, 5)},
+        max_models=10,
+    )
+    modulus = solve_integer_domain(
+        names=("arg0",),
+        constraints=("arg0 % -2 == -1",),
+        bounds={"arg0": (1, 3)},
+        max_models=10,
+    )
+
+    assert division == ((5,),)
+    assert modulus == ((1,), (3,))
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    ["arg0 // (arg0 - 1) == 1", "arg0 % (arg0 - 1) == 0"],
+)
+def test_z3_domains_exclude_undefined_zero_divisors(constraint: str) -> None:
+    values = solve_integer_domain(
+        names=("arg0",),
+        constraints=(constraint,),
+        bounds={"arg0": (1, 1)},
+        max_models=2,
+    )
+
+    assert values == ()
+
+
+def test_z3_shift_has_exact_non_overflowing_semantics() -> None:
+    values = solve_integer_domain(
+        names=("arg0",),
+        constraints=("arg0 << 10 == 1024",),
+        bounds={"arg0": (1, 1)},
+        max_models=1,
+    )
+
+    assert values == ((1,),)
+
+
+@pytest.mark.parametrize("constraint", ["1 << arg0 == 2", "1 << 4097 > 0"])
+def test_z3_shift_requires_bounded_literal_rhs(constraint: str) -> None:
+    with pytest.raises(ParameterError, match="shift"):
+        solve_integer_domain(
+            names=("arg0",),
+            constraints=(constraint,),
+            bounds={"arg0": (0, 1)},
+            max_models=2,
+        )
+
+
+def test_z3_exponent_bound_matches_invariant_evaluator() -> None:
+    values = solve_integer_domain(
+        names=("arg0",),
+        constraints=("arg0 ** 9 == 512",),
+        bounds={"arg0": (0, 3)},
+        max_models=2,
+    )
+
+    assert values == ((2,),)
+
+
+def test_z3_bounded_variable_exponent_matches_invariant_evaluator() -> None:
+    values = solve_integer_domain(
+        names=("arg0", "arg1"),
+        constraints=("arg0 ** arg1 == 8",),
+        bounds={"arg0": (2, 2), "arg1": (3, 3)},
+        max_models=2,
+    )
+
+    assert values == ((2, 3),)
+
+
+def test_z3_bitwise_operations_match_python_for_negative_values() -> None:
+    values = solve_integer_domain(
+        names=("arg0",),
+        constraints=("arg0 & 1 == 1", "arg0 ^ 2 == -3"),
+        bounds={"arg0": (-3, -1)},
+        max_models=4,
+    )
+
+    assert values == ((-1,),)
+
+
+@pytest.mark.parametrize("bad_limit", [True, 1.0])
+def test_parameter_public_limits_reject_silent_integer_coercion(bad_limit) -> None:
+    argument = ArgumentSpec.model_validate(
+        {
+            "name": "amount",
+            "type": "uint8",
+            "domain": {"kind": "integer", "minimum": 0, "maximum": 2},
+        }
+    )
+    with pytest.raises(ParameterError, match="cap"):
+        expand_argument_values(argument, cap=bad_limit)
+    with pytest.raises(ParameterError, match="max_models"):
+        solve_integer_domain(
+            names=("arg0",),
+            constraints=("arg0 >= 0",),
+            bounds={"arg0": (0, 2)},
+            max_models=bad_limit,
+        )
+
+
+@pytest.mark.parametrize("abi_type", ["bytes0", "bytes33"])
+def test_fixed_bytes_width_must_be_between_one_and_thirty_two(
+    abi_type: str,
+) -> None:
+    size = int(abi_type.removeprefix("bytes"))
+    argument = ArgumentSpec.model_validate(
+        {
+            "name": "blob",
+            "type": abi_type,
+            "domain": {"kind": "finite", "values": ["0x" + "00" * size]},
+        }
+    )
+
+    with pytest.raises(ParameterError, match="unsupported ABI"):
+        expand_argument_values(argument)
+
+
+def test_action_value_candidates_must_fit_uint256(tmp_path) -> None:
+    raw = _manifest(tmp_path).model_dump(mode="python")
+    raw["actions"][0]["mutability"] = "payable"
+    raw["actions"][0]["value_domain"]["values"] = (2**256,)
+    manifest = TargetManifest.model_validate(raw)
+
+    with pytest.raises(ParameterError, match="uint256"):
+        expand_action_variants(manifest, SimpleNamespace(contracts=()))
+
+
 def test_action_expansion_is_capped_cartesian_and_retains_provenance(
     tmp_path,
 ) -> None:

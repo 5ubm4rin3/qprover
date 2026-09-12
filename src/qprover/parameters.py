@@ -13,6 +13,7 @@ from pathlib import Path
 
 import z3
 
+from qprover.expression import ExpressionError, evaluate_expression
 from qprover.models import ActionSpec, ArgumentSpec, IntegerDomain, TargetManifest
 
 
@@ -59,6 +60,8 @@ _INTEGER_TYPE = re.compile(r"(u?)int([0-9]+)")
 _BYTES_TYPE = re.compile(r"bytes([0-9]+)")
 _HEX = re.compile(r"0x[0-9a-fA-F]*")
 _NUMBER = re.compile(r"\b(?:0x[0-9a-fA-F_]+|[0-9][0-9_]*)\b")
+_MAX_EXPONENT = 256
+_MAX_SHIFT = 4096
 
 
 def _integer_bounds(abi_type: str) -> tuple[int, int] | None:
@@ -108,6 +111,8 @@ def _validate_abi_value(abi_type: str, value: object) -> None:
     bytes_match = _BYTES_TYPE.fullmatch(abi_type)
     if bytes_match is not None:
         size = int(bytes_match.group(1))
+        if not 1 <= size <= 32:
+            raise ParameterError(f"unsupported ABI parameter type: {abi_type}")
         if (
             not isinstance(value, str)
             or _HEX.fullmatch(value) is None
@@ -149,7 +154,7 @@ def expand_argument_values(
 ) -> tuple[ConcreteValue, ...]:
     """Expand one scalar ABI argument without nondeterministic sampling."""
 
-    if cap <= 0:
+    if type(cap) is not int or cap <= 0:
         raise ParameterError("parameter value cap must be positive")
     candidates: list[ConcreteValue] = []
     positions: dict[object, int] = {}
@@ -210,43 +215,137 @@ class _ConstraintTranslator:
     ) -> None:
         self.variables = variables
         self.constants = constants
-        largest = max(
-            (abs(value) for pair in bounds.values() for value in pair), default=1
-        )
-        largest = max(largest, *(abs(value) for value in constants.values()), 1)
-        maximum_shift = max(
-            (
-                node.right.value
-                for tree in trees
-                for node in ast.walk(tree)
-                if isinstance(node, ast.BinOp)
-                and isinstance(node.op, (ast.LShift, ast.RShift))
-                and isinstance(node.right, ast.Constant)
-                and type(node.right.value) is int
-                and node.right.value >= 0
-            ),
-            default=0,
-        )
-        self.bit_width = largest.bit_length() + maximum_shift + 2
-        if self.bit_width > 4096:
-            raise ParameterError("bitwise constraint width exceeds safe limit")
-        if any(
-            isinstance(node, ast.BinOp)
-            and isinstance(
-                node.op,
-                (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift),
+        self.bounds = bounds
+        self.definedness: list[z3.BoolRef] = []
+        del trees
+
+    def _interval(self, node: ast.AST) -> tuple[int, int] | None:
+        if isinstance(node, ast.Expression):
+            return self._interval(node.body)
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value, node.value
+        if isinstance(node, ast.Name):
+            if node.id in self.bounds:
+                return self.bounds[node.id]
+            if node.id in self.constants:
+                value = self.constants[node.id]
+                return value, value
+            return None
+        if isinstance(node, ast.UnaryOp):
+            interval = self._interval(node.operand)
+            if interval is None:
+                return None
+            if isinstance(node.op, ast.UAdd):
+                return interval
+            if isinstance(node.op, ast.USub):
+                return -interval[1], -interval[0]
+            return None
+        if not isinstance(node, ast.BinOp):
+            return None
+        left = self._interval(node.left)
+        right = self._interval(node.right)
+        if left is None or right is None:
+            return None
+        left_low, left_high = left
+        right_low, right_high = right
+        if isinstance(node.op, ast.Add):
+            return left_low + right_low, left_high + right_high
+        if isinstance(node.op, ast.Sub):
+            return left_low - right_high, left_high - right_low
+        if isinstance(node.op, ast.Mult):
+            products = (
+                left_low * right_low,
+                left_low * right_high,
+                left_high * right_low,
+                left_high * right_high,
             )
-            for tree in trees
-            for node in ast.walk(tree)
-        ) and any(minimum < 0 for minimum, _ in bounds.values()):
-            raise ParameterError("bitwise constraints require nonnegative bounds")
+            return min(products), max(products)
+        if isinstance(node.op, ast.Pow):
+            if right_low != right_high or not 0 <= right_low <= _MAX_EXPONENT:
+                return None
+            values = [left_low**right_low, left_high**right_low]
+            if left_low <= 0 <= left_high:
+                values.append(0**right_low)
+            return min(values), max(values)
+        if isinstance(node.op, ast.LShift):
+            if right_low != right_high or not 0 <= right_low <= _MAX_SHIFT:
+                return None
+            factor = 1 << right_low
+            return left_low * factor, left_high * factor
+        if isinstance(node.op, ast.RShift):
+            if right_low != right_high or not 0 <= right_low <= _MAX_SHIFT:
+                return None
+            factor = 1 << right_low
+            return left_low // factor, left_high // factor
+        if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
+            maximum = max(
+                abs(left_low),
+                abs(left_high),
+                abs(right_low),
+                abs(right_high),
+            )
+            return -maximum, maximum
+        if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
+            width = (
+                max(
+                    abs(left_low).bit_length(),
+                    abs(left_high).bit_length(),
+                    abs(right_low).bit_length(),
+                    abs(right_high).bit_length(),
+                )
+                + 1
+            )
+            return -(1 << (width - 1)), (1 << (width - 1)) - 1
+        return None
+
+    def _bitwise(
+        self,
+        node: ast.BinOp,
+        left: z3.ArithRef,
+        right: z3.ArithRef,
+    ) -> z3.ArithRef:
+        left_interval = self._interval(node.left)
+        right_interval = self._interval(node.right)
+        if left_interval is None or right_interval is None:
+            raise ParameterError("bitwise operands require statically bounded integers")
+        width = (
+            max(
+                *(
+                    abs(value).bit_length()
+                    for value in (*left_interval, *right_interval)
+                ),
+                1,
+            )
+            + 1
+        )
+        if width > 4096:
+            raise ParameterError("bitwise constraint width exceeds safe exact limit")
+        left_bits = z3.Int2BV(left, width)
+        right_bits = z3.Int2BV(right, width)
+        if isinstance(node.op, ast.BitAnd):
+            result = left_bits & right_bits
+        elif isinstance(node.op, ast.BitOr):
+            result = left_bits | right_bits
+        else:
+            result = left_bits ^ right_bits
+        return z3.BV2Int(result, is_signed=True)
+
+    @staticmethod
+    def _truth(value: z3.ExprRef) -> z3.BoolRef:
+        if z3.is_bool(value):
+            return value
+        if z3.is_arith(value):
+            return value != 0
+        raise ParameterError("boolean constraint operand must be integer or boolean")
 
     def translate(self, node: ast.AST) -> z3.ExprRef:
         if isinstance(node, ast.Expression):
             return self.translate(node.body)
         if isinstance(node, ast.Constant):
+            if type(node.value) is bool:
+                return z3.BoolVal(node.value)
             if type(node.value) is not int:
-                raise ParameterError("constraints allow only integer constants")
+                raise ParameterError("constraints allow only integer/boolean constants")
             return z3.IntVal(node.value)
         if isinstance(node, ast.Name):
             if node.id in self.variables:
@@ -260,10 +359,8 @@ class _ConstraintTranslator:
                 return operand
             if isinstance(node.op, ast.USub):
                 return -operand
-            if isinstance(node.op, ast.Invert):
-                return z3.BV2Int(~z3.Int2BV(operand, self.bit_width))
             if isinstance(node.op, ast.Not):
-                return z3.Not(operand)
+                return z3.Not(self._truth(operand))
             raise ParameterError("unsupported unary constraint operator")
         if isinstance(node, ast.BinOp):
             left = self.translate(node.left)
@@ -274,34 +371,49 @@ class _ConstraintTranslator:
                 return left - right
             if isinstance(node.op, ast.Mult):
                 return left * right
-            if isinstance(node.op, (ast.Div, ast.FloorDiv)):
-                return left / right
-            if isinstance(node.op, ast.Mod):
-                return left % right
+            if isinstance(node.op, ast.Div):
+                raise ParameterError("unsupported binary constraint operator: Div")
+            if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
+                self.definedness.append(right != 0)
+                quotient = z3.If(right > 0, left / right, (-left) / (-right))
+                if isinstance(node.op, ast.FloorDiv):
+                    return quotient
+                return left - quotient * right
             if isinstance(node.op, ast.Pow):
-                if not isinstance(node.right, ast.Constant) or not (
-                    type(node.right.value) is int and 0 <= node.right.value <= 8
+                exponent_interval = self._interval(node.right)
+                if exponent_interval is None or not (
+                    0 <= exponent_interval[0] <= exponent_interval[1] <= _MAX_EXPONENT
                 ):
-                    raise ParameterError("constraint exponent must be in [0, 8]")
-                result: z3.ArithRef = z3.IntVal(1)
-                for _ in range(node.right.value):
-                    result *= left
+                    raise ParameterError(
+                        f"constraint exponent must be in [0, {_MAX_EXPONENT}]"
+                    )
+                low, high = exponent_interval
+                powers: list[z3.ArithRef] = [z3.IntVal(1)]
+                for _ in range(high):
+                    powers.append(powers[-1] * left)
+                if low == high:
+                    return powers[low]
+                result = powers[high]
+                for exponent in range(high - 1, low - 1, -1):
+                    result = z3.If(right == exponent, powers[exponent], result)
                 return result
-            left_bits = z3.Int2BV(left, self.bit_width)
-            right_bits = z3.Int2BV(right, self.bit_width)
-            if isinstance(node.op, ast.BitAnd):
-                return z3.BV2Int(left_bits & right_bits)
-            if isinstance(node.op, ast.BitOr):
-                return z3.BV2Int(left_bits | right_bits)
-            if isinstance(node.op, ast.BitXor):
-                return z3.BV2Int(left_bits ^ right_bits)
-            if isinstance(node.op, ast.LShift):
-                return z3.BV2Int(left_bits << right_bits)
-            if isinstance(node.op, ast.RShift):
-                return z3.BV2Int(z3.LShR(left_bits, right_bits))
+            if isinstance(node.op, (ast.LShift, ast.RShift)):
+                if not isinstance(node.right, ast.Constant) or not (
+                    type(node.right.value) is int
+                    and 0 <= node.right.value <= _MAX_SHIFT
+                ):
+                    raise ParameterError(
+                        f"shift must use an integer literal in [0, {_MAX_SHIFT}]"
+                    )
+                factor = z3.IntVal(1 << node.right.value)
+                if isinstance(node.op, ast.LShift):
+                    return left * factor
+                return left / factor
+            if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
+                return self._bitwise(node, left, right)
             raise ParameterError("unsupported binary constraint operator")
         if isinstance(node, ast.BoolOp):
-            values = tuple(self.translate(value) for value in node.values)
+            values = tuple(self._truth(self.translate(value)) for value in node.values)
             if isinstance(node.op, ast.And):
                 return z3.And(*values)
             if isinstance(node.op, ast.Or):
@@ -376,7 +488,7 @@ def solve_integer_domain(
 
     if not names or len(set(names)) != len(names):
         raise ParameterError("constraint variable names must be nonempty and unique")
-    if max_models <= 0:
+    if type(max_models) is not int or max_models <= 0:
         raise ParameterError("max_models must be positive")
     if set(bounds) != set(names):
         raise ParameterError("every constraint variable must have exactly one bound")
@@ -405,12 +517,28 @@ def solve_integer_domain(
         if not z3.is_bool(expression):
             raise ParameterError("each constraint must evaluate to a boolean")
         solver.add(expression)
+    solver.add(*translator.definedness)
 
     models: list[tuple[int, ...]] = []
     while len(models) < max_models:
         values = _lexicographic_model(solver, names, variables, bounds)
         if values is None:
             break
+        concrete = dict(constants)
+        concrete.update(zip(names, values, strict=True))
+        try:
+            results = tuple(
+                evaluate_expression(source, concrete) for source in constraints
+            )
+        except ExpressionError as error:
+            raise ParameterError(
+                "constraint differs from invariant expression semantics"
+            ) from error
+        if any(
+            result.status != "evaluated" or result.value is not True
+            for result in results
+        ):
+            raise ParameterError("SMT model failed concrete semantic revalidation")
         models.append(values)
         solver.add(
             z3.Or(
@@ -602,8 +730,7 @@ def expand_action_variants(
         value_candidates: list[ConcreteValue] = []
         value_positions: dict[object, int] = {}
         for value in action.value_domain.values:
-            if type(value) is not int or value < 0:
-                raise ParameterError("call value is not ABI-encodable as uint256")
+            _validate_abi_value("uint256", value)
             _append_candidate(value_candidates, value_positions, value, "explicit")
         for sender_slot in sorted(set(action.sender_slots)):
             argument_products = (
@@ -622,7 +749,7 @@ def expand_action_variants(
                             signature=action.signature,
                             sender_slot=sender_slot,
                             args=tuple(item.value for item in arguments),
-                            value_wei=int(call_value.value),
+                            value_wei=call_value.value,
                             max_repetitions=action.max_repetitions,
                             argument_provenance=tuple(
                                 item.provenance for item in arguments

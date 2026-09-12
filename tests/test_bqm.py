@@ -167,3 +167,96 @@ def test_search_problem_rejects_hidden_or_ambiguous_inputs() -> None:
             max_sequence_length=2,
             utilities={"known_witness": 1.0},
         )
+
+
+@pytest.mark.parametrize("bad_length", [True, 2.0])
+def test_search_problem_rejects_coerced_sequence_length(bad_length) -> None:
+    with pytest.raises(ValueError, match="max_sequence_length"):
+        SearchProblem(actions=("a",), max_sequence_length=bad_length)
+
+
+@pytest.mark.parametrize("bad_limit", [True, 1.0])
+def test_search_problem_rejects_coerced_repetition_limits(bad_limit) -> None:
+    with pytest.raises(ValueError, match="repetition"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            repetition_limits={"a": bad_limit},
+        )
+
+
+@pytest.mark.parametrize("bad_score", [True, "1", float("inf"), float("nan")])
+def test_search_problem_rejects_non_real_or_nonfinite_scores(bad_score) -> None:
+    with pytest.raises(ValueError, match="utilities"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            utilities={"a": bad_score},
+        )
+    with pytest.raises(ValueError, match="transitions"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            transitions={("a", "a"): bad_score},
+        )
+    with pytest.raises(ValueError, match="weights"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            utility_weight=bad_score,
+        )
+    with pytest.raises(ValueError, match="discounts"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            discounts=(1.0, bad_score),
+        )
+
+
+@pytest.mark.parametrize("bad_score", [True, "1", float("inf"), float("nan")])
+def test_feedback_rejects_non_real_or_nonfinite_scores(bad_score) -> None:
+    with pytest.raises(ValueError, match="revert penalties"):
+        SearchFeedback(revert_penalties={"a": bad_score})
+
+
+def test_large_finite_penalty_remains_strictly_dominant() -> None:
+    problem = SearchProblem(
+        actions=("a",),
+        max_sequence_length=2,
+        utilities={"a": 1e20},
+        repetition_limits={"a": 1},
+        length_weight=0.0,
+    )
+    bqm = SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+    bound = sum(abs(value) for value in bqm.non_constraint_linear.values()) + sum(
+        abs(value) for value in bqm.non_constraint_quadratic.values()
+    )
+
+    assert bqm.constraint_penalty > bound
+    feasible = bqm.encode(("a",))
+    infeasible = list(bqm.encode(("a",)))
+    infeasible[bqm.index(1, "a")] = 1
+    infeasible[bqm.index(1, STOP)] = 0
+    assert bqm.energy(feasible) < bqm.energy(infeasible)
+    assert not bqm.decode(infeasible).feasibility.feasible
+
+
+def test_builder_rejects_nonfinite_derived_coefficients() -> None:
+    problem = SearchProblem(
+        actions=("a",),
+        max_sequence_length=2,
+        utilities={"a": 1e308},
+    )
+
+    with pytest.raises(ValueError, match="non-finite"):
+        SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+
+
+@pytest.mark.parametrize("bad_bit", [0.0, 1.0, True, False])
+def test_bqm_samples_reject_coerced_bits(tiny_problem: SearchProblem, bad_bit) -> None:
+    bqm = SequenceBQMBuilder().build(tiny_problem, SearchFeedback.empty())
+    bits = list(bqm.encode(("prepare", "trigger")))
+    bits[0] = bad_bit
+
+    with pytest.raises(ValueError, match="exact integers"):
+        bqm.energy(bits)

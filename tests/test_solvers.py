@@ -129,7 +129,7 @@ def test_simulated_annealing_is_repeatable_for_fixed_seed(
     assert first.metadata["sweeps"] == 80
     assert first.metadata["start_policy"] == "random-binary"
     assert first.metadata["update_order"] == "random-permutation"
-    assert first.metadata["temperature_schedule"] == "geometric"
+    assert first.metadata["temperature_schedule"] == "geometric-log-space"
     assert first.metadata["wall_seconds"] >= 0
 
 
@@ -143,3 +143,60 @@ def test_simulated_annealing_rejects_invalid_configuration(
             bqm,
             AnnealingConfig(temperature_start=0.0),
         )
+
+
+@pytest.mark.parametrize("bad_integer", [True, 1.0])
+def test_exact_solver_rejects_coerced_integer_configuration(
+    problem: SearchProblem, bad_integer
+) -> None:
+    bqm = SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+    with pytest.raises(ValueError, match="max_bits"):
+        ExactBackend(max_bits=bad_integer)
+    with pytest.raises(ValueError, match="reads"):
+        ExactConfig(reads=bad_integer)
+    with pytest.raises(ValueError, match="reads"):
+        ExactBackend(max_bits=20).sample(bqm, reads=bad_integer)
+
+
+@pytest.mark.parametrize("field", ["reads", "sweeps", "seed"])
+@pytest.mark.parametrize("bad_integer", [True, 1.0])
+def test_annealing_rejects_coerced_integer_configuration(
+    field: str, bad_integer
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        AnnealingConfig(**{field: bad_integer})
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_temperature"),
+    [
+        ("temperature_start", True),
+        ("temperature_end", "0.1"),
+        ("temperature_start", float("inf")),
+        ("temperature_end", float("nan")),
+        ("temperature_start", 10**1000),
+    ],
+)
+def test_annealing_rejects_invalid_temperature_types_and_values(
+    field: str, bad_temperature
+) -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        AnnealingConfig(**{field: bad_temperature})
+
+
+def test_annealing_extreme_finite_temperatures_do_not_underflow_schedule(
+    problem: SearchProblem,
+) -> None:
+    bqm = SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+    config = AnnealingConfig(
+        seed=1,
+        reads=2,
+        sweeps=4,
+        temperature_start=1e308,
+        temperature_end=5e-324,
+    )
+
+    samples = SimulatedAnnealingBackend().sample(bqm, config)
+
+    assert len(samples.samples) == 2
+    assert samples.metadata["temperature_schedule"] == "geometric-log-space"

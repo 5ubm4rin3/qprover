@@ -15,6 +15,40 @@ def _frozen_mapping(value: Mapping) -> MappingProxyType:
     return MappingProxyType(dict(value))
 
 
+def _exact_positive_int(value: object, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be an exact positive integer")
+    return value
+
+
+def _finite_real(value: object, label: str, *, nonnegative: bool = False) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"{label} must contain only int or float values")
+    try:
+        converted = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{label} must contain only finite values") from error
+    if not math.isfinite(converted):
+        raise ValueError(f"{label} must contain only finite values")
+    if nonnegative and converted < 0:
+        raise ValueError(f"{label} must contain only nonnegative values")
+    return converted
+
+
+def _finite_derived(value: float, label: str) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite derived {label}")
+    return value
+
+
+def _finite_sum(values: Sequence[float], label: str) -> float:
+    try:
+        result = math.fsum(values)
+    except OverflowError as error:
+        raise ValueError(f"non-finite derived {label}") from error
+    return _finite_derived(result, label)
+
+
 @dataclass(frozen=True, slots=True)
 class SearchProblem:
     """Public, label-neutral inputs to sequence optimization."""
@@ -40,8 +74,7 @@ class SearchProblem:
             raise ValueError("duplicate action identifier")
         if STOP in actions:
             raise ValueError("STOP is reserved")
-        if self.max_sequence_length <= 0:
-            raise ValueError("max_sequence_length must be positive")
+        _exact_positive_int(self.max_sequence_length, "max_sequence_length")
         utilities = dict(self.utilities or {})
         transitions = dict(self.transitions or {})
         limits = dict(self.repetition_limits or {})
@@ -56,39 +89,48 @@ class SearchProblem:
         )
         if unknown:
             raise ValueError(f"unknown action input: {sorted(unknown)[0]}")
-        utilities = {action: float(utilities.get(action, 0.0)) for action in actions}
-        limits = {
-            action: int(limits.get(action, self.max_sequence_length))
+        utilities = {
+            action: _finite_real(utilities.get(action, 0.0), "utilities")
             for action in actions
         }
-        if any(limit <= 0 for limit in limits.values()):
-            raise ValueError("repetition limits must be positive")
-        if any(not math.isfinite(value) for value in utilities.values()):
-            raise ValueError("utilities must be finite")
-        if any(not math.isfinite(float(value)) for value in transitions.values()):
-            raise ValueError("transitions must be finite")
-        weights = (
-            self.utility_weight,
-            self.transition_weight,
-            self.revert_weight,
-            self.length_weight,
+        limits = {
+            action: _exact_positive_int(
+                limits.get(action, self.max_sequence_length), "repetition limits"
+            )
+            for action in actions
+        }
+        transitions = {
+            key: _finite_real(value, "transitions")
+            for key, value in transitions.items()
+        }
+        weights = tuple(
+            _finite_real(value, "weights", nonnegative=True)
+            for value in (
+                self.utility_weight,
+                self.transition_weight,
+                self.revert_weight,
+                self.length_weight,
+            )
         )
-        if any(not math.isfinite(value) or value < 0 for value in weights):
-            raise ValueError("objective weights must be finite and nonnegative")
         discounts = self.discounts or (1.0,) * self.max_sequence_length
         if len(discounts) != self.max_sequence_length:
             raise ValueError("discounts must match max_sequence_length")
-        if any(not math.isfinite(value) or value < 0 for value in discounts):
-            raise ValueError("discounts must be finite and nonnegative")
+        discounts = tuple(
+            _finite_real(value, "discounts", nonnegative=True) for value in discounts
+        )
         object.__setattr__(self, "actions", actions)
         object.__setattr__(self, "utilities", _frozen_mapping(utilities))
         object.__setattr__(
             self,
             "transitions",
-            _frozen_mapping({key: float(value) for key, value in transitions.items()}),
+            _frozen_mapping(transitions),
         )
         object.__setattr__(self, "repetition_limits", _frozen_mapping(limits))
-        object.__setattr__(self, "discounts", tuple(float(item) for item in discounts))
+        object.__setattr__(self, "discounts", discounts)
+        object.__setattr__(self, "utility_weight", weights[0])
+        object.__setattr__(self, "transition_weight", weights[1])
+        object.__setattr__(self, "revert_weight", weights[2])
+        object.__setattr__(self, "length_weight", weights[3])
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,10 +141,9 @@ class SearchFeedback:
 
     def __post_init__(self) -> None:
         penalties = {
-            key: float(value) for key, value in (self.revert_penalties or {}).items()
+            key: _finite_real(value, "revert penalties", nonnegative=True)
+            for key, value in (self.revert_penalties or {}).items()
         }
-        if any(not math.isfinite(value) or value < 0 for value in penalties.values()):
-            raise ValueError("revert penalties must be finite and nonnegative")
         object.__setattr__(self, "revert_penalties", _frozen_mapping(penalties))
 
     @classmethod
@@ -122,7 +163,7 @@ class ObjectiveComponents:
 
     @property
     def total(self) -> float:
-        return sum(self.as_dict().values())
+        return _finite_sum(tuple(self.as_dict().values()), "objective energy")
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -166,12 +207,38 @@ class BinaryQuadraticModel:
         size = len(self.variables)
         if len(set(self.variables)) != size:
             raise ValueError("BQM variables must be unique")
-        for index in self.linear:
-            if not 0 <= index < size:
+        for index, coefficient in self.linear.items():
+            if type(index) is not int or not 0 <= index < size:
                 raise ValueError("linear coefficient index is outside the BQM")
-        for first, second in self.quadratic:
-            if not (0 <= first <= second < size):
+            _finite_real(coefficient, "linear coefficients")
+        for (first, second), coefficient in self.quadratic.items():
+            if (
+                type(first) is not int
+                or type(second) is not int
+                or not (0 <= first <= second < size)
+            ):
                 raise ValueError("quadratic coefficients must be upper triangular")
+            _finite_real(coefficient, "quadratic coefficients")
+        for index, coefficient in self.non_constraint_linear.items():
+            if type(index) is not int or not 0 <= index < size:
+                raise ValueError("non-constraint linear index is outside the BQM")
+            _finite_real(coefficient, "non-constraint linear coefficients")
+        for (first, second), coefficient in self.non_constraint_quadratic.items():
+            if (
+                type(first) is not int
+                or type(second) is not int
+                or not (0 <= first <= second < size)
+            ):
+                raise ValueError(
+                    "non-constraint quadratic coefficients must be upper triangular"
+                )
+            _finite_real(coefficient, "non-constraint quadratic coefficients")
+        _finite_real(self.offset, "offset")
+        penalty = _finite_real(
+            self.constraint_penalty, "constraint penalty", nonnegative=True
+        )
+        if penalty <= 0:
+            raise ValueError("constraint penalty must be positive")
         object.__setattr__(self, "linear", _frozen_mapping(self.linear))
         object.__setattr__(self, "quadratic", _frozen_mapping(self.quadratic))
         object.__setattr__(
@@ -216,22 +283,25 @@ class BinaryQuadraticModel:
         values = tuple(bits)
         if len(values) != len(self.variables):
             raise ValueError("sample bit count does not match BQM variables")
-        if any(value not in (0, 1) for value in values):
-            raise ValueError("BQM samples must contain only binary values")
+        if any(type(value) is not int or value not in (0, 1) for value in values):
+            raise ValueError("BQM samples must contain exact integers 0 or 1")
         return values
 
     def energy(self, bits: Sequence[int]) -> float:
         values = self._bits(bits)
-        return (
-            self.offset
-            + sum(
-                coefficient * values[index]
-                for index, coefficient in self.linear.items()
-            )
-            + sum(
-                coefficient * values[first] * values[second]
-                for (first, second), coefficient in self.quadratic.items()
-            )
+        return _finite_sum(
+            (
+                self.offset,
+                *(
+                    coefficient * values[index]
+                    for index, coefficient in self.linear.items()
+                ),
+                *(
+                    coefficient * values[first] * values[second]
+                    for (first, second), coefficient in self.quadratic.items()
+                ),
+            ),
+            "BQM energy",
         )
 
     def objective_components(self, bits: Sequence[int]) -> ObjectiveComponents:
@@ -387,7 +457,10 @@ class BinaryQuadraticModel:
 
 
 def _add_linear(coefficients: dict[int, float], index: int, value: float) -> None:
-    coefficients[index] = coefficients.get(index, 0.0) + value
+    _finite_derived(value, "linear coefficient")
+    coefficients[index] = _finite_derived(
+        coefficients.get(index, 0.0) + value, "linear coefficient"
+    )
     if coefficients[index] == 0:
         del coefficients[index]
 
@@ -399,11 +472,14 @@ def _add_quadratic(
     second: int,
     value: float,
 ) -> None:
+    _finite_derived(value, "quadratic coefficient")
     if first == second:
         _add_linear(linear, first, value)
         return
     key = (min(first, second), max(first, second))
-    coefficients[key] = coefficients.get(key, 0.0) + value
+    coefficients[key] = _finite_derived(
+        coefficients.get(key, 0.0) + value, "quadratic coefficient"
+    )
     if coefficients[key] == 0:
         del coefficients[key]
 
@@ -448,6 +524,7 @@ class SequenceBQMBuilder:
                     + problem.revert_weight * feedback.revert_penalties.get(action, 0.0)
                     + problem.length_weight
                 )
+                _finite_derived(coefficient, "objective coefficient")
                 _add_linear(non_linear, index(position, action), coefficient)
         for position in range(problem.max_sequence_length - 1):
             for first in problem.actions:
@@ -455,6 +532,7 @@ class SequenceBQMBuilder:
                     coefficient = -problem.transition_weight * problem.transitions.get(
                         (first, second), 0.0
                     )
+                    _finite_derived(coefficient, "transition coefficient")
                     if coefficient:
                         _add_quadratic(
                             non_linear,
@@ -463,14 +541,21 @@ class SequenceBQMBuilder:
                             index(position + 1, second),
                             coefficient,
                         )
-        penalty = (
-            1.0
-            + sum(abs(value) for value in non_linear.values())
-            + sum(abs(value) for value in non_quadratic.values())
+        bound = _finite_sum(
+            tuple(abs(value) for value in non_linear.values())
+            + tuple(abs(value) for value in non_quadratic.values()),
+            "non-constraint coefficient bound",
         )
+        penalty = bound + 1.0
+        if penalty <= bound:
+            penalty = math.nextafter(bound, math.inf)
+        if not math.isfinite(penalty) or penalty <= bound:
+            raise ValueError("non-finite derived constraint penalty")
         linear = dict(non_linear)
         quadratic = dict(non_quadratic)
-        offset = penalty * problem.max_sequence_length
+        offset = _finite_derived(
+            penalty * problem.max_sequence_length, "constraint offset"
+        )
 
         for position in range(problem.max_sequence_length):
             for action in choices:
@@ -554,6 +639,9 @@ class Sample:
     energy: float
     components: ObjectiveComponents
     decoded: DecodedSample
+
+    def __post_init__(self) -> None:
+        _finite_real(self.energy, "sample energy")
 
 
 @dataclass(frozen=True, slots=True)

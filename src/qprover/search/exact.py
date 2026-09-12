@@ -24,14 +24,14 @@ class ExactConfig:
     reads: int = 1
 
     def __post_init__(self) -> None:
-        if self.reads <= 0:
-            raise ValueError("reads must be positive")
+        if type(self.reads) is not int or self.reads <= 0:
+            raise ValueError("reads must be an exact positive integer")
 
 
 class ExactBackend:
     def __init__(self, *, max_bits: int = 20) -> None:
-        if max_bits <= 0:
-            raise ValueError("max_bits must be positive")
+        if type(max_bits) is not int or max_bits <= 0:
+            raise ValueError("max_bits must be an exact positive integer")
         self.max_bits = max_bits
 
     def sample(
@@ -46,8 +46,8 @@ class ExactBackend:
                 raise ValueError("reads cannot be supplied twice")
             reads = config.reads
         requested = reads if reads is not None else 1
-        if requested <= 0:
-            raise ValueError("reads must be positive")
+        if type(requested) is not int or requested <= 0:
+            raise ValueError("reads must be an exact positive integer")
         bits = len(bqm.variables)
         if bits > self.max_bits:
             raise SolverError(
