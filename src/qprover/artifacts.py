@@ -55,6 +55,7 @@ class ContractArtifact:
     artifact_sha256: str
     bytecode_sha256: str
     abi: tuple[Mapping[str, Any], ...]
+    method_identifiers: tuple[tuple[str, str], ...]
     bytecode: str
     ast: Mapping[str, Any]
     storage_layout: Mapping[str, Any]
@@ -89,11 +90,23 @@ class ArtifactBundle:
         return self._closed
 
     def close(self) -> None:
-        """Remove retained compiler evidence; safe to call more than once."""
+        """Remove retained compiler evidence, or report that it remains live."""
 
         if self._closed:
             return
-        shutil.rmtree(self._evidence_root, ignore_errors=True)
+        if not self._evidence_root.exists():
+            object.__setattr__(self, "_closed", True)
+            return
+        try:
+            shutil.rmtree(self._evidence_root)
+        except OSError as error:
+            raise ArtifactError(
+                f"could not remove artifact evidence: {self._evidence_root}"
+            ) from error
+        if self._evidence_root.exists():
+            raise ArtifactError(
+                f"could not remove artifact evidence: {self._evidence_root}"
+            )
         object.__setattr__(self, "_closed", True)
 
     def __enter__(self) -> Self:
@@ -102,7 +115,11 @@ class ArtifactBundle:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        del exc_info
+        if exc_info and exc_info[0] is not None:
+            shutil.rmtree(self._evidence_root, ignore_errors=True)
+            if not self._evidence_root.exists():
+                object.__setattr__(self, "_closed", True)
+            return
         self.close()
 
 
@@ -244,6 +261,14 @@ def _load_artifact(
     raw, artifact_bytes = _load_json(artifact_path, "artifact")
     if "abi" not in raw or not isinstance(raw["abi"], list):
         raise ArtifactError(f"artifact is missing ABI: {artifact_path}")
+    method_identifiers = raw.get("methodIdentifiers")
+    if not isinstance(method_identifiers, dict) or not all(
+        isinstance(signature, str)
+        and isinstance(selector, str)
+        and re.fullmatch(r"[0-9a-fA-F]{8}", selector)
+        for signature, selector in method_identifiers.items()
+    ):
+        raise ArtifactError(f"artifact is missing method identifiers: {artifact_path}")
     bytecode_record = raw.get("bytecode")
     bytecode = (
         bytecode_record.get("object") if isinstance(bytecode_record, dict) else None
@@ -278,6 +303,9 @@ def _load_artifact(
             f"{source_name}:{contract_name}"
         )
     output_bytecode = output_contract.get("evm", {}).get("bytecode", {}).get("object")
+    output_method_identifiers = output_contract.get("evm", {}).get(
+        "methodIdentifiers"
+    )
     build_storage_layout = output_contract.get("storageLayout")
     layout_matches = build_storage_layout == storage_layout or (
         build_storage_layout is None
@@ -286,6 +314,7 @@ def _load_artifact(
     )
     if (
         output_contract.get("abi") != raw["abi"]
+        or output_method_identifiers != method_identifiers
         or not layout_matches
         or output_bytecode != bytecode[2:]
         or build_info["output"]["sources"][source_name].get("ast") != ast
@@ -303,6 +332,12 @@ def _load_artifact(
             artifact_sha256=_sha256(artifact_bytes),
             bytecode_sha256=_sha256(bytecode.encode()),
             abi=tuple(_freeze(item) for item in raw["abi"]),
+            method_identifiers=tuple(
+                sorted(
+                    (signature, selector.lower())
+                    for signature, selector in method_identifiers.items()
+                )
+            ),
             bytecode=bytecode,
             ast=_freeze(ast),
             storage_layout=_freeze(storage_layout),

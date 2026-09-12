@@ -161,6 +161,7 @@ def test_build_target_preserves_compiler_evidence(analysis_manifest: Path) -> No
         assert bundle.artifacts[0].ast["nodeType"] == "SourceUnit"
         assert bundle.artifacts[0].storage_layout["storage"]
         assert bundle.artifacts[0].abi
+        assert dict(bundle.artifacts[0].method_identifiers)["withdraw()"] == "3ccfd60b"
         assert bundle.artifacts[0].bytecode.startswith("0x")
         assert len(bundle.source_sha256) == 64
         assert len(bundle.manifest_sha256) == 64
@@ -446,6 +447,27 @@ def test_artifact_bundle_context_manager_cleans_evidence(
     assert bundle.closed is True
     assert not evidence_root.exists()
     bundle.close()
+
+
+def test_artifact_bundle_close_does_not_claim_failed_removal(
+    analysis_manifest: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = build_target(load_manifest(analysis_manifest))
+    evidence_root = bundle.evidence_root
+
+    with monkeypatch.context() as filesystem:
+        filesystem.setattr(
+            "qprover.artifacts.shutil.rmtree", lambda *args, **kwargs: None
+        )
+        with pytest.raises(ArtifactError, match="could not remove artifact evidence"):
+            bundle.close()
+
+    assert bundle.closed is False
+    assert evidence_root.is_dir()
+    bundle.close()
+    assert bundle.closed is True
+    assert not evidence_root.exists()
 
 
 def test_build_failure_cleans_evidence_workspace(

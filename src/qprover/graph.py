@@ -238,6 +238,7 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                 "artifact_ref": f"{contract.source_name}:{contract.name}",
                 "linearized_base_contracts": contract.linearized_base_contracts,
                 "abi_signatures": contract.abi_signatures,
+                "abi_function_selectors": contract.abi_function_selectors,
             },
         )
         for storage in contract.storage:
@@ -266,6 +267,7 @@ def build_program_graph(report: AnalysisReport) -> ProgramGraph:
                     "source_name": function.source_name,
                     "artifact_ref": f"{function.source_name}:{function.contract}",
                     "contract_id": contract.canonical_id,
+                    "function_selector": function.function_selector,
                     "visibility": function.visibility,
                     "storage_reads": function.storage_reads,
                     "storage_writes": function.storage_writes,

@@ -45,9 +45,12 @@ def _actions_by_function(
         contract_nodes.setdefault(str(node.attributes["artifact_ref"]), []).append(node)
     functions: dict[tuple[str, str], list[str]] = {}
     for node in _function_nodes(graph):
+        selector = node.attributes.get("function_selector")
+        if not isinstance(selector, str):
+            continue
         key = (
             str(node.attributes["contract_id"]),
-            str(node.attributes["signature"]),
+            selector,
         )
         functions.setdefault(key, []).append(node.id)
 
@@ -62,11 +65,39 @@ def _actions_by_function(
                 f"{action.id}: {artifact_ref}"
             )
         deployed_contract = deployments[0]
-        abi_signatures = set(deployed_contract.attributes.get("abi_signatures", ()))
-        if action.signature not in abi_signatures:
+        abi_entries = tuple(
+            deployed_contract.attributes.get("abi_function_selectors", ())
+        )
+        signature_entries = tuple(
+            selector
+            for signature, selector in abi_entries
+            if signature == action.signature
+        )
+        if not signature_entries:
             raise ValueError(
                 f"allowed action {action.id} signature absent from deployed ABI: "
                 f"{artifact_ref}:{action.signature}"
+            )
+        if len(signature_entries) != 1:
+            raise ValueError(
+                f"ambiguous ABI entry for allowed action {action.id}: "
+                f"{artifact_ref}:{action.signature}"
+            )
+        selector = signature_entries[0]
+        if not isinstance(selector, str):
+            raise ValueError(
+                f"missing ABI selector for allowed action {action.id}: "
+                f"{artifact_ref}:{action.signature}"
+            )
+        selector_signatures = {
+            signature
+            for signature, candidate in abi_entries
+            if candidate == selector
+        }
+        if len(selector_signatures) != 1:
+            raise ValueError(
+                f"ABI selector collision for allowed action {action.id}: "
+                f"{artifact_ref}:{selector}"
             )
 
         function_id: str | None = None
@@ -74,7 +105,7 @@ def _actions_by_function(
             "linearized_base_contracts", (deployed_contract.id,)
         )
         for contract_id in linearization:
-            candidates = functions.get((str(contract_id), action.signature), ())
+            candidates = functions.get((str(contract_id), selector), ())
             if len(candidates) > 1:
                 raise ValueError(
                     f"ambiguous effective function for allowed action "

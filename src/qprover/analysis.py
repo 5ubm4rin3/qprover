@@ -145,6 +145,7 @@ class FunctionFacts:
     canonical_id: str
     signature: str
     declaration_id: int
+    function_selector: str | None
     visibility: str
     state_mutability: str
     modifiers: tuple[str, ...]
@@ -175,6 +176,7 @@ class ContractFacts:
     source_span: str
     linearized_base_contracts: tuple[str, ...]
     abi_signatures: tuple[str, ...]
+    abi_function_selectors: tuple[tuple[str, str | None], ...]
     storage: tuple[StorageFacts, ...]
     functions: tuple[FunctionFacts, ...]
 
@@ -532,6 +534,12 @@ def _extract_function(
         canonical_id=canonical_id,
         signature=signature,
         declaration_id=int(node["id"]),
+        function_selector=(
+            str(node["functionSelector"]).lower()
+            if node.get("visibility") in {"public", "external"}
+            and isinstance(node.get("functionSelector"), str)
+            else None
+        ),
         visibility=str(node.get("visibility", "unknown")),
         state_mutability=str(node.get("stateMutability", "unknown")),
         modifiers=modifiers,
@@ -648,10 +656,19 @@ def analyze(bundle: ArtifactBundle) -> AnalysisReport:
         )
         for source_name, node in contract_nodes
     }
-    abi_by_artifact = {
-        artifact.compilation_target: _abi_signatures(artifact.abi)
-        for artifact in bundle.artifacts
-    }
+    abi_by_artifact: dict[
+        str, tuple[tuple[str, ...], tuple[tuple[str, str | None], ...]]
+    ] = {}
+    for artifact in bundle.artifacts:
+        signatures = _abi_signatures(artifact.abi)
+        method_identifiers = dict(artifact.method_identifiers)
+        abi_by_artifact[artifact.compilation_target] = (
+            signatures,
+            tuple(
+                (signature, method_identifiers.get(signature))
+                for signature in signatures
+            ),
+        )
     function_identities: dict[int, tuple[_ContractIdentity, str, str]] = {}
     function_contract: dict[int, _ContractIdentity] = {}
     for _, contract_node in contract_nodes:
@@ -746,6 +763,9 @@ def analyze(bundle: ArtifactBundle) -> AnalysisReport:
                 key=lambda item: item.name,
             )
         )
+        abi_signatures, abi_function_selectors = abi_by_artifact.get(
+            f"{source_name}:{identity.name}", ((), ())
+        )
         contracts.append(
             ContractFacts(
                 source_name=source_name,
@@ -762,9 +782,8 @@ def analyze(bundle: ArtifactBundle) -> AnalysisReport:
                     for declaration_id in node.get("linearizedBaseContracts", ())
                     if declaration_id in contract_identities
                 ),
-                abi_signatures=abi_by_artifact.get(
-                    f"{source_name}:{identity.name}", ()
-                ),
+                abi_signatures=abi_signatures,
+                abi_function_selectors=abi_function_selectors,
                 storage=storage,
                 functions=functions,
             )

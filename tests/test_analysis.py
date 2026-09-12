@@ -198,6 +198,115 @@ def _address_action(action_id: str, target_id: str, signature: str) -> dict:
     return action
 
 
+def _selector_action(
+    action_id: str, signature: str, parameter_types: tuple[str, ...]
+) -> dict:
+    action = _zero_arg_action(action_id, "selector", signature)
+    action["arguments"] = [
+        {
+            "name": f"argument{index}",
+            "type": type_name,
+            "domain": {
+                "kind": "finite",
+                "values": [
+                    (
+                        "0x0000000000000000000000000000000000000001"
+                        if type_name == "address"
+                        else "[]"
+                        if "[" in type_name or type_name.startswith("(")
+                        else 0
+                    )
+                ],
+            },
+        }
+        for index, type_name in enumerate(parameter_types)
+    ]
+    return action
+
+
+def build_selector_target(
+    tmp_path: Path,
+) -> tuple[AnalysisReport, TargetManifest]:
+    project = tmp_path / "selectors"
+    project.mkdir()
+    (project / "foundry.toml").write_text(
+        '[profile.default]\nsrc="."\nout="out"\ncache_path="cache"\n'
+        'solc_version="0.8.34"\nevm_version="prague"\n',
+        encoding="utf-8",
+    )
+    (project / "Selector.sol").write_text(
+        "pragma solidity 0.8.34; "
+        "type Amount is uint256; "
+        "interface Receiver {} "
+        "contract SelectorBase { "
+        "enum Choice { Zero, One } "
+        "struct Payload { uint256 amount; address recipient; } "
+        "function enumSink(Choice choice, address payable recipient) public { "
+        "recipient.transfer(uint256(choice)); } "
+        "function structSink(Payload memory payload) public { "
+        "payable(payload.recipient).transfer(payload.amount); } "
+        "function structArraySink(Payload[] memory payloads, "
+        "address payable recipient) public { recipient.transfer(payloads.length); } "
+        "function udvtSink(Amount amount, address payable recipient) public { "
+        "recipient.transfer(Amount.unwrap(amount)); } "
+        "function contractArraySink(Receiver[] memory receivers, "
+        "address payable recipient) public { recipient.transfer(receivers.length); } "
+        "function overloaded(uint8 amount, address payable recipient) public { "
+        "recipient.transfer(amount); } "
+        "function overloaded(uint256 amount, address payable recipient) public { "
+        "recipient.transfer(amount); } "
+        "} contract SelectorDerived is SelectorBase {}",
+        encoding="utf-8",
+    )
+    raw = fixture_manifest_data("selectors")
+    raw["target"]["source_files"] = ["Selector.sol"]
+    raw["deployments"] = [
+        {
+            "id": "selector",
+            "artifact": "Selector.sol:SelectorDerived",
+            "constructor_args": [],
+            "sender_slot": 0,
+            "value_wei": 0,
+        }
+    ]
+    raw["actions"] = [
+        _selector_action("enum_sink", "enumSink(uint8,address)", ("uint8", "address")),
+        _selector_action(
+            "struct_sink",
+            "structSink((uint256,address))",
+            ("(uint256,address)",),
+        ),
+        _selector_action(
+            "struct_array_sink",
+            "structArraySink((uint256,address)[],address)",
+            ("(uint256,address)[]", "address"),
+        ),
+        _selector_action(
+            "udvt_sink", "udvtSink(uint256,address)", ("uint256", "address")
+        ),
+        _selector_action(
+            "contract_array_sink",
+            "contractArraySink(address[],address)",
+            ("address[]", "address"),
+        ),
+        _selector_action(
+            "overloaded_small",
+            "overloaded(uint8,address)",
+            ("uint8", "address"),
+        ),
+        _selector_action(
+            "overloaded_large",
+            "overloaded(uint256,address)",
+            ("uint256", "address"),
+        ),
+    ]
+    manifest_path = tmp_path / "selector-target.json"
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    manifest = load_manifest(manifest_path)
+    with build_target(manifest) as bundle:
+        return analyze(bundle), manifest
+
+
 def build_multi_source_target(
     tmp_path: Path,
 ) -> tuple[AnalysisReport, TargetManifest]:
@@ -315,3 +424,30 @@ def test_unknown_source_offsets_never_create_ordering() -> None:
 
     assert analysis_module._known_before("unknown", "10:2:0") is False
     assert analysis_module._known_before("1:2:0", "unknown") is False
+
+
+def test_analysis_retains_compiler_selectors_and_canonical_deployment_abi(
+    tmp_path: Path,
+) -> None:
+    report, _ = build_selector_target(tmp_path)
+    base = report.contract("Selector.sol", "SelectorBase")
+    derived = report.contract("Selector.sol", "SelectorDerived")
+
+    assert {function.function_selector for function in base.functions} == {
+        "0bd843f7",
+        "2e591303",
+        "3e480099",
+        "4c7f9a90",
+        "5a54ea8a",
+        "98fff606",
+        "cf520c46",
+    }
+    assert derived.abi_function_selectors == (
+        ("contractArraySink(address[],address)", "3e480099"),
+        ("enumSink(uint8,address)", "cf520c46"),
+        ("overloaded(uint256,address)", "98fff606"),
+        ("overloaded(uint8,address)", "5a54ea8a"),
+        ("structArraySink((uint256,address)[],address)", "4c7f9a90"),
+        ("structSink((uint256,address))", "0bd843f7"),
+        ("udvtSink(uint256,address)", "2e591303"),
+    )

@@ -1,7 +1,11 @@
 import dataclasses
 
 import pytest
-from test_analysis import build_analysis_report, build_multi_source_target
+from test_analysis import (
+    build_analysis_report,
+    build_multi_source_target,
+    build_selector_target,
+)
 from test_artifacts import fixture_manifest_data
 
 from qprover.analysis import AnalysisReport
@@ -168,3 +172,82 @@ def test_external_call_before_write_hypothesis_requires_same_value_call(
         and hypothesis.action_ids[-1] == "uncorrelated_ordering"
         for hypothesis in hypotheses
     )
+
+
+def test_hypotheses_resolve_canonical_abi_types_by_compiler_selector(
+    tmp_path,
+) -> None:
+    report, manifest = build_selector_target(tmp_path)
+    graph = build_program_graph(report)
+    hypotheses = generate_hypotheses(graph, manifest)
+    weak = {
+        hypothesis.action_ids[0]: hypothesis.function_ids[0]
+        for hypothesis in hypotheses
+        if hypothesis.kind == "public-value-sink-with-weak-or-unknown-guard"
+    }
+    expected_selectors = {
+        "enum_sink": "cf520c46",
+        "struct_sink": "0bd843f7",
+        "struct_array_sink": "4c7f9a90",
+        "udvt_sink": "2e591303",
+        "contract_array_sink": "3e480099",
+        "overloaded_small": "5a54ea8a",
+        "overloaded_large": "98fff606",
+    }
+
+    assert set(weak) == set(expected_selectors)
+    assert {
+        action_id: graph.node(function_id).attributes["function_selector"]
+        for action_id, function_id in weak.items()
+    } == expected_selectors
+    assert weak["overloaded_small"] != weak["overloaded_large"]
+
+
+def test_hypotheses_fail_closed_when_effective_selector_is_missing(
+    tmp_path,
+) -> None:
+    report, manifest = build_selector_target(tmp_path)
+    base = report.contract("Selector.sol", "SelectorBase")
+    broken_base = dataclasses.replace(
+        base,
+        functions=tuple(
+            dataclasses.replace(function, function_selector=None)
+            if function.signature.startswith("enumSink(")
+            else function
+            for function in base.functions
+        ),
+    )
+    broken_report = dataclasses.replace(
+        report,
+        contracts=tuple(
+            broken_base if contract.canonical_id == base.canonical_id else contract
+            for contract in report.contracts
+        ),
+    )
+
+    with pytest.raises(ValueError, match="no effective function declaration"):
+        generate_hypotheses(build_program_graph(broken_report), manifest)
+
+
+def test_hypotheses_fail_closed_on_deployment_abi_selector_collision(
+    tmp_path,
+) -> None:
+    report, manifest = build_selector_target(tmp_path)
+    derived = report.contract("Selector.sol", "SelectorDerived")
+    broken_derived = dataclasses.replace(
+        derived,
+        abi_function_selectors=derived.abi_function_selectors
+        + (("colliding()", "cf520c46"),),
+    )
+    broken_report = dataclasses.replace(
+        report,
+        contracts=tuple(
+            broken_derived
+            if contract.canonical_id == derived.canonical_id
+            else contract
+            for contract in report.contracts
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ABI selector collision"):
+        generate_hypotheses(build_program_graph(broken_report), manifest)
