@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import keyword
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -157,7 +158,11 @@ class ObservationSpec(StrictModel):
     @field_validator("id")
     @classmethod
     def reserve_initial_namespace(cls, value: str) -> str:
-        if not value.isidentifier():
+        if (
+            not value.isidentifier()
+            or keyword.iskeyword(value)
+            or value in {"True", "False", "None"}
+        ):
             raise ValueError("observation IDs must be valid expression identifiers")
         if value.startswith("initial_"):
             raise ValueError("observation IDs cannot use the reserved initial_ prefix")

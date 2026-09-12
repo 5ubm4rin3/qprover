@@ -392,6 +392,42 @@ def test_manifest_rejects_current_and_initial_observation_name_collision(
 
 
 @pytest.mark.parametrize(
+    "observation_id",
+    ["and", "class", "True", "False", "None"],
+)
+def test_manifest_rejects_observation_id_that_is_not_expression_addressable(
+    tmp_path: Path, observation_id: str
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["observations"][0]["id"] = observation_id
+    raw["impact"]["protocol_asset_observation"] = observation_id
+    if observation_id in {"True", "False", "None"}:
+        raw["invariants"][0]["expression"] = (
+            f"{observation_id} == initial_{observation_id}"
+        )
+    else:
+        raw["invariants"][0]["expression"] = (
+            "attacker_assets >= initial_attacker_assets"
+        )
+
+    with pytest.raises(ManifestError, match="expression identifier"):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_accepts_expression_addressable_observation_id(tmp_path: Path) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["observations"][0]["id"] = "protocol_total_2"
+    raw["impact"]["protocol_asset_observation"] = "protocol_total_2"
+    raw["invariants"][0]["expression"] = (
+        "protocol_total_2 >= initial_protocol_total_2"
+    )
+
+    manifest = load_manifest(write_json(tmp_path / "target.json", raw))
+
+    assert manifest.observations[0].id == "protocol_total_2"
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("max_sequence_length", 0),
