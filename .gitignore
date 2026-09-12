@@ -1,0 +1,26 @@
+.worktrees/
+.superpowers/
+.qprover-git/
+
+# Local secrets and tool state
+.env
+.env.*
+!.env.example
+
+# Generated build and test artifacts
+out/
+cache/
+artifacts/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local environments and editor state
+.venv/
+.DS_Store
+.idea/
+.vscode/
