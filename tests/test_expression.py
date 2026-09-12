@@ -50,8 +50,6 @@ def test_invariant_violation_is_a_value_not_an_exception() -> None:
     [
         ("healthy and assets > 0", True),
         ("not healthy or assets == 0", False),
-        ("False and missing", False),
-        ("True or missing", True),
     ],
 )
 def test_expression_evaluates_boolean_operators(
@@ -65,6 +63,24 @@ def test_expression_evaluates_boolean_operators(
 
 def test_missing_observation_is_inconclusive() -> None:
     result = evaluate_expression("assets >= missing", {"assets": 2})
+
+    assert result.status == "inconclusive"
+    assert result.value is None
+    assert result.reason == "missing observation: missing"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "False and missing",
+        "True or missing",
+        "assets < 0 < missing",
+    ],
+)
+def test_missing_observation_is_inconclusive_even_if_runtime_short_circuits(
+    source: str,
+) -> None:
+    result = evaluate_expression(source, {"assets": 2})
 
     assert result.status == "inconclusive"
     assert result.value is None

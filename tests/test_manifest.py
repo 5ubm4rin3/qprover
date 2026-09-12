@@ -6,7 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from qprover.manifest import ManifestError, load_manifest
-from qprover.models import ActionStep, Candidate, TargetManifest
+from qprover.models import (
+    ActionStep,
+    Candidate,
+    DeploymentSpec,
+    ObservationSnapshot,
+    TargetManifest,
+)
 
 
 def minimal_manifest(tmp_path: Path) -> dict[str, Any]:
@@ -148,6 +154,69 @@ def test_candidate_id_is_stable_and_sensitive_to_steps() -> None:
     assert len(first.canonical_id) == 64
 
 
+def test_action_step_deeply_freezes_argument_aliases() -> None:
+    nested = [2, 3]
+    step = ActionStep("deposit", "vault", "deposit(uint256[])", 1, (nested,))
+    before = Candidate(steps=(step,)).canonical_id
+
+    nested.append(4)
+
+    assert step.args == ((2, 3),)
+    assert Candidate(steps=(step,)).canonical_id == before
+
+
+def test_action_step_rejects_mapping_arguments() -> None:
+    with pytest.raises(TypeError, match="mapping"):
+        ActionStep("deposit", "vault", "deposit(uint256)", 1, ({"value": 1},))
+
+
+def test_candidate_copies_and_freezes_steps_alias() -> None:
+    step = ActionStep("deposit", "vault", "deposit(uint256)", 1, (1,))
+    steps = [step]
+    candidate = Candidate(steps=steps)  # type: ignore[arg-type]
+    before = candidate.canonical_id
+
+    steps.append(ActionStep("deposit", "vault", "deposit(uint256)", 1, (2,)))
+
+    assert candidate.steps == (step,)
+    assert candidate.canonical_id == before
+
+
+def test_observation_snapshot_copies_and_freezes_values() -> None:
+    source = {"protocol_assets": 10}
+    snapshot = ObservationSnapshot(values=source, state_hash="a" * 64)
+
+    source["protocol_assets"] = 0
+
+    assert snapshot.values["protocol_assets"] == 10
+    with pytest.raises(TypeError):
+        snapshot.values["protocol_assets"] = 1  # type: ignore[index]
+
+
+def test_deployment_spec_deeply_freezes_constructor_arguments() -> None:
+    nested = [1, 2]
+    reference = {"deployment": "vault"}
+    deployment = DeploymentSpec(
+        id="child",
+        artifact="src/Child.sol:Child",
+        constructor_args=(nested, reference),
+        sender_slot=0,
+        value_wei=0,
+    )
+
+    nested.append(3)
+    reference["deployment"] = "changed"
+
+    assert deployment.constructor_args[0] == (1, 2)
+    assert deployment.constructor_args[1]["deployment"] == "vault"
+    with pytest.raises(TypeError):
+        deployment.constructor_args[1]["deployment"] = "changed"  # type: ignore[index]
+    assert deployment.model_dump(mode="json")["constructor_args"] == [
+        [1, 2],
+        {"deployment": "vault"},
+    ]
+
+
 @pytest.mark.parametrize("field", ["rpc_url", "unexpected"])
 def test_manifest_rejects_external_rpc_and_unknown_fields(
     tmp_path: Path, field: str
@@ -208,7 +277,15 @@ def test_manifest_rejects_duplicate_symbolic_ids(
 
 @pytest.mark.parametrize(
     "signature",
-    ["deposit(uint)", "deposit(address, uint256)", "deposit"],
+    [
+        "deposit(uint)",
+        "deposit(address, uint256)",
+        "deposit",
+        "deposit(banana)",
+        "deposit(uint257)",
+        "deposit(uint256[)",
+        "deposit(fixed)",
+    ],
 )
 def test_manifest_rejects_noncanonical_abi_signature(
     tmp_path: Path, signature: str
@@ -220,11 +297,97 @@ def test_manifest_rejects_noncanonical_abi_signature(
         load_manifest(write_json(tmp_path / "target.json", raw))
 
 
+def test_manifest_rejects_declared_argument_type_mismatch(tmp_path: Path) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["actions"][0]["signature"] = "deposit(address)"
+
+    with pytest.raises(ManifestError, match="declared argument types"):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_rejects_invalid_declared_argument_type(tmp_path: Path) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["actions"][0]["arguments"][0]["type"] = "banana"
+
+    with pytest.raises(ManifestError, match="canonical ABI type"):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_rejects_observation_call_arity_mismatch(tmp_path: Path) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["observations"][0]["signature"] = "protocolAssets(uint256)"
+
+    with pytest.raises(ManifestError, match="observation call arity"):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_accepts_canonical_tuple_and_array_types(tmp_path: Path) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["actions"][0]["signature"] = "deposit((address,uint256)[],bytes32[2])"
+    raw["actions"][0]["arguments"] = [
+        {
+            "name": "entries",
+            "type": "(address,uint256)[]",
+            "domain": {"kind": "finite", "values": ["fixture"]},
+        },
+        {
+            "name": "proof",
+            "type": "bytes32[2]",
+            "domain": {"kind": "finite", "values": ["fixture"]},
+        },
+    ]
+
+    manifest = load_manifest(write_json(tmp_path / "target.json", raw))
+
+    assert tuple(argument.type for argument in manifest.actions[0].arguments) == (
+        "(address,uint256)[]",
+        "bytes32[2]",
+    )
+
+
 def test_manifest_rejects_no_invariants(tmp_path: Path) -> None:
     raw = minimal_manifest(tmp_path)
     raw["invariants"] = []
 
     with pytest.raises(ManifestError):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_rejects_observation_id_that_is_not_expression_identifier(
+    tmp_path: Path,
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["observations"][0]["id"] = "protocol-assets"
+    raw["invariants"][0]["expression"] = (
+        "attacker_assets >= initial_attacker_assets"
+    )
+    raw["impact"]["protocol_asset_observation"] = "protocol-assets"
+
+    with pytest.raises(ManifestError):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_rejects_reserved_initial_observation_id(tmp_path: Path) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["observations"][0]["id"] = "initial_protocol_assets"
+    raw["invariants"][0]["expression"] = (
+        "initial_protocol_assets >= initial_initial_protocol_assets"
+    )
+    raw["impact"]["protocol_asset_observation"] = "initial_protocol_assets"
+
+    with pytest.raises(ManifestError, match="initial_"):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+def test_manifest_rejects_current_and_initial_observation_name_collision(
+    tmp_path: Path,
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    initial_alias = raw["observations"][0].copy()
+    initial_alias["id"] = "initial_protocol_assets"
+    raw["observations"].append(initial_alias)
+
+    with pytest.raises(ManifestError, match="initial_"):
         load_manifest(write_json(tmp_path / "target.json", raw))
 
 
@@ -243,6 +406,65 @@ def test_manifest_rejects_nonpositive_limits(
 ) -> None:
     raw = minimal_manifest(tmp_path)
     raw["limits"][field] = value
+
+    with pytest.raises(ManifestError):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+@pytest.mark.parametrize(
+    ("collection", "field", "value"),
+    [
+        ("actors", "slot", False),
+        ("actors", "balance_wei", "100"),
+        ("deployments", "sender_slot", 0.0),
+        ("deployments", "value_wei", True),
+        ("actions", "max_repetitions", "2"),
+    ],
+)
+def test_manifest_rejects_coercible_values_for_integer_fields(
+    tmp_path: Path, collection: str, field: str, value: object
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw[collection][0][field] = value
+
+    with pytest.raises(ManifestError):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("minimum", "0"), ("maximum", False), ("include_boundaries", 1)],
+)
+def test_manifest_rejects_coercible_integer_domain_scalars(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["actions"][0]["arguments"][0]["domain"][field] = value
+
+    with pytest.raises(ManifestError):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("transaction_budget", 100.0), ("wall_seconds", "30")],
+)
+def test_manifest_rejects_coercible_search_limit_scalars(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["limits"][field] = value
+
+    with pytest.raises(ManifestError):
+        load_manifest(write_json(tmp_path / "target.json", raw))
+
+
+@pytest.mark.parametrize("value", [False, 1.0, "1"])
+def test_manifest_rejects_non_integer_call_values(
+    tmp_path: Path, value: object
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    raw["actions"][0]["value_domain"]["values"] = [value]
 
     with pytest.raises(ManifestError):
         load_manifest(write_json(tmp_path / "target.json", raw))

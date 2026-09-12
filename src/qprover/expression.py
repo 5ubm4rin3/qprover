@@ -162,6 +162,16 @@ def evaluate_expression(
     except SyntaxError as error:
         raise ExpressionError(f"invalid expression syntax: {error.msg}") from error
     _validate_node(parsed)
+    referenced_names = {
+        node.id for node in ast.walk(parsed) if isinstance(node, ast.Name)
+    }
+    missing_names = sorted(referenced_names - values.keys())
+    if missing_names:
+        return ExpressionResult(
+            status="inconclusive",
+            value=None,
+            reason=f"missing observation: {missing_names[0]}",
+        )
     try:
         value = _evaluate(parsed, values)
     except _MissingObservation as error:
