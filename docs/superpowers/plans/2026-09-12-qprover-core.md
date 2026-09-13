@@ -849,110 +849,254 @@ git --git-dir=.qprover-git --work-tree=. commit -m "feat: emit minimized cold-re
 
 ---
 
-### Task 8: CLI, benchmark records, report derivation, and one-command demo
+### Task 8A: production orchestration and defensible optimization signal
+
+The design review found that end-to-end orchestration and certificate assembly
+existed only in test helpers. It also measured a flat QUBO objective for the
+reentrancy demo: the pinned seed found the exploit by annealing luck rather than
+from a static optimization signal. Fix those architectural boundaries before
+adding CLI glue.
+
+**Files:**
+
+- Create: `src/qprover/pipeline.py`
+- Modify: `src/qprover/hypotheses.py`
+- Modify: `src/qprover/search/bqm.py`
+- Modify: `src/qprover/search/qubo.py`
+- Modify: `src/qprover/search/controller.py`
+- Modify: `src/qprover/evaluator.py`
+- Create: `tests/test_pipeline.py`
+- Modify: `tests/test_hypotheses.py`
+- Modify: `tests/test_bqm.py`
+- Modify: `tests/test_qubo_strategy.py`
+- Modify: `tests/test_controller.py`
+- Modify: `tests/test_evaluator.py`
+- Create: `tests/integration/test_proof_pipeline.py`
+
+**Interfaces:**
+
+- Export an exact, provenance-backed action-to-effective-function mapping.
+- Produce `PreparedSearch(report, graph, hypotheses, problem, problem_sha256,
+  action_functions)` with a canonical, location-independent problem hash.
+- Produce `run_search(...)` and `prove_violation(...)` as the only production
+  path from a manifest to search evidence and a proof bundle.
+- Produce a serializable QUBO evidence record containing problem/model hashes,
+  variables, coefficients, penalties, objective components, backend settings,
+  dimensions, feasibility counters, cumulative solver calls/time, and seed.
+
+- [ ] **Step 1: Write action mapping and non-flat problem RED tests**
+
+Assert every manifest action maps exactly once to its effective compiler-backed
+function. Build utilities for every allowed action and dependency transitions
+for every mapped pair, not only actions already present in hypotheses. Add a
+label-neutral reentrancy motif for a state-establishing predecessor followed by
+an external-call-before-write sink. For both A and B twins assert identical
+guidance, nonzero sink utility, and a stronger `step_alpha -> step_beta`
+transition than the reverse. The manifest label/witness files must never be read.
+
+- [ ] **Step 2: Write BQM semantic RED tests**
+
+Require canonical SearchProblem/BQM serialization and hashing. The energy of a
+concrete prime-then-attack sequence must beat its reverse and irrelevant noise.
+Encode repetition limits over the original action across all concrete variants;
+the BQM must not call a multi-variant sequence feasible when
+`candidate_is_valid` rejects it. Accumulate solver calls/time/reads and model
+dimensions across rebuilds rather than retaining only the final sample metadata.
+
+- [ ] **Step 3: Implement mapping, hypotheses, preparation, and BQM evidence**
+
+Use only compiler/manifest/graph facts available equally for A and B. Hypotheses
+remain prioritization leads and never verdicts. Transition bonuses must have
+inspectable provenance and bounded coefficients. Any unsupported mapping or
+non-finite objective fails closed.
+
+- [ ] **Step 4: Write evaluator/controller boundary RED tests**
+
+When a prefix first has a false declared invariant and admissible economic
+impact, stop execution and return `VIOLATION` with that prefix transaction count;
+a later reverting or repairing suffix must not hide or redefine it. Charge
+strategy initialization against the same wall budget used by every strategy.
+Strategy/frontier sampling failure must be reported as unproven exhaustion unless
+the strategy explicitly supplies `exhaustion_proven=True`.
+
+- [ ] **Step 5: Implement first-violation and initialization-aware search**
+
+Preserve exact candidate/transaction budgets. Measure strategy initialization,
+proposal/solver, EVM execution, and proof work separately. Time-to-first
+violation excludes minimization/replay but includes initialization and prior
+candidate execution. Never interpret negative exhaustion as proof of safety.
+
+- [ ] **Step 6: Write production proof-pipeline RED tests**
+
+The pipeline must select the controller's executed violation, truncate to its
+recorded first-violation prefix, freshly re-evaluate it, minimize it, require a
+final fresh admissible violation, build all evidence from the live bundle/EVM
+rather than constants, render/hash/write the PoC and draft certificate, perform
+three cold replays, then expose `CONFIRMED`. Add repaired-suffix, tampered field,
+cleanup, and failure-path tests. Convert monotonic search events to UTC evidence
+events without changing their order.
+
+- [ ] **Step 7: Implement the production proof pipeline**
+
+Return a strict `ProofBundleResult` with certificate/Markdown/PoC/event/QUBO
+paths, hashes, and status. Resolve clean Git revision and dirty state when
+available; treat source-closure hashes as the primary reproducible target
+identity. A failed proof gate remains `NOT_CONFIRMED` and never emits success.
+
+- [ ] **Step 8: Run the Task 8A gates and commit**
+
+Run focused pipeline/search/evaluator tests, the complete Python suite, Ruff,
+format checks for changed files, all twelve Foundry fixtures, and autonomous A/B
+reentrancy integration. The same QUBO configuration must confirm A and not
+confirm B without reading labels.
+
+Commit: `feat: orchestrate optimization-guided exploit proofs`
+
+---
+
+### Task 8B: label-isolated benchmark evidence and deterministic reporting
 
 **Files:**
 
 - Create: `src/qprover/benchmark.py`
 - Create: `src/qprover/report.py`
-- Create: `src/qprover/cli.py`
+- Create: `schemas/benchmark-suite.schema.json`
 - Create: `schemas/benchmark-run.schema.json`
+- Create: `schemas/benchmark-score.schema.json`
+- Create: `benchmarks/config/smoke.json`
+- Create: `tests/test_benchmark.py`
+- Create: `tests/test_report.py`
+- Create: `tests/integration/test_benchmark_smoke.py`
+
+**Interfaces:**
+
+- `runs.jsonl` is immutable label-free execution/proof evidence.
+- `scores.jsonl` is a post-execution join with hidden expected classes.
+- Markdown/JSON summaries are fully regenerated from validated raw records and a
+  labels file only after the complete execution matrix finishes.
+
+- [ ] **Step 1: Write strict suite/run/score model RED tests**
+
+Validate duplicate targets/seeds, finite timings, conditional first-violation
+metrics, problem/config/input hashes, identical effective budgets, complete
+matrix cells, strategy initialization/search/proof timing separation, QUBO
+solver dimensions/calls/time, failure categories, and censored misses. Neither
+run records nor any strategy-visible object may contain expected class, witness,
+or labels data.
+
+- [ ] **Step 2: Write append/resume RED tests**
+
+Derive a run key from suite, manifest, problem, strategy/config, seed, effective
+budgets, and QProver revision. Append one canonical row using `O_APPEND`, locking,
+one write, and `fsync`. Resume at run granularity without duplicates; reject
+partial trailing lines and conflicting duplicate keys. Preserve prior completed
+runs after interruption.
+
+- [ ] **Step 3: Implement execution matrix and raw journal**
+
+Schedule the Cartesian matrix deterministically. Initialize each strategy with
+the same public problem and effective limits, isolate each run/output directory,
+and close every bundle/Anvil process. Do not open the label path until every
+scheduled search completes. Benchmark failures are records, not silently dropped
+cells.
+
+- [ ] **Step 4: Write reporting RED tests**
+
+Assert order-independent deterministic output, per-target and macro results,
+executed-violation versus confirmed rates on positives, false-confirmed rate on
+negatives, cold-replay rates both conditional and overall, censored
+time/transactions-to-first-violation with `n_success / n_scheduled`, stop/failure
+counts, candidate/transaction/revert/feature/minimization/solver totals, and
+explicit incomplete cells. Repeated deterministic-policy seeds are not treated
+as independent samples.
+
+- [ ] **Step 5: Implement post-execution scoring and reports**
+
+Use exact binomial intervals for proportions and paired/fixture-stratified
+comparisons where supported. A measured zero false-confirmed count must include
+its uncertainty bound and never be described as zero risk. Write suite/results/
+labels/config hashes and the exact reproduction command.
+
+- [ ] **Step 6: Run Task 8B gates and commit**
+
+Run unit tests, interrupted/resumed smoke matrix over all four strategies, schema
+validation, full Python suite, Ruff, and changed-file formatting.
+
+Commit: `feat: record label-isolated exploit benchmarks`
+
+---
+
+### Task 8C: noninteractive CLI and one-command autonomous demo
+
+**Files:**
+
+- Create: `src/qprover/cli.py`
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
 - Create: `Makefile`
 - Create: `scripts/demo.sh`
-- Create: `tests/test_benchmark.py`
-- Create: `tests/test_report.py`
 - Create: `tests/test_cli.py`
 - Create: `tests/integration/test_demo.py`
 
 **Interfaces:**
 
-- Consumes: all prior core interfaces.
-- Produces: `qprover doctor|analyze|search|replay|benchmark|report|demo`.
-- Produces: append-only per-run JSONL and deterministic Markdown summaries.
+- Produce `qprover doctor|analyze|search|replay|benchmark|report|demo`.
+- `--json` emits exactly one JSON document on stdout; progress goes to stderr.
+- Search exhaustion without an exploit is a successful `NOT_CONFIRMED` result;
+  validation/build/infrastructure/proof failure is nonzero; demo is nonzero
+  unless the complete proof is `CONFIRMED`.
 
-- [ ] **Step 1: Write benchmark/report failing tests**
+- [ ] **Step 1: Write CLI RED tests**
 
-Use fake timed runs to assert a Cartesian matrix over target/strategy/seed,
-identical configured budgets, labels loaded only after each run, correct
-success/false-confirmed/cold-replay rates, censored misses, medians computed only
-from eligible runs with denominator shown, solver overhead, and stable report
-ordering. Assert the Markdown is fully regenerated from JSONL.
+Test help, strict arguments, JSON/human streams, stable exit codes, doctor checks,
+analysis output paths, strategy/backend validation, replay hash/workspace
+validation, benchmark limit forwarding, and no interactive input. Confirm the
+demo imports or reads no labels/witness and candidate order is unchanged if the
+labels file is removed.
 
-- [ ] **Step 2: Run benchmark/report tests and confirm RED**
+- [ ] **Step 2: Implement CLI and executable doctor**
 
-Run: `uv run pytest tests/test_benchmark.py tests/test_report.py -q`
+Use `argparse` and `qprover = "qprover.cli:main"`. Doctor verifies Python/uv,
+Forge, Anvil, cached compiler/offline build, writable output, loopback chain
+metadata, and process cleanup; optional Slither/Aderyn remain non-core. Replay
+accepts an explicit workspace/proof-bundle root and works from an unrelated CWD
+and an installed wheel.
 
-Expected: benchmark/report modules are absent.
+- [ ] **Step 3: Write autonomous demo RED test**
 
-- [ ] **Step 3: Implement raw benchmark records and derived reporting**
+Run the installed CLI in a temporary output directory. Assert the violation
+candidate came from the initialized QUBO strategy, the objective is non-flat,
+the witness has multiple steps, minimization retains execution, three cold
+replays agree, the certificate is schema/semantic-valid, every artifact is
+portable, and no Anvil process remains on success or signal termination.
 
-Define a strict `BenchmarkRunRecord` with input hash, target, hidden expected
-class, strategy/config, seed, all budgets, outcome, confirmation, stop reason,
-candidate/transaction/revert/feature counts, first-violation metrics,
-minimization, replay, solver dimensions/calls/time, setup/search/total times, and
-failure category. Write one canonical JSON object per line. Derive tables and
-aggregate statistics without mutating raw data.
+- [ ] **Step 4: Implement one-command demo**
 
-- [ ] **Step 4: Write CLI failing tests**
+`scripts/demo.sh` synchronizes frozen dependencies, performs the offline fixture
+build, and executes `uv run qprover demo`. It analyzes
+`scenario_reentrancy_a`, constructs a label-neutral graph/QUBO problem, searches
+with a pinned public seed/budget, minimizes the discovered executed prefix,
+generates the proof bundle, cold replays three times, and prints portable paths.
+It must never inject or look up the known exploit witness.
 
-Test `--help`, JSON output, nonzero error codes, `doctor` tool/version checks,
-`analyze` output paths, `search` strategy validation, `replay` hash validation,
-and forwarding of benchmark limits. No command may prompt interactively.
+- [ ] **Step 5: Verify the entire core and commit**
 
-- [ ] **Step 5: Run CLI tests and confirm RED**
-
-Run: `uv run pytest tests/test_cli.py -q`
-
-Expected: CLI module/entry point is absent.
-
-- [ ] **Step 6: Implement the CLI and `doctor`**
-
-Use `argparse` and the `qprover = "qprover.cli:main"` entry point. Print concise
-human phase output by default and canonical JSON with `--json`. `doctor` checks
-Python, Forge, Anvil, compiler availability through the benchmark build, writable
-output, and loopback executor; it reports optional Slither/Aderyn without making
-them core requirements.
-
-- [ ] **Step 7: Implement one-command demo**
-
-`scripts/demo.sh` runs `uv sync --all-extras`, builds the benchmark project, and
-executes `uv run qprover demo`. The demo analyzes `scenario_reentrancy_a`, runs
-QUBO-guided search with a pinned seed/budget, minimizes the executed violation,
-performs three cold replays, and prints certificate and PoC paths. It must fail if
-any verification stage fails.
-
-- [ ] **Step 8: Add end-to-end demo test**
-
-Run the installed CLI with a temporary output directory. Assert exit code zero,
-`CONFIRMED` in parsed JSON, a multi-step first witness, a minimized sequence,
-three successful cold replay entries, schema-valid certificate, existing PoC,
-and no orphan Anvil process.
-
-- [ ] **Step 9: Verify the entire core and commit**
-
-Run: `uv lock --check`
-
-Run: `uv run ruff check src tests`
-
-Run: `uv run pytest -q`
-
-Run: `forge test --root benchmarks/foundry -vv`
-
-Run: `uv run qprover doctor --json`
-
-Run: `uv run qprover demo --json --out /tmp/qprover-demo-core`
-
-Expected: every command exits zero; demo certificate is `CONFIRMED` with three
-cold replays.
-
-Commit:
+Run:
 
 ```bash
-git --git-dir=.qprover-git --work-tree=. add pyproject.toml uv.lock src schemas tests benchmarks Makefile scripts
-git --git-dir=.qprover-git --work-tree=. commit -m "feat: complete QProver local exploit proof pipeline"
+uv lock --check
+uv run ruff format --check .
+uv run ruff check .
+uv run pytest -q
+forge test --root benchmarks/foundry -vv
+uv run qprover doctor --json
+uv run qprover demo --json --out /private/tmp/qprover-demo-core
 ```
+
+Require every command to exit zero and the demo to produce a portable
+`CONFIRMED` certificate with exactly three matching cold replays.
+
+Commit: `feat: complete QProver local exploit proof pipeline`
 
 ---
 
