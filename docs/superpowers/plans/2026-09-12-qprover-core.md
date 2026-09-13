@@ -720,10 +720,14 @@ the supplied accounting fields for economic confirmation eligibility.
 
 - [ ] **Step 7: Add real search integration**
 
-Use a small fixed budget and the graph/risk strategy on `scenario_reentrancy_a`.
-Assert the returned sequence has at least two transactions, actually violates the
-manifest invariant, and `scenario_reentrancy_b` is not confirmed under the same
-candidate sequence.
+Use a small fixed budget and the graph/risk strategy on
+`scenario_access_control_a`, whose compiler-backed graph produces an actionable
+two-step hypothesis. Assert the returned sequence has at least two transactions,
+actually violates the manifest invariant, and `scenario_access_control_b` is not
+confirmed under the same candidate sequence. Separately replay the known
+reentrancy A/B regression candidates through the evaluator to cover dynamically
+created callback execution; Task 5 established that this mechanism intentionally
+has no static hypothesis, so it is not a valid graph-guidance acceptance target.
 
 - [ ] **Step 8: Verify Task 6 and commit**
 
