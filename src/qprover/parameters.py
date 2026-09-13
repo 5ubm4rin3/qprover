@@ -219,6 +219,13 @@ class _ConstraintTranslator:
         del trees
 
     def _interval(self, node: ast.AST) -> tuple[int, int] | None:
+        """Enclose integer-coerced values on defined evaluation paths.
+
+        Booleans inhabit [0, 1]; and/or retain the selected operand's range.
+        An undefined-only operation may use any enclosure (we use [0, 0]):
+        translate() separately tracks whether its value can be evaluated.
+        None means a finite enclosure could not be established.
+        """
         if isinstance(node, ast.Expression):
             return self._interval(node.body)
         if isinstance(node, ast.Constant) and type(node.value) is bool:
@@ -234,6 +241,13 @@ class _ConstraintTranslator:
                 return value, value
             return None
         if isinstance(node, ast.UnaryOp):
+            if isinstance(node.op, ast.Not):
+                interval = self._interval(node.operand)
+                if interval == (0, 0):
+                    return 1, 1
+                if interval is not None and not interval[0] <= 0 <= interval[1]:
+                    return 0, 0
+                return 0, 1
             interval = self._interval(node.operand)
             if interval is None:
                 return None
@@ -242,6 +256,31 @@ class _ConstraintTranslator:
             if isinstance(node.op, ast.USub):
                 return -interval[1], -interval[0]
             return None
+        if isinstance(node, ast.Compare):
+            return 0, 1
+        if isinstance(node, ast.BoolOp):
+            selected: list[tuple[int, int]] = []
+            for index, child in enumerate(node.values):
+                interval = self._interval(child)
+                if interval is None:
+                    return None
+                low, high = interval
+                if index == len(node.values) - 1:
+                    selected.append(interval)
+                    break
+                if isinstance(node.op, ast.And):
+                    if low <= 0 <= high:
+                        selected.append((0, 0))
+                    if low == high == 0:
+                        break
+                else:
+                    if low < 0:
+                        selected.append((low, min(high, -1)))
+                    if high > 0:
+                        selected.append((max(low, 1), high))
+                    if not low <= 0 <= high:
+                        break
+            return min(low for low, _ in selected), max(high for _, high in selected)
         if not isinstance(node, ast.BinOp):
             return None
         left = self._interval(node.left)
@@ -263,42 +302,101 @@ class _ConstraintTranslator:
             )
             return min(products), max(products)
         if isinstance(node.op, ast.Pow):
-            if right_low != right_high or not 0 <= right_low <= _MAX_EXPONENT:
+            if not 0 <= right_low <= right_high <= _MAX_EXPONENT:
                 return None
-            values = [left_low**right_low, left_high**right_low]
-            if left_low <= 0 <= left_high:
-                values.append(0**right_low)
+            # Extremes occur at an endpoint (or zero) of the base interval.
+            # Both exponent parities are needed for negative bases; their first
+            # and last occurrences bound each monotone integer-power family.
+            exponents = {right_low, right_high}
+            if right_low < right_high:
+                exponents.update((right_low + 1, right_high - 1))
+            bases = {left_low, left_high}
+            bases.update(
+                value for value in (-1, 0, 1) if left_low <= value <= left_high
+            )
+            values = [base**exponent for base in bases for exponent in exponents]
             return min(values), max(values)
-        if isinstance(node.op, ast.LShift):
-            if right_low != right_high or not 0 <= right_low <= _MAX_SHIFT:
+        if isinstance(node.op, (ast.LShift, ast.RShift)):
+            if not 0 <= right_low <= right_high <= _MAX_SHIFT:
                 return None
-            factor = 1 << right_low
-            return left_low * factor, left_high * factor
-        if isinstance(node.op, ast.RShift):
-            if right_low != right_high or not 0 <= right_low <= _MAX_SHIFT:
-                return None
-            factor = 1 << right_low
-            return left_low // factor, left_high // factor
+            if isinstance(node.op, ast.LShift):
+                values = [base << count for base in left for count in right]
+            else:
+                values = [base >> count for base in left for count in right]
+            return min(values), max(values)
         if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
-            maximum = max(
-                abs(left_low),
-                abs(left_high),
-                abs(right_low),
-                abs(right_high),
+            # Exclude zero from each sign interval. Quotient extrema occur at
+            # numerator endpoints and divisor endpoints nearest/farthest zero.
+            divisors = {value for value in right if value != 0}
+            divisors.update(
+                value for value in (-1, 1) if right_low <= value <= right_high
             )
-            return -maximum, maximum
+            if not divisors:
+                return 0, 0
+            if isinstance(node.op, ast.FloorDiv):
+                values = [base // divisor for base in left for divisor in divisors]
+                return min(values), max(values)
+            return min(0, right_low + 1), max(0, right_high - 1)
         if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
-            width = (
-                max(
-                    abs(left_low).bit_length(),
-                    abs(left_high).bit_length(),
-                    abs(right_low).bit_length(),
-                    abs(right_high).bit_length(),
-                )
-                + 1
-            )
-            return -(1 << (width - 1)), (1 << (width - 1)) - 1
+            if left_low == left_high and right_low == right_high:
+                if isinstance(node.op, ast.BitAnd):
+                    value = left_low & right_low
+                elif isinstance(node.op, ast.BitOr):
+                    value = left_low | right_low
+                else:
+                    value = left_low ^ right_low
+                return value, value
+            if isinstance(node.op, ast.BitAnd):
+                nonnegative_highs = [high for low, high in (left, right) if low >= 0]
+                if nonnegative_highs:
+                    return 0, min(nonnegative_highs)
+            magnitude_bits = max(abs(value).bit_length() for value in (*left, *right))
+            maximum = (1 << magnitude_bits) - 1
+            if left_low >= 0 and right_low >= 0:
+                return 0, maximum
+            return -(1 << magnitude_bits), maximum
         return None
+
+    @staticmethod
+    def _power(
+        base: z3.ArithRef, exponent: z3.ArithRef, low: int, high: int
+    ) -> z3.ArithRef:
+        """Exact bounded exponentiation, with O(log(high)) shared AST nodes."""
+        result = z3.IntVal(1)
+        factor = base
+        for bit in range(high.bit_length()):
+            if low == high:
+                if high & (1 << bit):
+                    result = result * factor
+            else:
+                result = z3.If(
+                    (exponent / (1 << bit)) % 2 == 1, result * factor, result
+                )
+            if bit + 1 < high.bit_length():
+                factor = factor * factor
+        return result
+
+    @staticmethod
+    def _shift(
+        base: z3.ArithRef, count: z3.ArithRef, low: int, high: int, *, left: bool
+    ) -> z3.ArithRef:
+        """Compose constant shifts selected by count bits, without overflow.
+
+        Repeated floor divisions by positive powers of two compose exactly,
+        including negative numerators. At most 13 stages encode count <= 4096.
+        """
+        result = base
+        for bit in range(high.bit_length()):
+            if low == high and not high & (1 << bit):
+                continue
+            factor = z3.IntVal(1 << (1 << bit))
+            shifted = result * factor if left else result / factor
+            result = (
+                shifted
+                if low == high
+                else z3.If((count / (1 << bit)) % 2 == 1, shifted, result)
+            )
+        return result
 
     def _bitwise(
         self,
@@ -418,27 +516,18 @@ class _ConstraintTranslator:
                         f"constraint exponent must be in [0, {_MAX_EXPONENT}]"
                     )
                 low, high = exponent_interval
-                powers: list[z3.ArithRef] = [z3.IntVal(1)]
-                for _ in range(high):
-                    powers.append(powers[-1] * left)
-                if low == high:
-                    return powers[low], defined
-                result = powers[high]
-                for exponent in range(high - 1, low - 1, -1):
-                    result = z3.If(right == exponent, powers[exponent], result)
-                return result, defined
+                return self._power(left, right, low, high), defined
             if isinstance(node.op, (ast.LShift, ast.RShift)):
-                if not isinstance(node.right, ast.Constant) or not (
-                    type(node.right.value) in (int, bool)
-                    and 0 <= node.right.value <= _MAX_SHIFT
+                count_interval = self._interval(node.right)
+                if count_interval is None or not (
+                    0 <= count_interval[0] <= count_interval[1] <= _MAX_SHIFT
                 ):
                     raise ParameterError(
-                        f"shift must use an integer literal in [0, {_MAX_SHIFT}]"
+                        f"constraint shift must be in [0, {_MAX_SHIFT}]"
                     )
-                factor = z3.IntVal(1 << int(node.right.value))
-                if isinstance(node.op, ast.LShift):
-                    return left * factor, defined
-                return left / factor, defined
+                return self._shift(
+                    left, right, *count_interval, left=isinstance(node.op, ast.LShift)
+                ), defined
             if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
                 return self._bitwise(node, left, right), defined
             raise ParameterError("unsupported binary constraint operator")

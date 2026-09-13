@@ -510,8 +510,8 @@ def test_z3_shift_has_exact_non_overflowing_semantics() -> None:
     assert values == ((1,),)
 
 
-@pytest.mark.parametrize("constraint", ["1 << arg0 == 2", "1 << 4097 > 0"])
-def test_z3_shift_requires_bounded_literal_rhs(constraint: str) -> None:
+@pytest.mark.parametrize("constraint", ["1 << (arg0 - 1) == 2", "1 << 4097 > 0"])
+def test_z3_shift_requires_proven_safe_count(constraint: str) -> None:
     with pytest.raises(ParameterError, match="shift"):
         solve_integer_domain(
             names=("arg0",),
@@ -519,6 +519,154 @@ def test_z3_shift_requires_bounded_literal_rhs(constraint: str) -> None:
             bounds={"arg0": (0, 1)},
             max_models=2,
         )
+
+
+@pytest.mark.parametrize(
+    ("constraint", "expected"),
+    [
+        ("((arg0 == 0) & True) == True", ((0,),)),
+        ("2 ** (arg0 == 0) == 2", ((0,),)),
+        ("True << (arg0 == 0) == 1", ((1,),)),
+        ("(arg0 and True) & 1 == 1", ((1,),)),
+    ],
+)
+def test_z3_computed_boolean_review_regressions(constraint, expected) -> None:
+    assert (
+        solve_integer_domain(
+            names=("arg0",),
+            constraints=(constraint,),
+            bounds={"arg0": (0, 1)},
+            max_models=2,
+        )
+        == expected
+    )
+
+
+_NESTED_BOOLEAN_OPERANDS = (
+    "({name} == 0)",
+    "(not {name})",
+    "(({name} < 1) and True)",
+    "(({name} > 0) or False)",
+    "(({name} == 0) & True)",
+    "(({name} == 0) | False)",
+    "(({name} == 0) ^ True)",
+)
+
+
+@pytest.mark.parametrize(
+    "operator", ("+", "-", "*", "//", "%", "**", "&", "|", "^", "<<", ">>")
+)
+@pytest.mark.parametrize(
+    "left,right", itertools.product(_NESTED_BOOLEAN_OPERANDS, repeat=2)
+)
+def test_z3_nested_boolean_operand_matrix_matches_concrete(
+    left, right, operator
+) -> None:
+    expression = f"{left.format(name='arg0')} {operator} {right.format(name='arg1')}"
+    constraint = f"({expression}) == arg2"
+    expected = []
+    for arg0, arg1 in itertools.product(range(-1, 2), repeat=2):
+        result = evaluate_expression(expression, {"arg0": arg0, "arg1": arg1})
+        if result.status == "evaluated":
+            expected.append((arg0, arg1, int(result.value)))
+    assert solve_integer_domain(
+        names=("arg0", "arg1", "arg2"),
+        constraints=(constraint,),
+        bounds={"arg0": (-1, 1), "arg1": (-1, 1), "arg2": (-1, 2)},
+        max_models=27,
+    ) == tuple(expected)
+
+
+@pytest.mark.parametrize(
+    "expression,low,high",
+    [
+        ("(-2) ** (arg0 + 1)", -1, 3),
+        ("0 ** (arg0 + 1)", -1, 1),
+        ("(-1) ** (arg0 + 254)", 0, 2),
+        ("2 ** (arg0 + 254)", 0, 2),
+        ("2 ** ((arg0 and 2) or 1)", -1, 1),
+        ("2 ** (arg0 % 3)", -2, 2),
+        ("2 ** ((arg0 + 3) // 2)", -2, 2),
+        ("2 ** ((arg0 == 0) ** (arg0 == 1))", -1, 1),
+        ("2 ** ((arg0 == 0) << (arg0 != 0))", -1, 1),
+        ("2 ** ((arg0 == 0) >> (arg0 != 0))", -1, 1),
+        ("2 ** (+(not arg0))", -1, 1),
+        ("2 ** (-(arg0 - 1))", -1, 1),
+        ("(-3) << (arg0 + 1)", -1, 2),
+        ("(-3) >> (arg0 + 1)", -1, 2),
+        ("(-3) << (arg0 + 4094)", 0, 2),
+        ("(-3) >> (arg0 + 4094)", 0, 2),
+        ("(arg0 or 4) & 7", -2, 2),
+        ("(arg0 and -3) ^ 2", -2, 2),
+        ("((arg0 == 0) + 2) | 1", -1, 1),
+    ],
+)
+def test_z3_computed_integer_operands_match_concrete_values(
+    expression, low, high
+) -> None:
+    # A separate equality for every concrete value checks the complete model set,
+    # including coincident results at distinct argument values.
+    concrete = {
+        value: evaluate_expression(expression, {"arg0": value}).value
+        for value in range(low, high + 1)
+    }
+    for result in set(concrete.values()):
+        assert solve_integer_domain(
+            names=("arg0",),
+            constraints=(f"({expression}) == expected",),
+            constants={"expected": int(result)},
+            bounds={"arg0": (low, high)},
+            max_models=high - low + 1,
+        ) == tuple((value,) for value, actual in concrete.items() if actual == result)
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        "2 ** (arg0 + 256) > 0",
+        "2 ** (arg0 - 1) > 0",
+        "1 << (arg0 + 4096) > 0",
+        "1 >> (arg0 - 1) == 0",
+        "2 ** (arg0 or -1) > 0",
+        "1 << (arg0 and -1) > 0",
+    ],
+)
+def test_z3_computed_counts_reject_unproven_safety(constraint) -> None:
+    with pytest.raises(ParameterError, match="exponent|shift"):
+        solve_integer_domain(
+            names=("arg0",),
+            constraints=(constraint,),
+            bounds={"arg0": (0, 1)},
+            max_models=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        "arg0 == 0 or 2 ** (1 // arg0) == 2",
+        "arg0 == 0 or 1 << (1 // arg0) == 2",
+        "arg0 == 0 or -3 >> (1 // arg0) == -2",
+        "2 ** ((arg0 == 0) or (1 // arg0 == 1)) == 2",
+        "(arg0 and 1 // arg0) & 1 == arg0",
+        "False and 2 ** (1 // arg0) or arg0 == 0",
+        "arg0 > 0 < 1 << (1 // arg0)",
+        "2 ** (False and 1 // arg0) == 1",
+        "1 << (True or 1 // arg0) == 2",
+    ],
+)
+def test_z3_computed_counts_keep_path_sensitive_definedness(constraint) -> None:
+    expected = []
+    for value in range(2):
+        result = evaluate_expression(constraint, {"arg0": value})
+        if result.status == "evaluated" and bool(result.value):
+            expected.append((value,))
+    assert solve_integer_domain(
+        names=("arg0",),
+        constraints=(constraint,),
+        bounds={"arg0": (0, 1)},
+        max_models=2,
+    ) == tuple(expected)
 
 
 def test_z3_exponent_bound_matches_invariant_evaluator() -> None:
