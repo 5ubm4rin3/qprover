@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qprover.local/schemas/event.schema.json",
+  "title": "QProver Evidence Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "sequence", "timestamp", "kind", "details"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "kind": {"enum": ["search", "minimization", "poc_generation", "cold_replay", "confirmation"]},
+    "details": {"type": "object"}
+  }
+}
