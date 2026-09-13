@@ -8,11 +8,13 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
+from eth_abi.exceptions import DecodingError, EncodingError
 from eth_utils.abi import abi_to_signature, collapse_if_tuple
 from web3 import Web3
+from web3.exceptions import Web3Exception
 
 from qprover.artifacts import ArtifactBundle, ContractArtifact
-from qprover.evm import EVMError, LocalAnvil
+from qprover.evm import EVMError, LocalAnvil, TransactionRejected
 from qprover.expression import ExpressionError, evaluate_expression
 from qprover.models import (
     ActionSpec,
@@ -148,7 +150,7 @@ class ScenarioEvaluator:
             )
             try:
                 data = contract.constructor(*constructor_args).data_in_transaction
-            except (TypeError, ValueError) as error:
+            except (TypeError, ValueError, Web3Exception) as error:
                 raise EvaluatorError(
                     "constructor arguments are not ABI encodable"
                 ) from error
@@ -194,7 +196,7 @@ class ScenarioEvaluator:
         types = [collapse_if_tuple(dict(item)) for item in entry.get("inputs", ())]
         try:
             encoded = self._codec.encode(types, list(args))
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, EncodingError) as error:
             raise EvaluatorError("arguments are not ABI encodable") from error
         return f"0x{(selector + encoded).hex()}"
 
@@ -218,7 +220,7 @@ class ScenarioEvaluator:
                 raise EvaluatorError("observations must return exactly one value")
             try:
                 decoded = self._codec.decode(output_types, bytes.fromhex(raw[2:]))
-            except (TypeError, ValueError) as error:
+            except (TypeError, ValueError, DecodingError) as error:
                 raise EvaluatorError(
                     "observation return data is not ABI decodable"
                 ) from error
@@ -231,48 +233,107 @@ class ScenarioEvaluator:
     def _validate_candidate(self, candidate: Candidate) -> str | None:
         if not isinstance(candidate, Candidate) or not candidate.steps:
             return "candidate must contain at least one action"
-        for step in candidate.steps:
-            action = self._actions.get(step.action_id)
-            if action is None:
-                return "candidate references unknown action"
-            if (
-                step.target_id != action.target_id
-                or step.signature != action.signature
-                or step.sender_slot not in action.sender_slots
-                or step.value_wei not in action.value_domain.values
-                or len(step.args) != len(action.arguments)
-            ):
-                return "candidate action does not match manifest allow-list"
-            for argument, value in zip(action.arguments, step.args, strict=True):
-                domain = argument.domain
-                if domain.kind == "finite" and value not in domain.values:
-                    return "candidate argument is outside finite domain"
-                if domain.kind == "integer" and (
-                    type(value) is not int
-                    or not domain.minimum <= value <= domain.maximum
-                ):
-                    return "candidate argument is outside integer domain"
-            constraint_values = {
-                f"arg{index}": value
-                for index, value in enumerate(step.args)
-                if type(value) in (int, bool)
-            }
-            for argument in action.arguments:
-                domain = argument.domain
-                if domain.kind != "integer":
-                    continue
-                for expression in domain.constraints:
-                    try:
-                        result = evaluate_expression(expression, constraint_values)
-                    except ExpressionError:
-                        return "candidate integer constraint is invalid"
-                    if result.status != "evaluated" or not bool(result.value):
-                        return "candidate argument violates integer constraint"
-            try:
-                self._calldata(step.target_id, step.signature, step.args)
-            except EvaluatorError:
-                return "candidate arguments are not ABI encodable"
         return None
+
+    def _validate_step(self, step: object) -> str | None:
+        action_id = getattr(step, "action_id", None)
+        action = self._actions.get(action_id)
+        if action is None:
+            return "candidate references unknown action"
+        sender_slot = getattr(step, "sender_slot", None)
+        value_wei = getattr(step, "value_wei", None)
+        if type(sender_slot) is not int:
+            return "candidate sender slot must be an exact integer"
+        if type(value_wei) is not int:
+            return "candidate value must be an exact integer"
+        if not 0 <= value_wei < 1 << 256:
+            return "candidate value must be an exact uint256"
+        args = getattr(step, "args", ())
+        if (
+            getattr(step, "target_id", None) != action.target_id
+            or getattr(step, "signature", None) != action.signature
+            or sender_slot not in action.sender_slots
+            or not any(
+                type(value_wei) is type(allowed) and value_wei == allowed
+                for allowed in action.value_domain.values
+            )
+            or len(args) != len(action.arguments)
+        ):
+            return "candidate action does not match manifest allow-list"
+        for argument, value in zip(action.arguments, args, strict=True):
+            domain = argument.domain
+            if domain.kind == "finite" and not any(
+                type(value) is type(allowed) and value == allowed
+                for allowed in domain.values
+            ):
+                return "candidate argument is outside finite domain"
+            if domain.kind == "integer" and (
+                type(value) is not int or not domain.minimum <= value <= domain.maximum
+            ):
+                return "candidate argument is outside integer domain"
+        constraint_values = {
+            f"arg{index}": value
+            for index, value in enumerate(args)
+            if type(value) in (int, bool)
+        }
+        for argument in action.arguments:
+            domain = argument.domain
+            if domain.kind != "integer":
+                continue
+            for expression in domain.constraints:
+                try:
+                    result = evaluate_expression(expression, constraint_values)
+                except ExpressionError:
+                    return "candidate integer constraint is invalid"
+                if result.status != "evaluated" or not bool(result.value):
+                    return "candidate argument violates integer constraint"
+        try:
+            self._calldata(action.target_id, action.signature, args)
+        except EvaluatorError:
+            return "candidate arguments are not ABI encodable"
+        return None
+
+    @staticmethod
+    def _receipt_fields(receipt: object) -> tuple[int, int, int]:
+        if type(receipt) is not dict:
+            raise EVMError("malformed local receipt")
+
+        def quantity(field: str) -> int:
+            value = receipt.get(field)
+            if type(value) is not str or not value.startswith("0x") or not value[2:]:
+                raise EVMError("malformed local receipt")
+            try:
+                return int(value, 16)
+            except ValueError as error:
+                raise EVMError("malformed local receipt") from error
+
+        status = quantity("status")
+        if status not in {0, 1}:
+            raise EVMError("malformed local receipt")
+        return status, quantity("gasUsed"), quantity("effectiveGasPrice")
+
+    def _candidate_inconclusive(
+        self,
+        *,
+        submitted: int,
+        current: ObservationSnapshot,
+        features: set[str],
+        steps: list[dict[str, object]],
+        index: int,
+        reason: str,
+    ) -> Evaluation:
+        return Evaluation(
+            outcome=Outcome.INCONCLUSIVE,
+            transaction_count=submitted,
+            trace_features=frozenset(features),
+            state_fingerprint=current.state_hash,
+            metadata={
+                "category": "candidate",
+                "reason": reason,
+                "invalid_step": index,
+                "steps": steps,
+            },
+        )
 
     def _invariants(
         self, current: ObservationSnapshot
@@ -384,13 +445,6 @@ class ScenarioEvaluator:
         return features, struct_count, call_count, trace_failed, return_data
 
     def evaluate(self, candidate: Candidate) -> Evaluation:
-        invalid = self._validate_candidate(candidate)
-        if invalid is not None:
-            return Evaluation(
-                outcome=Outcome.INCONCLUSIVE,
-                transaction_count=0,
-                metadata={"category": "candidate", "reason": invalid},
-            )
         try:
             self.anvil.reset()
         except EVMError:
@@ -398,6 +452,16 @@ class ScenarioEvaluator:
                 outcome=Outcome.INFRA_ERROR,
                 transaction_count=0,
                 metadata={"category": "snapshot", "reason": "reset failed"},
+            )
+
+        invalid = self._validate_candidate(candidate)
+        if invalid is not None:
+            self.current_observations = self.initial_observations
+            return Evaluation(
+                outcome=Outcome.INCONCLUSIVE,
+                transaction_count=0,
+                state_fingerprint=self.initial_observations.state_hash,
+                metadata={"category": "candidate", "reason": invalid},
             )
 
         features: set[str] = set()
@@ -410,8 +474,41 @@ class ScenarioEvaluator:
         submitted = 0
 
         for index, step in enumerate(candidate.steps, start=1):
+            invalid = self._validate_step(step)
+            if invalid is not None:
+                return self._candidate_inconclusive(
+                    submitted=submitted,
+                    current=current,
+                    features=features,
+                    steps=step_records,
+                    index=index,
+                    reason=invalid,
+                )
             action = self._actions[step.action_id]
             calldata = self._calldata(step.target_id, step.signature, step.args)
+            try:
+                sender_balance = self.anvil.balance(self.actors[step.sender_slot])
+            except EVMError:
+                return Evaluation(
+                    outcome=Outcome.INFRA_ERROR,
+                    transaction_count=submitted,
+                    trace_features=frozenset(features),
+                    state_fingerprint=current.state_hash,
+                    metadata={
+                        "category": "rpc",
+                        "reason": "could not read candidate sender balance",
+                        "steps": step_records,
+                    },
+                )
+            if sender_balance < step.value_wei:
+                return self._candidate_inconclusive(
+                    submitted=submitted,
+                    current=current,
+                    features=features,
+                    steps=step_records,
+                    index=index,
+                    reason="insufficient local sender balance",
+                )
             try:
                 transaction_hash = self.anvil.send_transaction(
                     {
@@ -422,16 +519,15 @@ class ScenarioEvaluator:
                         "gas": 30_000_000,
                     }
                 )
-                submitted += 1
-                receipt = self.anvil.wait_for_receipt(transaction_hash)
-                (
-                    traced,
-                    struct_count,
-                    call_count,
-                    trace_failed,
-                    return_data,
-                ) = self._trace_features(action, transaction_hash, calldata)
-                features.update(traced)
+            except TransactionRejected:
+                return self._candidate_inconclusive(
+                    submitted=submitted,
+                    current=current,
+                    features=features,
+                    steps=step_records,
+                    index=index,
+                    reason="local transaction deterministically rejected",
+                )
             except EVMError:
                 return Evaluation(
                     outcome=Outcome.INFRA_ERROR,
@@ -440,12 +536,48 @@ class ScenarioEvaluator:
                     state_fingerprint=current.state_hash,
                     metadata={
                         "category": "rpc",
-                        "reason": "local transaction or trace failed",
+                        "reason": "local transaction submission failed",
+                        "steps": step_records,
+                    },
+                )
+            submitted += 1
+            try:
+                receipt = self.anvil.wait_for_receipt(transaction_hash)
+                status, gas_used, effective_gas_price = self._receipt_fields(receipt)
+            except (EVMError, TypeError, ValueError):
+                return Evaluation(
+                    outcome=Outcome.INFRA_ERROR,
+                    transaction_count=submitted,
+                    trace_features=frozenset(features),
+                    state_fingerprint=current.state_hash,
+                    metadata={
+                        "category": "receipt",
+                        "reason": "malformed or unavailable local receipt",
+                        "steps": step_records,
+                    },
+                )
+            try:
+                (
+                    traced,
+                    struct_count,
+                    call_count,
+                    trace_failed,
+                    return_data,
+                ) = self._trace_features(action, transaction_hash, calldata)
+                features.update(traced)
+            except (EVMError, TypeError, ValueError):
+                return Evaluation(
+                    outcome=Outcome.INFRA_ERROR,
+                    transaction_count=submitted,
+                    trace_features=frozenset(features),
+                    state_fingerprint=current.state_hash,
+                    metadata={
+                        "category": "trace",
+                        "reason": "malformed or unavailable local trace",
                         "steps": step_records,
                     },
                 )
 
-            status = int(receipt.get("status", "0x0"), 16)
             record: dict[str, object] = {
                 "index": index,
                 "action_id": action.id,
@@ -454,8 +586,8 @@ class ScenarioEvaluator:
                 "transaction_hash": transaction_hash,
                 "calldata_hash": _sha256(bytes.fromhex(calldata[2:])),
                 "receipt_status": status,
-                "gas_used": int(receipt.get("gasUsed", "0x0"), 16),
-                "effective_gas_price": int(receipt.get("effectiveGasPrice", "0x0"), 16),
+                "gas_used": gas_used,
+                "effective_gas_price": effective_gas_price,
                 "trace_struct_log_count": struct_count,
                 "call_trace_count": call_count,
                 "trace_failed": trace_failed,
@@ -485,7 +617,19 @@ class ScenarioEvaluator:
                     current
                 )
                 final_impact = self._impact(current)
-            except (EVMError, EvaluatorError):
+            except EVMError:
+                return Evaluation(
+                    outcome=Outcome.INFRA_ERROR,
+                    transaction_count=submitted,
+                    trace_features=frozenset(features),
+                    state_fingerprint=current.state_hash,
+                    metadata={
+                        "category": "observation-rpc",
+                        "reason": "malformed or unavailable observation RPC",
+                        "steps": step_records,
+                    },
+                )
+            except EvaluatorError:
                 return Evaluation(
                     outcome=Outcome.INCONCLUSIVE,
                     transaction_count=submitted,

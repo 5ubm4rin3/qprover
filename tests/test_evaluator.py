@@ -7,18 +7,21 @@ import pytest
 
 from qprover.artifacts import ArtifactBundle, build_target
 from qprover.evaluator import ScenarioEvaluator
-from qprover.evm import LocalAnvil
+from qprover.evm import EVMError, LocalAnvil, TransactionRejected
 from qprover.manifest import load_manifest
 from qprover.models import (
     ActionSpec,
     ActionStep,
+    ActorSpec,
     ArgumentSpec,
     Candidate,
+    FiniteDomain,
     ImpactSpec,
     IntegerDomain,
     Outcome,
     TargetManifest,
 )
+from qprover.search.controller import SearchController
 
 ROOT = Path(__file__).parents[1]
 
@@ -234,3 +237,296 @@ def test_evaluator_enforces_integer_domain_constraints_without_execution() -> No
     assert result.transaction_count == 0
     assert result.metadata["category"] == "candidate"
     assert "constraint" in result.metadata["reason"]
+
+
+@pytest.mark.parametrize(
+    ("sender_slot", "value_wei"),
+    [(True, 0), (1.0, 0), (1, False), (1, 0.0)],
+)
+def test_evaluator_rejects_coerced_sender_or_value_types(
+    access_a: tuple[TargetManifest, ArtifactBundle, LocalAnvil, ScenarioEvaluator],
+    sender_slot: object,
+    value_wei: object,
+) -> None:
+    manifest, _, _, evaluator = access_a
+    action = next(item for item in manifest.actions if item.id == "step_alpha")
+    candidate = Candidate(
+        (
+            ActionStep(
+                action_id=action.id,
+                target_id=action.target_id,
+                signature=action.signature,
+                sender_slot=sender_slot,  # type: ignore[arg-type]
+                args=(),
+                value_wei=value_wei,  # type: ignore[arg-type]
+            ),
+        )
+    )
+
+    result = evaluator.evaluate(candidate)
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 0
+    assert "exact" in result.metadata["reason"]
+
+
+def test_evaluator_rejects_manifest_allowed_value_above_uint256() -> None:
+    source = _manifest("scenario_access_control_a")
+    original = next(action for action in source.actions if action.id == "noise_one")
+    oversized = original.model_copy(
+        update={"value_domain": FiniteDomain(kind="finite", values=(1 << 256,))}
+    )
+    manifest = source.model_copy(
+        update={
+            "actions": tuple(
+                oversized if action.id == oversized.id else action
+                for action in source.actions
+            )
+        }
+    )
+    candidate = Candidate((_step(manifest, "noise_one", value_wei=1 << 256),))
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 0
+    assert "uint256" in result.metadata["reason"]
+
+
+def test_evaluator_accepts_exact_max_uint256_value_when_affordable() -> None:
+    source = _manifest("scenario_access_control_a")
+    maximum = (1 << 256) - 1
+    original_action = next(
+        action for action in source.actions if action.id == "noise_one"
+    )
+    max_value_action = original_action.model_copy(
+        update={"value_domain": FiniteDomain(kind="finite", values=(maximum,))}
+    )
+    deployment = source.deployments[0].model_copy(update={"value_wei": 0})
+    actors = tuple(
+        ActorSpec(id=actor.id, slot=actor.slot, balance_wei=maximum)
+        if actor.id == "attacker"
+        else actor
+        for actor in source.actors
+    )
+    manifest = source.model_copy(
+        update={
+            "actors": actors,
+            "deployments": (deployment,),
+            "actions": tuple(
+                max_value_action if action.id == max_value_action.id else action
+                for action in source.actions
+            ),
+        }
+    )
+    candidate = Candidate((_step(manifest, "noise_one", value_wei=maximum),))
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.PASS
+    assert result.transaction_count == 1
+    assert result.metadata["steps"][0]["effective_gas_price"] == 0
+
+
+def _zero_balance_attacker(manifest: TargetManifest) -> TargetManifest:
+    actors = tuple(
+        ActorSpec(id=actor.id, slot=actor.slot, balance_wei=0)
+        if actor.id == "attacker"
+        else actor
+        for actor in manifest.actors
+    )
+    return manifest.model_copy(update={"actors": actors})
+
+
+def test_evaluator_rejects_unaffordable_step_before_submission() -> None:
+    manifest = _zero_balance_attacker(_manifest("scenario_access_control_a"))
+    candidate = Candidate((_step(manifest, "noise_one", value_wei=10**18),))
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 0
+    assert result.metadata["category"] == "candidate"
+    assert result.metadata["invalid_step"] == 1
+    assert "insufficient" in result.metadata["reason"]
+
+
+def test_later_unaffordable_step_preserves_actual_prior_transaction_count() -> None:
+    manifest = _zero_balance_attacker(_manifest("scenario_access_control_a"))
+    candidate = Candidate(
+        (
+            _step(manifest, "noise_two", args=(7,)),
+            _step(manifest, "noise_one", value_wei=10**18),
+        )
+    )
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 1
+    assert len(result.metadata["steps"]) == 1
+    assert result.metadata["invalid_step"] == 2
+
+
+def test_later_invalid_scalar_type_preserves_actual_prior_transaction_count(
+    access_a: tuple[TargetManifest, ArtifactBundle, LocalAnvil, ScenarioEvaluator],
+) -> None:
+    manifest, _, _, evaluator = access_a
+    candidate = Candidate(
+        (
+            _step(manifest, "noise_two", args=(7,)),
+            ActionStep(
+                action_id="step_alpha",
+                target_id="scenario",
+                signature="claimRole()",
+                sender_slot=1,
+                args=(),
+                value_wei=False,  # type: ignore[arg-type]
+            ),
+        )
+    )
+
+    result = evaluator.evaluate(candidate)
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 1
+    assert len(result.metadata["steps"]) == 1
+    assert result.metadata["invalid_step"] == 2
+
+
+def test_deterministic_transaction_rejection_is_candidate_inconclusive(
+    access_a: tuple[TargetManifest, ArtifactBundle, LocalAnvil, ScenarioEvaluator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _, anvil, evaluator = access_a
+    monkeypatch.setattr(
+        anvil,
+        "send_transaction",
+        lambda transaction: (_ for _ in ()).throw(
+            TransactionRejected("deterministic rejection")
+        ),
+    )
+
+    result = evaluator.evaluate(Candidate((_step(manifest, "step_alpha"),)))
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 0
+    assert result.metadata["category"] == "candidate"
+
+
+def test_malformed_receipt_becomes_infrastructure_evaluation(
+    access_a: tuple[TargetManifest, ArtifactBundle, LocalAnvil, ScenarioEvaluator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _, anvil, evaluator = access_a
+    monkeypatch.setattr(
+        anvil, "wait_for_receipt", lambda transaction_hash: {"status": []}
+    )
+
+    result = evaluator.evaluate(Candidate((_step(manifest, "step_alpha"),)))
+
+    assert result.outcome is Outcome.INFRA_ERROR
+    assert result.transaction_count == 1
+    assert result.metadata["category"] == "receipt"
+
+
+def test_malformed_trace_becomes_infrastructure_evaluation(
+    access_a: tuple[TargetManifest, ArtifactBundle, LocalAnvil, ScenarioEvaluator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _, anvil, evaluator = access_a
+    original_request = anvil._request
+
+    def malformed_trace(method: str, params=None):
+        if method == "debug_traceTransaction":
+            return {"failed": False, "returnValue": "0x", "structLogs": "bad"}
+        return original_request(method, params)
+
+    monkeypatch.setattr(anvil, "_request", malformed_trace)
+
+    result = evaluator.evaluate(Candidate((_step(manifest, "step_alpha"),)))
+
+    assert result.outcome is Outcome.INFRA_ERROR
+    assert result.transaction_count == 1
+    assert result.metadata["category"] == "trace"
+
+
+def test_malformed_observation_rpc_becomes_infrastructure_evaluation(
+    access_a: tuple[TargetManifest, ArtifactBundle, LocalAnvil, ScenarioEvaluator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _, anvil, evaluator = access_a
+    monkeypatch.setattr(
+        anvil,
+        "call",
+        lambda transaction: (_ for _ in ()).throw(EVMError("malformed call result")),
+    )
+
+    result = evaluator.evaluate(Candidate((_step(manifest, "noise_two", args=(7,)),)))
+
+    assert result.outcome is Outcome.INFRA_ERROR
+    assert result.transaction_count == 1
+    assert result.metadata["category"] == "observation-rpc"
+
+
+def test_abi_invalid_allowed_value_is_rejected_before_submission() -> None:
+    source = _manifest("scenario_access_control_a")
+    original = next(action for action in source.actions if action.id == "noise_two")
+    invalid_argument = ArgumentSpec(
+        name="value",
+        type="uint256",
+        domain=FiniteDomain(kind="finite", values=("not-an-integer",)),
+    )
+    invalid_action = original.model_copy(update={"arguments": (invalid_argument,)})
+    manifest = source.model_copy(
+        update={
+            "actions": tuple(
+                invalid_action if action.id == invalid_action.id else action
+                for action in source.actions
+            )
+        }
+    )
+    candidate = Candidate((_step(manifest, "noise_two", args=("not-an-integer",)),))
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 0
+    assert "ABI" in result.metadata["reason"]
+
+
+def test_controller_continues_after_unaffordable_candidate() -> None:
+    manifest = _zero_balance_attacker(_manifest("scenario_access_control_a"))
+    candidates = [
+        Candidate((_step(manifest, "noise_one", value_wei=10**18),)),
+        Candidate((_step(manifest, "step_alpha"), _step(manifest, "step_beta"))),
+    ]
+
+    class Strategy:
+        def __init__(self) -> None:
+            self.results = []
+
+        def propose(self, remaining_transactions: int):
+            del remaining_transactions
+            return candidates.pop(0) if candidates else None
+
+        def observe(self, candidate: Candidate, result) -> None:
+            del candidate
+            self.results.append(result)
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        evaluator = ScenarioEvaluator(manifest, bundle, anvil)
+        run = SearchController(run_id_factory=lambda: "candidate-continuation").run(
+            Strategy(), evaluator, manifest.limits
+        )
+
+    assert [item.evaluation.outcome for item in run.evaluations] == [
+        Outcome.INCONCLUSIVE,
+        Outcome.VIOLATION,
+    ]
+    assert run.evm_transactions == 2

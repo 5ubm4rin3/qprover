@@ -1,11 +1,71 @@
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Iterator
+import socket
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from qprover.evm import EVMError, LocalAnvil
+from qprover.evm import EVMError, LocalAnvil, RPCError, TransactionRejected
+
+
+class _LiveProcess:
+    pid = 1
+
+    def poll(self) -> None:
+        return None
+
+
+@contextmanager
+def _fake_loopback_rpc(
+    responder: Callable[[dict], dict | bytes],
+) -> Iterator[tuple[int, list[dict]]]:
+    requests: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+            length = int(self.headers["content-length"])
+            request = json.loads(self.rfile.read(length))
+            requests.append(request)
+            response = responder(request)
+            payload = (
+                response
+                if isinstance(response, bytes)
+                else json.dumps(response).encode()
+            )
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _attach_fake_process(anvil: LocalAnvil, port: int) -> None:
+    anvil._port = port
+    anvil._process = _LiveProcess()  # type: ignore[assignment]
+
+
+def _unused_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        return reservation.getsockname()[1]
 
 
 @pytest.fixture
@@ -51,8 +111,8 @@ def test_anvil_is_deterministic_local_and_does_not_expose_keys(
     ],
 )
 def test_anvil_rejects_external_or_non_http_rpc_endpoints(url: str) -> None:
-    with pytest.raises(ValueError, match="loopback HTTP"):
-        LocalAnvil(rpc_url=url)
+    with pytest.raises(TypeError, match="rpc_url"):
+        LocalAnvil(rpc_url=url)  # type: ignore[call-arg]
 
 
 def test_snapshot_revert_immediately_replaces_one_use_baseline(
@@ -140,3 +200,204 @@ def test_anvil_rpc_surface_rejects_unapproved_methods(anvil: LocalAnvil) -> None
 
     with pytest.raises(EVMError, match="not permitted"):
         anvil._rpc("anvil_setCode", [anvil.accounts[0], "0x00"])
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda request: {"jsonrpc": "1.0", "id": request["id"], "result": "0x1"},
+        lambda request: {"jsonrpc": "2.0", "id": request["id"] + 1, "result": "0x1"},
+        lambda request: {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": "0x1",
+            "error": {"code": -1, "message": "both"},
+        },
+        lambda request: {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "error": {"code": True, "message": 7},
+        },
+    ],
+)
+def test_rpc_rejects_uncorrelated_or_malformed_envelopes(mutate) -> None:
+    with _fake_loopback_rpc(mutate) as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+
+        with pytest.raises(EVMError, match="JSON-RPC"):
+            anvil._request("eth_chainId")
+
+
+def test_consumed_chain_id_rejects_non_hex_quantity() -> None:
+    def respond(request: dict) -> dict:
+        results = {
+            "eth_chainId": ["0x7a69"],
+            "eth_accounts": [],
+            "eth_getBlockByNumber": {},
+            "eth_gasPrice": "0x0",
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": results[request["method"]],
+        }
+
+    with _fake_loopback_rpc(respond) as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+
+        with pytest.raises(EVMError, match="chain ID"):
+            anvil._read_chain_id()
+
+
+def test_rpc_rejects_non_utf8_response_body() -> None:
+    with _fake_loopback_rpc(lambda request: b"\xff") as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+
+        with pytest.raises(EVMError, match="request failed"):
+            anvil._request("eth_chainId")
+
+
+def test_consumed_balance_rejects_quantity_above_uint256() -> None:
+    def respond(request: dict) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": "0x1" + "0" * 64,
+        }
+
+    with _fake_loopback_rpc(respond) as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+
+        with pytest.raises(EVMError, match="account balance"):
+            anvil.balance("0x" + "11" * 20)
+
+
+def test_receipt_and_traces_reject_malformed_local_rpc_results() -> None:
+    transaction_hash = "0x" + "11" * 32
+
+    def respond(request: dict) -> dict:
+        results = {
+            "eth_getTransactionReceipt": {"status": "0x1", "gasUsed": "wat"},
+            "debug_traceTransaction": {
+                "failed": False,
+                "returnValue": "0x",
+                "structLogs": [{"depth": True, "pc": 0, "op": "STOP"}],
+            },
+            "trace_transaction": [{"action": {"to": "not-an-address", "input": "0x"}}],
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": results[request["method"]],
+        }
+
+    with _fake_loopback_rpc(respond) as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+
+        with pytest.raises(EVMError, match="receipt"):
+            anvil.wait_for_receipt(transaction_hash, timeout=0.1)
+        with pytest.raises(EVMError, match="debug trace"):
+            anvil.debug_trace(transaction_hash)
+        with pytest.raises(EVMError, match="transaction trace"):
+            anvil.transaction_trace(transaction_hash)
+
+
+def test_prebound_foreign_responder_is_not_accepted_as_spawned_anvil() -> None:
+    def respond(request: dict) -> dict:
+        method = request["method"]
+        result = {
+            "eth_chainId": "0x7a69",
+            "eth_accounts": [
+                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+                "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+            ],
+            "eth_getBlockByNumber": {
+                "timestamp": "0x6553f100",
+                "baseFeePerGas": "0x0",
+            },
+            "eth_gasPrice": "0x0",
+        }[method]
+        return {"jsonrpc": "2.0", "id": request["id"], "result": result}
+
+    with _fake_loopback_rpc(respond) as (port, _):
+        anvil = LocalAnvil(
+            readiness_timeout=0.3,
+            _port_allocator=lambda: port,
+            _startup_attempts=1,
+        )
+
+        with pytest.raises(EVMError, match="owned Anvil"):
+            anvil.start()
+
+        assert anvil.process_id is None
+        assert not anvil.running
+
+
+def test_anvil_retries_a_port_collision_with_a_new_ephemeral_port() -> None:
+    def respond(request: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": request["id"], "result": "0x7a69"}
+
+    with _fake_loopback_rpc(respond) as (occupied_port, _):
+        available_port = _unused_port()
+        ports = iter((occupied_port, available_port))
+        with LocalAnvil(
+            readiness_timeout=0.3,
+            _port_allocator=lambda: next(ports),
+            _startup_attempts=2,
+        ) as anvil:
+            pid = anvil.process_id
+            assert anvil.rpc_url == f"http://127.0.0.1:{available_port}"
+            assert pid is not None and _process_exists(pid)
+
+    assert not _process_exists(pid)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(-32_003, TransactionRejected), (-32_000, RPCError)],
+)
+def test_transaction_rejection_uses_only_narrow_rpc_code(
+    code: int, expected: type[Exception]
+) -> None:
+    def respond(request: dict) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "error": {"code": code, "message": "untrusted server text"},
+        }
+
+    with _fake_loopback_rpc(respond) as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+        anvil._accounts = ("0x" + "11" * 20,)
+
+        with pytest.raises(expected):
+            anvil.send_transaction(
+                {
+                    "from": anvil._accounts[0],
+                    "to": "0x" + "22" * 20,
+                    "data": "0x",
+                    "value": 0,
+                    "gas": 21_000,
+                }
+            )
+
+
+def test_consumed_transaction_hash_must_be_exact_hex() -> None:
+    def respond(request: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": request["id"], "result": "0x12"}
+
+    with _fake_loopback_rpc(respond) as (port, _):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+        anvil._accounts = ("0x" + "11" * 20,)
+
+        with pytest.raises(EVMError, match="transaction hash"):
+            anvil.send_transaction(
+                {"from": anvil._accounts[0], "data": "0x", "gas": 21_000}
+            )
