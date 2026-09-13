@@ -1,0 +1,353 @@
+from __future__ import annotations
+
+import json
+from collections import Counter
+
+import pytest
+
+from qprover.models import ActionStep, Candidate, Outcome
+from qprover.parameters import ActionVariant
+from qprover.search.base import Evaluation, candidate_is_valid
+from qprover.search.bqm import SearchProblem
+from qprover.search.coverage import CoverageGuidedStrategy
+from qprover.search.exact import ExactBackend
+from qprover.search.qubo import QuboStrategy
+from qprover.search.random import RandomStrategy
+from qprover.search.risk import RiskGuidedStrategy
+
+
+def variant(
+    action_id: str,
+    *,
+    sender_slot: int = 0,
+    argument: int = 0,
+    max_repetitions: int = 1,
+) -> ActionVariant:
+    return ActionVariant(
+        action_id=action_id,
+        target_id="vault",
+        signature=f"{action_id}(uint256)",
+        sender_slot=sender_slot,
+        args=(argument,),
+        value_wei=0,
+        max_repetitions=max_repetitions,
+        argument_provenance=(("explicit",),),
+        value_provenance=("explicit",),
+    )
+
+
+@pytest.fixture
+def variants() -> tuple[ActionVariant, ...]:
+    return (
+        variant("prepare", argument=0),
+        variant("prepare", argument=1),
+        variant("trigger", sender_slot=0, argument=7),
+        variant("observe", sender_slot=1, argument=9, max_repetitions=2),
+    )
+
+
+@pytest.fixture
+def problem(variants: tuple[ActionVariant, ...]) -> SearchProblem:
+    return SearchProblem(
+        actions=("prepare", "trigger", "observe"),
+        variants=variants,
+        max_sequence_length=2,
+        utilities={"prepare": 0.2, "trigger": 0.9, "observe": 0.1},
+        transitions={("prepare", "trigger"): 1.0},
+        repetition_limits={"prepare": 1, "trigger": 1, "observe": 2},
+        length_weight=0.25,
+    )
+
+
+def evaluation(candidate: Candidate, *, outcome: Outcome = Outcome.PASS) -> Evaluation:
+    actions = tuple(step.action_id for step in candidate.steps)
+    return Evaluation(
+        outcome=outcome,
+        transaction_count=len(candidate.steps),
+        trace_features=frozenset({f"prefix:{'/'.join(actions)}"}),
+        state_fingerprint=f"state:{'/'.join(actions)}",
+    )
+
+
+def collect(
+    strategy, problem: SearchProblem, seed: int, count: int
+) -> tuple[Candidate, ...]:
+    strategy.initialize(problem, seed)
+    proposed: list[Candidate] = []
+    for _ in range(count):
+        candidate = strategy.propose(problem.max_sequence_length)
+        if candidate is None:
+            break
+        proposed.append(candidate)
+        strategy.observe(candidate, evaluation(candidate))
+    return tuple(proposed)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        RandomStrategy,
+        CoverageGuidedStrategy,
+        RiskGuidedStrategy,
+        lambda: QuboStrategy(backend=ExactBackend(max_bits=20), reads=256),
+    ],
+)
+def test_strategies_emit_only_valid_unique_candidates(
+    factory, problem: SearchProblem
+) -> None:
+    candidates = collect(factory(), problem, seed=73, count=18)
+
+    assert candidates
+    assert len({candidate.canonical_id for candidate in candidates}) == len(candidates)
+    assert all(candidate_is_valid(problem, candidate) for candidate in candidates)
+    for candidate in candidates:
+        counts = Counter(step.action_id for step in candidate.steps)
+        assert len(candidate.steps) <= problem.max_sequence_length
+        assert all(
+            counts[action] <= problem.repetition_limits[action]
+            for action in problem.actions
+        )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        RandomStrategy,
+        CoverageGuidedStrategy,
+        RiskGuidedStrategy,
+        lambda: QuboStrategy(backend=ExactBackend(max_bits=20), reads=256),
+    ],
+)
+def test_strategy_proposal_order_is_seed_deterministic(
+    factory, problem: SearchProblem
+) -> None:
+    first = collect(factory(), problem, seed=914, count=12)
+    second = collect(factory(), problem, seed=914, count=12)
+
+    assert tuple(item.canonical_id for item in first) == tuple(
+        item.canonical_id for item in second
+    )
+
+
+def test_search_problem_contains_no_hidden_witness_or_label(
+    problem: SearchProblem,
+) -> None:
+    assert not hasattr(problem, "known_witness")
+    assert not hasattr(problem, "expected_label")
+    assert set(problem.__dataclass_fields__).isdisjoint(
+        {"known_witness", "expected_label", "is_vulnerable"}
+    )
+
+
+def test_search_problem_derives_repetition_limits_from_concrete_variants() -> None:
+    concrete = variant("repeat", max_repetitions=2)
+
+    derived = SearchProblem(
+        actions=("repeat",),
+        variants=(concrete,),
+        max_sequence_length=3,
+    )
+
+    assert derived.repetition_limits == {"repeat": 2}
+
+
+def test_random_strategy_honors_remaining_transaction_budget(
+    problem: SearchProblem,
+) -> None:
+    strategy = RandomStrategy()
+    strategy.initialize(problem, seed=4)
+
+    for _ in range(20):
+        candidate = strategy.propose(1)
+        if candidate is None:
+            break
+        assert len(candidate.steps) == 1
+        strategy.observe(candidate, evaluation(candidate))
+
+
+@pytest.mark.parametrize("factory", [RandomStrategy, CoverageGuidedStrategy])
+def test_randomized_strategies_cap_length_at_total_legal_repetitions(factory) -> None:
+    only = variant("once", max_repetitions=1)
+    constrained = SearchProblem(
+        actions=("once",),
+        variants=(only,),
+        max_sequence_length=3,
+        repetition_limits={"once": 1},
+    )
+    strategy = factory()
+    strategy.initialize(constrained, seed=0)
+
+    proposals = collect(strategy, constrained, seed=0, count=4)
+
+    assert len(proposals) == 1
+    assert len(proposals[0].steps) == 1
+
+
+def test_task_four_public_api_is_exported() -> None:
+    from qprover.search import (  # noqa: PLC0415
+        CoverageGuidedStrategy,
+        Evaluation,
+        QuboStrategy,
+        RandomStrategy,
+        RiskGuidedStrategy,
+        SearchController,
+        SearchStrategy,
+        StrategyStats,
+    )
+
+    assert all(
+        item is not None
+        for item in (
+            CoverageGuidedStrategy,
+            Evaluation,
+            QuboStrategy,
+            RandomStrategy,
+            RiskGuidedStrategy,
+            SearchController,
+            SearchStrategy,
+            StrategyStats,
+        )
+    )
+
+
+def test_coverage_strategy_keeps_only_novel_feedback_in_corpus(
+    problem: SearchProblem,
+) -> None:
+    strategy = CoverageGuidedStrategy()
+    strategy.initialize(problem, seed=6)
+    first = strategy.propose(3)
+    assert first is not None
+
+    novel = evaluation(first)
+    strategy.observe(first, novel)
+    corpus_size = strategy.stats.counters["corpus_size"]
+    duplicate_feedback = Evaluation(
+        outcome=Outcome.PASS,
+        transaction_count=len(first.steps),
+        trace_features=novel.trace_features,
+        state_fingerprint=novel.state_fingerprint,
+    )
+    strategy.observe(first, duplicate_feedback)
+
+    assert strategy.stats.counters["corpus_size"] == corpus_size
+    assert strategy.stats.counters["novel_observations"] == 1
+
+
+def test_coverage_strategy_exercises_all_required_mutation_families(
+    problem: SearchProblem,
+) -> None:
+    strategy = CoverageGuidedStrategy()
+    strategy.initialize(problem, seed=19)
+    for _ in range(80):
+        candidate = strategy.propose(3)
+        if candidate is None:
+            break
+        strategy.observe(candidate, evaluation(candidate))
+
+    attempted = strategy.stats.metadata["mutation_attempts"]
+    assert set(attempted) == {"append", "argument", "delete", "replace", "splice"}
+    assert all(attempted[name] > 0 for name in attempted)
+    assert json.loads(json.dumps(strategy.stats.to_dict()))["name"] == "coverage"
+
+
+def test_risk_strategy_prioritizes_public_dependency(problem: SearchProblem) -> None:
+    strategy = RiskGuidedStrategy(beam_width=8)
+    strategy.initialize(problem, seed=11)
+
+    candidate = strategy.propose(3)
+
+    assert candidate is not None
+    assert tuple(step.action_id for step in candidate.steps) == ("prepare", "trigger")
+    assert strategy.stats.metadata["ranking_inputs"] == (
+        "dynamic_novelty",
+        "hypothesis_relevance",
+        "length_cost",
+        "revert_penalty",
+        "static_utility",
+        "transition_benefit",
+    )
+
+
+def test_qubo_strategy_records_solver_and_decoding_metadata(
+    problem: SearchProblem,
+) -> None:
+    strategy = QuboStrategy(backend=ExactBackend(max_bits=20), reads=256)
+    strategy.initialize(problem, seed=5)
+
+    first = strategy.propose(3)
+    assert first is not None
+    strategy.observe(first, evaluation(first))
+    second = strategy.propose(3)
+
+    assert second is not None
+    assert second.canonical_id != first.canonical_id
+    metadata = strategy.stats.metadata
+    assert metadata["solver"]["backend"] == "exact-bit-enumeration"
+    assert metadata["decoded_feasible"] > 0
+    assert metadata["decoded_infeasible"] >= 0
+    assert metadata["transition_enabled"] is True
+    assert metadata["repair_count"] == 0
+
+
+def test_qubo_transition_ablation_changes_publicly_guided_proposal(
+    problem: SearchProblem,
+) -> None:
+    guided = QuboStrategy(
+        backend=ExactBackend(max_bits=20), reads=256, transition_enabled=True
+    )
+    ablated = QuboStrategy(
+        backend=ExactBackend(max_bits=20), reads=256, transition_enabled=False
+    )
+    guided.initialize(problem, seed=1)
+    ablated.initialize(problem, seed=1)
+
+    guided_candidate = guided.propose(3)
+    ablated_candidate = ablated.propose(3)
+
+    assert guided_candidate is not None
+    assert ablated_candidate is not None
+    assert tuple(step.action_id for step in guided_candidate.steps) == (
+        "prepare",
+        "trigger",
+    )
+    assert guided_candidate.canonical_id != ablated_candidate.canonical_id
+    assert guided.stats.metadata["transition_enabled"] is True
+    assert ablated.stats.metadata["transition_enabled"] is False
+
+
+def test_fake_violation_sequence_is_known_only_to_evaluator(
+    problem: SearchProblem,
+) -> None:
+    class FakeEvaluator:
+        _witness = ("prepare", "trigger")
+
+        def evaluate(self, candidate: Candidate) -> Evaluation:
+            actions = tuple(step.action_id for step in candidate.steps)
+            outcome = Outcome.VIOLATION if actions == self._witness else Outcome.PASS
+            return evaluation(candidate, outcome=outcome)
+
+    strategy = RiskGuidedStrategy()
+    strategy.initialize(problem, seed=2)
+    candidate = strategy.propose(3)
+
+    assert candidate is not None
+    assert FakeEvaluator().evaluate(candidate).outcome is Outcome.VIOLATION
+    assert all("witness" not in name and "label" not in name for name in vars(strategy))
+
+
+def test_candidate_validation_rejects_non_variant_and_excess_repetition(
+    problem: SearchProblem,
+) -> None:
+    unknown = Candidate((ActionStep("unknown", "vault", "unknown()", 0, ()),))
+    prepare = next(item for item in problem.variants if item.action_id == "prepare")
+    step = ActionStep(
+        prepare.action_id,
+        prepare.target_id,
+        prepare.signature,
+        prepare.sender_slot,
+        prepare.args,
+        prepare.value_wei,
+    )
+
+    assert not candidate_is_valid(problem, unknown)
+    assert not candidate_is_valid(problem, Candidate((step, step)))

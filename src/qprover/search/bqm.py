@@ -8,6 +8,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from qprover.parameters import ActionVariant
+
 STOP = "__STOP__"
 
 
@@ -63,6 +65,8 @@ class SearchProblem:
     transition_weight: float = 1.0
     revert_weight: float = 1.0
     length_weight: float = 0.05
+    variants: tuple[ActionVariant, ...] = ()
+    hypothesis_sequences: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         actions = tuple(self.actions)
@@ -77,6 +81,7 @@ class SearchProblem:
         _exact_positive_int(self.max_sequence_length, "max_sequence_length")
         utilities = dict(self.utilities or {})
         transitions = dict(self.transitions or {})
+        explicit_repetition_limits = self.repetition_limits is not None
         limits = dict(self.repetition_limits or {})
         known = set(actions)
         if any(
@@ -125,6 +130,68 @@ class SearchProblem:
         discounts = tuple(
             _finite_real(value, "discounts", nonnegative=True) for value in discounts
         )
+        variants = tuple(self.variants)
+        if any(not isinstance(item, ActionVariant) for item in variants):
+            raise ValueError("variants must contain only ActionVariant records")
+        if len({item.canonical_id for item in variants}) != len(variants):
+            raise ValueError("duplicate concrete action variant")
+        unknown_variants = {item.action_id for item in variants} - known
+        if unknown_variants:
+            raise ValueError(f"unknown action variant: {sorted(unknown_variants)[0]}")
+        if variants:
+            missing_variants = known - {item.action_id for item in variants}
+            if missing_variants:
+                raise ValueError(
+                    f"action has no concrete variant: {sorted(missing_variants)[0]}"
+                )
+            variant_limits: dict[str, set[int]] = {action: set() for action in actions}
+            for item in variants:
+                variant_limits[item.action_id].add(
+                    _exact_positive_int(
+                        item.max_repetitions, "variant repetition limits"
+                    )
+                )
+            ambiguous = next(
+                (
+                    action
+                    for action, values in variant_limits.items()
+                    if len(values) != 1
+                ),
+                None,
+            )
+            if ambiguous is not None:
+                raise ValueError(
+                    f"variants disagree on repetition limit for action: {ambiguous}"
+                )
+            if not explicit_repetition_limits:
+                limits = {
+                    action: next(iter(variant_limits[action])) for action in actions
+                }
+            inconsistent = next(
+                (
+                    item.action_id
+                    for item in variants
+                    if item.max_repetitions != limits[item.action_id]
+                ),
+                None,
+            )
+            if inconsistent is not None:
+                raise ValueError(
+                    f"variant repetition limit differs for action: {inconsistent}"
+                )
+        hypotheses = tuple(tuple(sequence) for sequence in self.hypothesis_sequences)
+        if any(not sequence for sequence in hypotheses):
+            raise ValueError("hypothesis sequences must be nonempty")
+        unknown_hypotheses = {
+            action
+            for sequence in hypotheses
+            for action in sequence
+            if action not in known
+        }
+        if unknown_hypotheses:
+            raise ValueError(
+                f"unknown hypothesis action: {sorted(unknown_hypotheses)[0]}"
+            )
         object.__setattr__(self, "actions", actions)
         object.__setattr__(self, "utilities", _frozen_mapping(utilities))
         object.__setattr__(
@@ -134,6 +201,8 @@ class SearchProblem:
         )
         object.__setattr__(self, "repetition_limits", _frozen_mapping(limits))
         object.__setattr__(self, "discounts", discounts)
+        object.__setattr__(self, "variants", variants)
+        object.__setattr__(self, "hypothesis_sequences", hypotheses)
         object.__setattr__(self, "utility_weight", weights[0])
         object.__setattr__(self, "transition_weight", weights[1])
         object.__setattr__(self, "revert_weight", weights[2])
