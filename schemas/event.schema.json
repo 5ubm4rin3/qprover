@@ -9,7 +9,7 @@
     "schema_version": {"const": "1.0"},
     "run_id": {"type": "string", "minLength": 1},
     "sequence": {"type": "integer", "minimum": 1},
-    "timestamp": {"type": "string", "format": "date-time"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "Z$"},
     "kind": {"enum": ["search", "minimization", "poc_generation", "cold_replay", "confirmation"]},
     "details": {"type": "object"}
   }

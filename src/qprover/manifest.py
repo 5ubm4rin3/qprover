@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -144,6 +145,23 @@ def _duplicates(values: list[str] | list[int]) -> set[str | int]:
     return {value for value in values if value in seen or seen.add(value)}
 
 
+def canonical_manifest_hash(manifest: TargetManifest) -> str:
+    """Hash manifest semantics without installation-specific absolute paths."""
+
+    project = manifest.target.project_root.resolve()
+    data = manifest.model_dump(mode="json")
+    data["target"]["project_root"] = "."
+    try:
+        data["target"]["source_files"] = [
+            source.resolve().relative_to(project).as_posix()
+            for source in manifest.target.source_files
+        ]
+    except ValueError as error:
+        raise ManifestError("source file is outside project root") from error
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _validate_ids_and_references(manifest: TargetManifest) -> None:
     collections = (
         manifest.actors,
@@ -155,9 +173,7 @@ def _validate_ids_and_references(manifest: TargetManifest) -> None:
     for records in collections:
         duplicate_ids = _duplicates([record.id for record in records])
         if duplicate_ids:
-            raise ManifestError(
-                f"duplicate symbolic id: {sorted(duplicate_ids)[0]}"
-            )
+            raise ManifestError(f"duplicate symbolic id: {sorted(duplicate_ids)[0]}")
 
     duplicate_slots = _duplicates([actor.slot for actor in manifest.actors])
     if duplicate_slots:

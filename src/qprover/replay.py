@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,17 +20,31 @@ from typing import Any
 import jsonschema
 from eth_abi import encode
 from eth_abi.exceptions import EncodingError
-from eth_utils import keccak
+from eth_utils import keccak, to_checksum_address
+from eth_utils.abi import collapse_if_tuple
 
+from qprover.artifacts import (
+    BUILD_COMMAND,
+    build_target,
+    canonical_build_info_hash,
+    manifest_source_paths,
+)
 from qprover.certificate import (
     ProofCertificate,
-    ReplayEvidence,
     ReplayRecord,
-    create_certificate,
+    _seal_certificate,
     write_certificate,
 )
-from qprover.manifest import load_manifest
-from qprover.models import ConfirmationStatus, TargetManifest
+from qprover.evaluator import ScenarioEvaluator
+from qprover.evm import LocalAnvil
+from qprover.manifest import _signature_types, canonical_manifest_hash, load_manifest
+from qprover.models import (
+    ActionStep,
+    Candidate,
+    ConfirmationStatus,
+    Outcome,
+    TargetManifest,
+)
 
 
 class ReplayError(RuntimeError):
@@ -62,13 +77,7 @@ def _stable_output_digest(output: str) -> str:
 
 
 def _manifest_hash(manifest: TargetManifest) -> str:
-    return _digest(
-        json.dumps(
-            manifest.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
+    return canonical_manifest_hash(manifest)
 
 
 def _identifier(value: str) -> str:
@@ -172,12 +181,23 @@ def _render_invariant(expression: str, observations: set[str]) -> str:
 
 
 def _validate_manifest_identity(
-    certificate: ProofCertificate, manifest: TargetManifest
+    certificate: ProofCertificate,
+    manifest: TargetManifest,
+    workspace_root: Path | None = None,
+    manifest_path: Path | None = None,
 ) -> None:
+    workspace = (workspace_root or Path.cwd()).resolve()
+    project = _resolve_workspace_path(
+        workspace, certificate.target.project_root, "project root"
+    )
+    expected_manifest = _resolve_workspace_path(
+        workspace, certificate.target.manifest_path, "manifest path"
+    )
     if (
         certificate.target.id != manifest.target.id
-        or certificate.target.project_root.resolve()
-        != manifest.target.project_root.resolve()
+        or certificate.target.workspace_root != "."
+        or project != manifest.target.project_root.resolve()
+        or (manifest_path is not None and expected_manifest != manifest_path.resolve())
         or certificate.target.manifest_sha256 != _manifest_hash(manifest)
     ):
         raise ReplayError("certificate and manifest identity mismatch")
@@ -186,6 +206,77 @@ def _validate_manifest_identity(
         relative = source.resolve().relative_to(manifest.target.project_root.resolve())
         if relative.as_posix() not in sources:
             raise ReplayError("certificate source identity is incomplete")
+
+
+def _resolve_workspace_path(root: Path, relative: str, label: str) -> Path:
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ReplayError(f"{label} must be workspace-relative")
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError as error:
+        raise ReplayError(f"{label} escapes the trusted workspace") from error
+    return resolved
+
+
+def validate_semantic_binding(
+    certificate: ProofCertificate,
+    manifest: TargetManifest,
+    *,
+    workspace_root: Path | None = None,
+    manifest_path: Path | None = None,
+) -> None:
+    """Bind every manifest-derived certificate claim to one exact manifest."""
+
+    _validate_manifest_identity(certificate, manifest, workspace_root, manifest_path)
+    matching_invariants = tuple(
+        item for item in manifest.invariants if item.id == certificate.invariant.id
+    )
+    if len(matching_invariants) != 1:
+        raise ReplayError("certificate invariant semantics do not match manifest")
+    declared = matching_invariants[0]
+    if (
+        certificate.invariant.expression != declared.expression
+        or certificate.invariant.description != declared.description
+        or certificate.invariant.foundry_assertion != declared.foundry_assertion
+    ):
+        raise ReplayError("certificate invariant semantics do not match manifest")
+    if (
+        certificate.impact.attacker_observation
+        != manifest.impact.attacker_asset_observation
+        or certificate.impact.protocol_observation
+        != manifest.impact.protocol_asset_observation
+        or certificate.impact.unit != manifest.impact.unit
+    ):
+        raise ReplayError("certificate impact semantics do not match manifest")
+    expected_funding = tuple(
+        (actor.id, actor.slot, actor.balance_wei) for actor in manifest.actors
+    )
+    actual_funding = tuple(
+        (item.actor_id, item.slot, item.balance_wei) for item in certificate.funding
+    )
+    if actual_funding != expected_funding:
+        raise ReplayError("certificate funding semantics do not match manifest")
+    if (
+        certificate.toolchain.compiler_version != manifest.target.solidity_version
+        or certificate.toolchain.evm_version != manifest.target.evm_version
+    ):
+        raise ReplayError("certificate compiler semantics do not match manifest")
+    if any(
+        artifact.build_info_sha256 != certificate.build.build_info_sha256
+        for artifact in certificate.artifacts
+    ):
+        raise ReplayError("artifact build-info hash mismatch")
+    sources = manifest_source_paths(manifest, manifest.target.project_root)
+    expected_build_command = (
+        *BUILD_COMMAND[:2],
+        *sources,
+        *BUILD_COMMAND[2:],
+    )
+    if certificate.build.command != expected_build_command:
+        raise ReplayError("certificate build command mismatch")
+    _validate_transactions(certificate, manifest)
 
 
 def _validate_transactions(
@@ -230,12 +321,16 @@ def _validate_transactions(
             raise ReplayError("certificate calldata hash mismatch")
 
 
-def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) -> str:
+def foundry_poc_source(
+    certificate: ProofCertificate,
+    manifest: TargetManifest,
+    *,
+    workspace_root: Path | None = None,
+) -> str:
     """Render one deterministic, network-free Solidity regression test."""
 
     certificate = ProofCertificate.model_validate(certificate.model_dump(mode="json"))
-    _validate_manifest_identity(certificate, manifest)
-    _validate_transactions(certificate, manifest)
+    validate_semantic_binding(certificate, manifest, workspace_root=workspace_root)
     artifacts = {item.compilation_target: item for item in certificate.artifacts}
     imports: list[str] = []
     contract_names: dict[str, str] = {}
@@ -259,23 +354,7 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
         "",
         "interface QProverVm {",
         "    function deal(address account, uint256 newBalance) external;",
-        "}",
-        "",
-        "contract QProverActor {",
-        "    receive() external payable {}",
-        "",
-        "    function invoke(address target, bytes memory data, uint256 value)",
-        "        external returns (bool success, bytes memory result)",
-        "    {",
-        "        (success, result) = target.call{value: value}(data);",
-        "    }",
-        "",
-        "    function deploy(bytes memory code, uint256 value)",
-        "        external returns (address deployed)",
-        "    {",
-        "        assembly { deployed := create(value, add(code, 0x20), mload(code)) }",
-        '        require(deployed != address(0), "deployment");',
-        "    }",
+        "    function prank(address msgSender, address txOrigin) external;",
         "}",
         "",
         "contract QProverReplayTest {",
@@ -284,49 +363,79 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
         "    );",
     ]
     for slot in sorted(actors):
-        lines.append(f"    QProverActor private actor_slot_{slot};")
+        address = next(
+            item.address for item in certificate.funding if item.slot == slot
+        )
+        lines.append(
+            f"    address private constant actor_slot_{slot} = "
+            f"address(uint160({to_checksum_address(address)}));"
+        )
     for deployment in manifest.deployments:
         lines.append(f"    address private target_{_identifier(deployment.id)};")
     lines.extend(
         [
             "",
-            "    function _observeUint(address target, string memory signature)",
+            "    function _observeUint(address target, bytes memory data)",
             "        private view returns (uint256 value)",
             "    {",
             "        (bool ok, bytes memory result) = target.staticcall(",
-            "            abi.encodeWithSignature(signature)",
+            "            data",
             "        );",
             '        require(ok && result.length == 32, "observation");',
             "        value = abi.decode(result, (uint256));",
+            "    }",
+            "",
+            "    function _observeBool(address target, bytes memory data)",
+            "        private view returns (bool value)",
+            "    {",
+            "        (bool ok, bytes memory result) = target.staticcall(data);",
+            '        require(ok && result.length == 32, "observation");',
+            "        value = abi.decode(result, (bool));",
             "    }",
             "",
             "    function test_qprover_replay() public {",
         ]
     )
     for slot, actor in sorted(actors.items()):
+        funding = next(item for item in certificate.funding if item.slot == slot)
         lines.extend(
             [
-                f"        actor_slot_{slot} = new QProverActor();",
-                f"        vm.deal(address(actor_slot_{slot}), {actor.balance_wei});",
+                f"        vm.deal(actor_slot_{slot}, {actor.balance_wei});",
+                f"        assert(actor_slot_{slot}.balance == {funding.balance_wei});",
             ]
         )
     for deployment in manifest.deployments:
         contract_name = contract_names[deployment.id]
         constructor_args = tuple(deployment.constructor_args)
-        if constructor_args:
-            encoded = ", ".join(
-                _constructor_literal(value) for value in constructor_args
+        artifact = artifacts[deployment.artifact]
+        if len(constructor_args) != len(artifact.constructor_types):
+            raise ReplayError("constructor arguments do not match artifact ABI")
+        encoded = ", ".join(
+            _constructor_literal(
+                value,
+                abi_type,
+                actors_by_id={item.id: item.slot for item in manifest.actors},
+                prior_deployments={
+                    item.id
+                    for item in manifest.deployments
+                    if manifest.deployments.index(item)
+                    < manifest.deployments.index(deployment)
+                },
             )
-            code = (
-                f"abi.encodePacked(type({contract_name}).creationCode, "
-                f"abi.encode({encoded}))"
+            for value, abi_type in zip(
+                constructor_args, artifact.constructor_types, strict=True
             )
-        else:
-            code = f"type({contract_name}).creationCode"
-        lines.append(
-            f"        target_{_identifier(deployment.id)} = "
-            f"actor_slot_{deployment.sender_slot}.deploy({code}, "
-            f"{deployment.value_wei});"
+        )
+        value_clause = (
+            f"{{value: {deployment.value_wei}}}" if deployment.value_wei else ""
+        )
+        lines.extend(
+            [
+                f"        vm.prank(actor_slot_{deployment.sender_slot}, "
+                f"actor_slot_{deployment.sender_slot});",
+                f"        target_{_identifier(deployment.id)} = address("
+                f"new {contract_name}{value_clause}({encoded}));",
+            ]
         )
     for observation in manifest.observations:
         name = _identifier(observation.id)
@@ -334,17 +443,27 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
             actor = next(
                 item for item in manifest.actors if item.id == observation.actor_id
             )
-            expression = f"address(actor_slot_{actor.slot}).balance"
+            expression = f"actor_slot_{actor.slot}.balance"
         else:
-            if observation.args:
-                raise ReplayError(
-                    "PoC call observations with arguments are unsupported"
-                )
-            expression = (
-                f"_observeUint(target_{_identifier(observation.target_id or '')}, "
-                f'"{observation.signature}")'
+            calldata = _observation_calldata(
+                observation.signature or "", observation.args
             )
-        lines.append(f"        uint256 initial_{name} = {expression};")
+            value = certificate.initial_state.values[observation.id]
+            helper = "_observeBool" if type(value) is bool else "_observeUint"
+            expression = (
+                f"{helper}(target_{_identifier(observation.target_id or '')}, "
+                f"{calldata})"
+            )
+        solidity_type = (
+            "bool"
+            if type(certificate.initial_state.values[observation.id]) is bool
+            else "uint256"
+        )
+        lines.append(f"        {solidity_type} initial_{name} = {expression};")
+        lines.append(
+            f"        assert(initial_{name} == "
+            f"{_solidity_literal(certificate.initial_state.values[observation.id])});"
+        )
 
     action_specs = {item.id: item for item in manifest.actions}
     for transaction in certificate.transactions:
@@ -358,12 +477,13 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
             argument_text = ", " + ", ".join(rendered)
         lines.extend(
             [
+                f"        vm.prank(actor_slot_{transaction.sender_slot}, "
+                f"actor_slot_{transaction.sender_slot});",
                 f"        (bool success_{transaction.index},) = "
-                f"actor_slot_{transaction.sender_slot}.invoke(",
-                f"            target_{_identifier(transaction.target_id)},",
+                f"target_{_identifier(transaction.target_id)}.call"
+                f"{{value: {transaction.value_wei}}}(",
                 f'            abi.encodeWithSignature("{transaction.signature}"'
-                f"{argument_text}),",
-                f"            {transaction.value_wei}",
+                f"{argument_text})",
                 "        );",
                 f"        assert(success_{transaction.index} == "
                 f"{'true' if transaction.expected_success else 'false'});",
@@ -375,13 +495,27 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
             actor = next(
                 item for item in manifest.actors if item.id == observation.actor_id
             )
-            expression = f"address(actor_slot_{actor.slot}).balance"
+            expression = f"actor_slot_{actor.slot}.balance"
         else:
-            expression = (
-                f"_observeUint(target_{_identifier(observation.target_id or '')}, "
-                f'"{observation.signature}")'
+            calldata = _observation_calldata(
+                observation.signature or "", observation.args
             )
-        lines.append(f"        uint256 final_{name} = {expression};")
+            value = certificate.before_after.after.values[observation.id]
+            helper = "_observeBool" if type(value) is bool else "_observeUint"
+            expression = (
+                f"{helper}(target_{_identifier(observation.target_id or '')}, "
+                f"{calldata})"
+            )
+        solidity_type = (
+            "bool"
+            if type(certificate.before_after.after.values[observation.id]) is bool
+            else "uint256"
+        )
+        lines.append(f"        {solidity_type} final_{name} = {expression};")
+        lines.append(
+            f"        assert(final_{name} == "
+            f"{_solidity_literal(certificate.before_after.after.values[observation.id])});"
+        )
 
     attacker = _identifier(manifest.impact.attacker_asset_observation)
     protocol = _identifier(manifest.impact.protocol_asset_observation)
@@ -408,7 +542,6 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
         "://",
         "createFork",
         "selectFork",
-        "vm.prank",
         "vm.label",
     )
     if any(item in source for item in forbidden):
@@ -416,30 +549,54 @@ def foundry_poc_source(certificate: ProofCertificate, manifest: TargetManifest) 
     return source
 
 
-def _constructor_literal(value: object) -> str:
-    if isinstance(value, dict):
-        raise ReplayError("mutable constructor references are prohibited")
-    # Pydantic freezes constructor references behind MappingProxyType. Resolve
-    # only the two manifest-declared symbolic forms at generation call sites.
-    if hasattr(value, "keys"):
-        keys = set(value.keys())  # type: ignore[union-attr]
-        if keys == {"actor"}:
-            raise ReplayError("actor constructor references require typed ABI data")
-        if keys == {"deployment"}:
+def _observation_calldata(signature: str, args: tuple[object, ...]) -> str:
+    types = _signature_types(signature)
+    if len(types) != len(args):
+        raise ReplayError("observation arguments do not match signature")
+    rendered = [
+        _solidity_literal(value, abi_type)
+        for value, abi_type in zip(args, types, strict=True)
+    ]
+    suffix = "" if not rendered else ", " + ", ".join(rendered)
+    return f'abi.encodeWithSignature("{signature}"{suffix})'
+
+
+def _constructor_literal(
+    value: object,
+    abi_type: str,
+    *,
+    actors_by_id: Mapping[str, int],
+    prior_deployments: set[str],
+) -> str:
+    if isinstance(value, Mapping):
+        if abi_type != "address":
             raise ReplayError(
-                "deployment constructor references require typed ABI data"
+                "symbolic constructor references require address ABI type"
             )
-    return _solidity_literal(value)
+        if set(value) == {"actor"} and isinstance(value["actor"], str):
+            actor_id = value["actor"]
+            if actor_id not in actors_by_id:
+                raise ReplayError("unknown actor constructor reference")
+            return f"actor_slot_{actors_by_id[actor_id]}"
+        if set(value) == {"deployment"} and isinstance(value["deployment"], str):
+            deployment_id = value["deployment"]
+            if deployment_id not in prior_deployments:
+                raise ReplayError("constructor deployment reference is not prior")
+            return f"target_{_identifier(deployment_id)}"
+        raise ReplayError("invalid symbolic constructor reference")
+    return _solidity_literal(value, abi_type)
 
 
 def generate_foundry_poc(
     certificate: ProofCertificate,
     manifest: TargetManifest,
     output: Path,
+    *,
+    workspace_root: Path | None = None,
 ) -> Path:
     """Write the exact run-local PoC atomically after identity/hash checks."""
 
-    source = foundry_poc_source(certificate, manifest)
+    source = foundry_poc_source(certificate, manifest, workspace_root=workspace_root)
     if _digest(source) != certificate.poc.sha256:
         raise ReplayError("generated PoC hash does not match certificate PoC hash")
     root = output.resolve()
@@ -536,12 +693,11 @@ def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) 
             raise ReplayError("offline compiler emitted ambiguous build evidence")
         build_bytes = build_infos[0].read_bytes()
         build_info = json.loads(build_bytes)
-        if _digest(build_bytes) != certificate.build.build_info_sha256:
+        semantic_build_hash = canonical_build_info_hash(build_info)
+        if semantic_build_hash != certificate.build.build_info_sha256:
             raise ReplayError("build-info hash mismatch")
-        build_info_id = build_info.get("id")
-        if not isinstance(build_info_id, str) or any(
-            item.build_info_id != build_info_id for item in certificate.artifacts
-        ):
+        build_info_id = semantic_build_hash[:16]
+        if any(item.build_info_id != build_info_id for item in certificate.artifacts):
             raise ReplayError("build-info identity mismatch")
         if build_info.get("solcVersion") != certificate.toolchain.compiler_version:
             raise ReplayError("compiler version mismatch")
@@ -574,10 +730,13 @@ def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) 
                     raw.get("metadata", {}).get("settings", {}).get("compilationTarget")
                 )
                 if target == {source_name: contract_name}:
-                    matches.append((raw, raw_bytes))
+                    matches.append((path, raw, raw_bytes))
             if len(matches) != 1:
                 raise ReplayError("artifact identity is ambiguous")
-            raw, raw_bytes = matches[0]
+            artifact_path, raw, raw_bytes = matches[0]
+            actual_descriptor = artifact_path.relative_to(temporary).as_posix()
+            if expected.artifact_path != actual_descriptor:
+                raise ReplayError("artifact path mismatch")
             bytecode = raw.get("bytecode", {}).get("object")
             if (
                 _digest(raw_bytes) != expected.artifact_sha256
@@ -622,19 +781,251 @@ def _load_validated_certificate(path: Path) -> ProofCertificate:
         raise ReplayError("certificate or schema validation failed") from error
 
 
-def cold_verify(certificate_path: Path, repeats: int = 3) -> ReplayVerification:
+def _execution_trace_hash(record: Mapping[str, object]) -> str:
+    payload = json.dumps(
+        {
+            "trace_struct_log_count": record["trace_struct_log_count"],
+            "call_trace_count": record["call_trace_count"],
+            "trace_failed": record["trace_failed"],
+            "return_data": record["return_data"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _digest(payload)
+
+
+def _artifact_constructor_types(abi: tuple[Mapping[str, Any], ...]) -> tuple[str, ...]:
+    constructors = tuple(entry for entry in abi if entry.get("type") == "constructor")
+    if len(constructors) > 1:
+        raise ReplayError("artifact contains ambiguous constructor ABI")
+    if not constructors:
+        return ()
+    return tuple(
+        collapse_if_tuple(dict(parameter))
+        for parameter in constructors[0].get("inputs", ())
+    )
+
+
+def _verify_execution_binding(
+    certificate: ProofCertificate, manifest: TargetManifest
+) -> None:
+    """Re-execute the minimized candidate and compare replay-provable evidence."""
+
+    candidate = Candidate(
+        tuple(
+            ActionStep(
+                item.action_id,
+                item.target_id,
+                item.signature,
+                item.sender_slot,
+                item.args,
+                item.value_wei,
+            )
+            for item in certificate.transactions
+        )
+    )
+    try:
+        with build_target(manifest, offline=True) as bundle, LocalAnvil() as anvil:
+            if (
+                bundle.manifest_sha256 != certificate.target.manifest_sha256
+                or bundle.source_sha256 != certificate.target.source_sha256
+                or bundle.build_info_sha256 != certificate.build.build_info_sha256
+                or bundle.compiler_version != certificate.toolchain.compiler_version
+                or bundle.evm_version != certificate.toolchain.evm_version
+                or bundle.tool_version != certificate.toolchain.forge_version
+            ):
+                raise ReplayError("executed build evidence mismatch")
+            expected_sources = tuple(
+                (item.path, item.sha256) for item in certificate.target.sources
+            )
+            actual_sources = tuple(
+                (item.source_name, item.source_sha256) for item in bundle.source_units
+            )
+            if actual_sources != expected_sources:
+                raise ReplayError("executed source evidence mismatch")
+            expected_artifacts = {
+                item.compilation_target: item for item in certificate.artifacts
+            }
+            actual_artifacts = {
+                item.compilation_target: item for item in bundle.artifacts
+            }
+            if set(expected_artifacts) != set(actual_artifacts):
+                raise ReplayError("executed artifact evidence mismatch")
+            for target, expected in expected_artifacts.items():
+                actual = actual_artifacts[target]
+                descriptor = (
+                    actual.artifact_path.resolve()
+                    .relative_to(bundle.evidence_root.resolve())
+                    .as_posix()
+                )
+                if (
+                    expected.artifact_path != descriptor
+                    or expected.artifact_sha256 != actual.artifact_sha256
+                    or expected.bytecode_sha256 != actual.bytecode_sha256
+                    or expected.build_info_id != actual.build_info_id
+                    or expected.build_info_sha256 != bundle.build_info_sha256
+                    or expected.constructor_types
+                    != _artifact_constructor_types(actual.abi)
+                ):
+                    raise ReplayError("executed artifact evidence mismatch")
+
+            evaluator = ScenarioEvaluator(manifest, bundle, anvil)
+            actual_funding = tuple(
+                (
+                    actor.id,
+                    actor.slot,
+                    evaluator.actors[actor.slot].lower(),
+                    actor.balance_wei,
+                )
+                for actor in manifest.actors
+            )
+            recorded_funding = tuple(
+                (item.actor_id, item.slot, item.address, item.balance_wei)
+                for item in certificate.funding
+            )
+            if actual_funding != recorded_funding:
+                raise ReplayError("actor address evidence mismatch")
+            chain = certificate.chain
+            if (
+                chain.chain_id != anvil.chain_id
+                or chain.genesis_timestamp != anvil.genesis_timestamp
+                or chain.base_fee_wei != anvil.base_fee_wei
+                or chain.gas_price_wei != anvil.gas_price_wei
+                or chain.external_rpc
+            ):
+                raise ReplayError("executed chain evidence mismatch")
+
+            evaluation = evaluator.evaluate(candidate)
+            metadata = evaluation.metadata
+            if (
+                evaluation.outcome is not Outcome.VIOLATION
+                or evaluation.outcome is not certificate.final_evaluation_outcome
+                or evaluation.state_fingerprint
+                != certificate.before_after.after.state_sha256
+                or dict(metadata.get("initial_observations", {}))
+                != dict(certificate.initial_state.values)
+                or dict(metadata.get("current_observations", {}))
+                != dict(certificate.before_after.after.values)
+            ):
+                raise ReplayError("executed state evidence mismatch")
+            impact = metadata.get("impact")
+            if not isinstance(impact, Mapping) or (
+                impact.get("attacker_delta") != certificate.impact.attacker_delta
+                or impact.get("protocol_delta") != certificate.impact.protocol_delta
+                or impact.get("unit") != certificate.impact.unit
+                or impact.get("admissible") is not certificate.impact.admissible
+            ):
+                raise ReplayError("executed impact evidence mismatch")
+            invariants = metadata.get("invariants")
+            if not isinstance(invariants, Sequence) or isinstance(
+                invariants, (str, bytes)
+            ):
+                raise ReplayError("executed invariant evidence mismatch")
+            matches = tuple(
+                item
+                for item in invariants
+                if isinstance(item, Mapping)
+                and item.get("invariant_id") == certificate.invariant.id
+            )
+            if len(matches) != 1 or (
+                matches[0].get("expression") != certificate.invariant.expression
+                or matches[0].get("value") is not certificate.invariant.value
+                or matches[0].get("reason") != certificate.invariant.reason
+            ):
+                raise ReplayError("executed invariant evidence mismatch")
+            step_records = metadata.get("steps")
+            if (
+                not isinstance(step_records, Sequence)
+                or isinstance(step_records, (str, bytes))
+                or len(step_records) != len(certificate.transactions)
+            ):
+                raise ReplayError("executed transaction evidence mismatch")
+            actual_gas: list[int] = []
+            for expected, actual in zip(
+                certificate.transactions, step_records, strict=True
+            ):
+                if not isinstance(actual, Mapping):
+                    raise ReplayError("executed transaction evidence mismatch")
+                transaction_hash = actual.get("transaction_hash")
+                normalized_hash = (
+                    transaction_hash[2:]
+                    if isinstance(transaction_hash, str)
+                    and transaction_hash.startswith("0x")
+                    else transaction_hash
+                )
+                gas_used = actual.get("gas_used")
+                actual_gas.append(gas_used if type(gas_used) is int else -1)
+                if (
+                    actual.get("index") != expected.index
+                    or actual.get("action_id") != expected.action_id
+                    or actual.get("calldata_hash") != expected.calldata_sha256
+                    or normalized_hash != expected.transaction_sha256
+                    or actual.get("receipt_status") != expected.receipt_status
+                    or (actual.get("receipt_status") == 1) != expected.expected_success
+                    or gas_used != expected.gas_used
+                    or actual.get("return_data") != expected.return_data
+                    or actual.get("revert_data") != expected.revert_data
+                    or actual.get("observation_state_hash")
+                    != expected.observation_state_sha256
+                    or _execution_trace_hash(actual) != expected.trace_sha256
+                ):
+                    raise ReplayError("executed transaction evidence mismatch")
+            if tuple(actual_gas) != certificate.gas.per_transaction:
+                raise ReplayError("executed gas evidence mismatch")
+
+            if (
+                not certificate.minimization.locally_minimal
+                or "single-delete-fixed-point"
+                not in certificate.minimization.attempted_operators
+            ):
+                raise ReplayError("executed local minimality evidence mismatch")
+            if len(candidate.steps) > 1:
+                for index in range(len(candidate.steps)):
+                    reduced = Candidate(
+                        candidate.steps[:index] + candidate.steps[index + 1 :]
+                    )
+                    reduced_evaluation = evaluator.evaluate(reduced)
+                    reduced_impact = reduced_evaluation.metadata.get("impact")
+                    if (
+                        reduced_evaluation.outcome is Outcome.VIOLATION
+                        and isinstance(reduced_impact, Mapping)
+                        and reduced_impact.get("admissible") is True
+                    ):
+                        raise ReplayError("executed local minimality evidence mismatch")
+    except ReplayError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise ReplayError("local semantic re-execution failed") from error
+
+
+def cold_verify(
+    certificate_path: Path,
+    repeats: int = 3,
+    *,
+    workspace_root: Path | None = None,
+) -> ReplayVerification:
     """Run exactly three isolated offline Forge replays and update the certificate."""
 
     if type(repeats) is not int or repeats != 3:
         raise ReplayError("cold verification requires exactly 3 replays")
     path = certificate_path.resolve()
     certificate = _load_validated_certificate(path)
-    trusted_workspace = Path(__file__).parents[2].resolve()
-    if certificate.target.workspace_root.resolve() != trusted_workspace:
-        raise ReplayError("certificate target is outside the trusted local workspace")
-    manifest = load_manifest(certificate.target.manifest_path)
-    _validate_manifest_identity(certificate, manifest)
-    _validate_transactions(certificate, manifest)
+    trusted_workspace = (workspace_root or Path.cwd()).resolve()
+    if not trusted_workspace.is_dir():
+        raise ReplayError("trusted local workspace is missing")
+    manifest_path = _resolve_workspace_path(
+        trusted_workspace, certificate.target.manifest_path, "manifest path"
+    )
+    manifest = load_manifest(manifest_path)
+    validate_semantic_binding(
+        certificate,
+        manifest,
+        workspace_root=trusted_workspace,
+        manifest_path=manifest_path,
+    )
+    _offline_preflight(certificate, manifest)
+    _verify_execution_binding(certificate, manifest)
     poc_path = (path.parent / certificate.poc.path).resolve()
     try:
         poc_path.relative_to(path.parent)
@@ -646,15 +1037,21 @@ def cold_verify(certificate_path: Path, repeats: int = 3) -> ReplayVerification:
         raise ReplayError("PoC is missing") from error
     if _digest(poc_bytes) != certificate.poc.sha256:
         raise ReplayError("PoC hash mismatch")
-    expected_source = foundry_poc_source(certificate, manifest).encode()
+    expected_source = foundry_poc_source(
+        certificate, manifest, workspace_root=trusted_workspace
+    ).encode()
     if poc_bytes != expected_source:
         raise ReplayError("PoC content does not match certificate evidence")
-    _offline_preflight(certificate, manifest)
-
     project = manifest.target.project_root.resolve()
     test_directory = project / "test"
+    if test_directory.is_symlink():
+        raise ReplayError("project test directory must not be a symlink")
     created_test_directory = not test_directory.exists()
     test_directory.mkdir(parents=True, exist_ok=True)
+    try:
+        test_directory.resolve().relative_to(project)
+    except ValueError as error:
+        raise ReplayError("project test directory escapes project") from error
     temporary_test = test_directory / f".qprover_replay_{uuid.uuid4().hex}.t.sol"
     records: list[ReplayRecord] = []
     try:
@@ -663,7 +1060,7 @@ def cold_verify(certificate_path: Path, repeats: int = 3) -> ReplayVerification:
         relative_test = temporary_test.relative_to(project).as_posix()
         for index in range(1, 4):
             run_root = Path(tempfile.mkdtemp(prefix=f"qprover-cold-{index}-"))
-            command = (
+            execution_command = (
                 "forge",
                 "test",
                 "--offline",
@@ -678,10 +1075,25 @@ def cold_verify(certificate_path: Path, repeats: int = 3) -> ReplayVerification:
                 "--cache-path",
                 str(run_root / "cache"),
             )
+            evidence_command = (
+                "forge",
+                "test",
+                "--offline",
+                "--root",
+                certificate.target.project_root,
+                "--match-path",
+                relative_test,
+                "--match-test",
+                "test_qprover_replay",
+                "--out",
+                f".qprover-cold/replay-{index}/out",
+                "--cache-path",
+                f".qprover-cold/replay-{index}/cache",
+            )
             started = time.monotonic()
             try:
                 result = subprocess.run(
-                    command,
+                    execution_command,
                     cwd=project,
                     env=_safe_environment({}),
                     capture_output=True,
@@ -702,7 +1114,7 @@ def cold_verify(certificate_path: Path, repeats: int = 3) -> ReplayVerification:
                 ReplayRecord(
                     index=index,
                     success=exit_code == 0,
-                    command=command,
+                    command=evidence_command,
                     exit_code=exit_code,
                     stdout_sha256=_stable_output_digest(stdout),
                     stderr_sha256=_stable_output_digest(stderr),
@@ -724,17 +1136,7 @@ def cold_verify(certificate_path: Path, repeats: int = 3) -> ReplayVerification:
             except OSError as error:
                 raise ReplayError("could not clean temporary test directory") from error
 
-    confirmed = all(record.success for record in records)
-    data = certificate.model_dump(mode="python")
-    for field in ("certificate_identity_sha256", "certificate_sha256"):
-        data.pop(field)
-    data["confirmation_status"] = (
-        ConfirmationStatus.CONFIRMED if confirmed else ConfirmationStatus.NOT_CONFIRMED
-    )
-    data["replay"] = ReplayEvidence(
-        local_only=True, required_repeats=3, records=tuple(records)
-    )
-    updated = create_certificate(**data)
+    updated = _seal_certificate(certificate, tuple(records))
     write_certificate(updated, path)
     return ReplayVerification(updated.confirmation_status, tuple(records), updated)
 
@@ -745,4 +1147,5 @@ __all__ = [
     "cold_verify",
     "foundry_poc_source",
     "generate_foundry_poc",
+    "validate_semantic_binding",
 ]

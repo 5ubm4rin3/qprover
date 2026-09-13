@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Self
 
+from qprover.manifest import canonical_manifest_hash
 from qprover.models import TargetManifest
 
 BUILD_COMMAND = (
@@ -168,13 +169,23 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _canonical_manifest_hash(manifest: TargetManifest) -> str:
+def canonical_build_info_hash(build_info: Mapping[str, Any]) -> str:
+    """Hash compiler evidence after removing installation-only path metadata."""
+
+    normalized = json.loads(json.dumps(build_info))
+    normalized.pop("id", None)
+    compiler_input = normalized.get("input")
+    if isinstance(compiler_input, dict):
+        for field_name in ("allowPaths", "basePath", "includePaths"):
+            compiler_input.pop(field_name, None)
     payload = json.dumps(
-        manifest.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
+        normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
     return _sha256(payload)
+
+
+def _canonical_manifest_hash(manifest: TargetManifest) -> str:
+    return canonical_manifest_hash(manifest)
 
 
 def _hash_sources(sources: Mapping[str, Mapping[str, Any]]) -> str:
@@ -310,8 +321,9 @@ def _load_artifact(
             f"{source_name}:{contract_name}"
         )
     output_bytecode = output_contract.get("evm", {}).get("bytecode", {}).get("object")
-    output_method_identifiers = output_contract.get("evm", {}).get(
-        "methodIdentifiers"
+    output_method_identifiers = output_contract.get("evm", {}).get("methodIdentifiers")
+    methods_match = output_method_identifiers == method_identifiers or (
+        output_method_identifiers is None and method_identifiers == {}
     )
     build_storage_layout = output_contract.get("storageLayout")
     layout_matches = build_storage_layout == storage_layout or (
@@ -321,7 +333,7 @@ def _load_artifact(
     )
     if (
         output_contract.get("abi") != raw["abi"]
-        or output_method_identifiers != method_identifiers
+        or not methods_match
         or not layout_matches
         or output_bytecode != bytecode[2:]
         or build_info["output"]["sources"][compilation_source].get("ast") != ast
@@ -382,6 +394,8 @@ def _build_target_in_workspace(
     root: Path,
     parsed_requests: list[tuple[str, str]],
     build_root: Path,
+    *,
+    offline: bool = False,
 ) -> ArtifactBundle:
     output_root = build_root / "out"
     overrides = {
@@ -392,12 +406,15 @@ def _build_target_in_workspace(
         *BUILD_COMMAND[:2],
         *manifest_source_paths(manifest, root),
         *BUILD_COMMAND[2:],
+        *(("--offline",) if offline else ()),
     )
     _run(build_command, root, overrides)
     build_info, build_info_path, build_info_bytes = _load_build_info(output_root, root)
-    build_info_id = build_info.get("id")
-    if not isinstance(build_info_id, str) or not build_info_id:
+    raw_build_info_id = build_info.get("id")
+    if not isinstance(raw_build_info_id, str) or not raw_build_info_id:
         raise ArtifactError("fresh build-info is missing identity")
+    semantic_build_hash = canonical_build_info_hash(build_info)
+    build_info_id = semantic_build_hash[:16]
     version_result = _run(("forge", "--version"), root)
     tool_version = version_result.stdout.strip().splitlines()[0]
     if not tool_version:
@@ -444,7 +461,7 @@ def _build_target_in_workspace(
         manifest_sha256=_canonical_manifest_hash(manifest),
         build_info_id=build_info_id,
         build_info_path=build_info_path,
-        build_info_sha256=_sha256(build_info_bytes),
+        build_info_sha256=semantic_build_hash,
         compiler_version=expected_compiler,
         evm_version=expected_evm,
         tool_version=tool_version,
@@ -454,7 +471,7 @@ def _build_target_in_workspace(
     )
 
 
-def build_target(manifest: TargetManifest) -> ArtifactBundle:
+def build_target(manifest: TargetManifest, *, offline: bool = False) -> ArtifactBundle:
     """Build a target in isolated outputs and retain its compiler evidence."""
 
     root = manifest.target.project_root.resolve()
@@ -484,7 +501,7 @@ def build_target(manifest: TargetManifest) -> ArtifactBundle:
     build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
     try:
         return _build_target_in_workspace(
-            manifest, root, parsed_requests, build_root
+            manifest, root, parsed_requests, build_root, offline=offline
         )
     except BaseException:
         shutil.rmtree(build_root, ignore_errors=True)

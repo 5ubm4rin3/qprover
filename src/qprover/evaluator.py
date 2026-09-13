@@ -16,6 +16,7 @@ from web3.exceptions import Web3Exception
 from qprover.artifacts import ArtifactBundle, ContractArtifact
 from qprover.evm import EVMError, LocalAnvil, TransactionRejected
 from qprover.expression import ExpressionError, evaluate_expression
+from qprover.manifest import canonical_manifest_hash
 from qprover.models import (
     ActionSpec,
     Candidate,
@@ -35,10 +36,7 @@ def _sha256(data: bytes) -> str:
 
 
 def _manifest_hash(manifest: TargetManifest) -> str:
-    payload = json.dumps(
-        manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    ).encode()
-    return _sha256(payload)
+    return canonical_manifest_hash(manifest)
 
 
 def _state_snapshot(values: Mapping[str, int | bool]) -> ObservationSnapshot:
@@ -117,14 +115,16 @@ class ScenarioEvaluator:
         if isinstance(value, Mapping):
             if set(value) == {"actor"} and isinstance(value["actor"], str):
                 try:
-                    return self._actor_ids[value["actor"]]
+                    return Web3.to_checksum_address(self._actor_ids[value["actor"]])
                 except KeyError as error:
                     raise EvaluatorError(
                         "unknown constructor actor reference"
                     ) from error
             if set(value) == {"deployment"} and isinstance(value["deployment"], str):
                 try:
-                    return self.deployments[value["deployment"]]
+                    return Web3.to_checksum_address(
+                        self.deployments[value["deployment"]]
+                    )
                 except KeyError as error:
                     raise EvaluatorError(
                         "constructor deployment reference is not prior"

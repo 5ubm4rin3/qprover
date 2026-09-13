@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -31,6 +32,7 @@ Sha256 = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 _ZERO_HASH = "0" * 64
+_SEAL_TOKEN = object()
 
 
 def _freeze_abi(value: object) -> object:
@@ -73,28 +75,30 @@ class SourceEvidence(StrictModel):
 
 class TargetEvidence(StrictModel):
     id: StrictStr = Field(min_length=1)
-    workspace_root: Path
-    project_root: Path
+    workspace_root: Literal["."]
+    project_root: StrictStr = Field(min_length=1)
     revision: StrictStr = Field(min_length=1)
-    manifest_path: Path
+    revision_proven: Literal[False]
+    manifest_path: StrictStr = Field(min_length=1)
     manifest_sha256: Sha256
     source_sha256: Sha256
     sources: tuple[SourceEvidence, ...] = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def paths_are_local(self) -> Self:
-        workspace = self.workspace_root.resolve()
-        for path, label in (
-            (self.project_root, "project root"),
-            (self.manifest_path, "manifest path"),
+    @field_validator("project_root", "manifest_path")
+    @classmethod
+    def paths_are_portable(cls, value: str) -> str:
+        parsed = PurePosixPath(value)
+        if (
+            "://" in value
+            or parsed.is_absolute()
+            or ".." in parsed.parts
+            or value in {"", "."}
         ):
-            try:
-                path.resolve().relative_to(workspace)
-            except ValueError as error:
-                raise ValueError(
-                    f"{label} must be inside the local workspace"
-                ) from error
-        return self
+            raise ValueError(
+                "target path must be a portable workspace-relative path "
+                "without traversal"
+            )
+        return parsed.as_posix()
 
 
 class ArtifactEvidence(StrictModel):
@@ -104,6 +108,15 @@ class ArtifactEvidence(StrictModel):
     bytecode_sha256: Sha256
     build_info_id: StrictStr = Field(min_length=1)
     build_info_sha256: Sha256
+    constructor_types: tuple[StrictStr, ...]
+
+    @field_validator("artifact_path")
+    @classmethod
+    def artifact_path_is_portable(cls, value: str) -> str:
+        parsed = PurePosixPath(value)
+        if "://" in value or parsed.is_absolute() or ".." in parsed.parts:
+            raise ValueError("artifact path must be a portable relative descriptor")
+        return parsed.as_posix()
 
 
 class BuildEvidence(StrictModel):
@@ -132,6 +145,7 @@ class ChainEvidence(StrictModel):
 class FundingEvidence(StrictModel):
     actor_id: StrictStr = Field(min_length=1)
     slot: NonNegativeInt
+    address: StrictStr = Field(pattern=r"^0x[0-9a-f]{40}$")
     balance_wei: NonNegativeInt
 
 
@@ -298,10 +312,42 @@ class ReplayRecord(StrictModel):
 
     @model_validator(mode="after")
     def command_is_local_offline_foundry(self) -> Self:
-        if self.command[0] != "forge" or "--offline" not in self.command:
-            raise ValueError("replay command must be offline Foundry")
+        fixed = {
+            0: "forge",
+            1: "test",
+            2: "--offline",
+            3: "--root",
+            5: "--match-path",
+            7: "--match-test",
+            8: "test_qprover_replay",
+            9: "--out",
+            11: "--cache-path",
+        }
+        if len(self.command) != 13 or any(
+            self.command[index] != value for index, value in fixed.items()
+        ):
+            raise ValueError("record must use the exact replay command shape")
+        match_path = self.command[6]
+        if (
+            re.fullmatch(r"test/\.qprover_replay_[0-9a-f]{32}\.t\.sol", match_path)
+            is None
+        ):
+            raise ValueError("record must use the exact replay command match path")
+        root = PurePosixPath(self.command[4])
+        out = PurePosixPath(self.command[10])
+        cache = PurePosixPath(self.command[12])
+        if (
+            root.is_absolute()
+            or root == PurePosixPath(".")
+            or ".." in root.parts
+            or out != PurePosixPath(f".qprover-cold/replay-{self.index}/out")
+            or cache != PurePosixPath(f".qprover-cold/replay-{self.index}/cache")
+        ):
+            raise ValueError("record must use exact replay command isolation paths")
+        if self.success != (self.exit_code == 0):
+            raise ValueError("replay success must match the process exit code")
         if any("://" in item or "--fork-url" in item for item in self.command):
-            raise ValueError("replay command must not use a network or fork")
+            raise ValueError("record must use the exact replay command without network")
         return self
 
 
@@ -309,6 +355,20 @@ class ReplayEvidence(StrictModel):
     local_only: StrictBool
     required_repeats: Literal[3]
     records: tuple[ReplayRecord, ...]
+
+
+class AssuranceEvidence(StrictModel):
+    replay_proven_scope: Literal[
+        "manifest/source/build/artifact identities; local chain and actor funding; "
+        "transaction execution, receipts, gas, traces, intermediate and final "
+        "observations; invariant and impact; single-delete local minimality; "
+        "three stable offline Foundry replays"
+    ]
+    historical_search_metadata_scope: Literal[
+        "revision label; assumptions; run identifier and timestamp; search and "
+        "minimization counters and attempted-operator history"
+    ]
+    cryptographic_attestation: Literal[False]
 
 
 class EvidenceEvent(StrictModel):
@@ -364,8 +424,9 @@ class ProofCertificate(StrictModel):
     gas: GasEvidence
     minimization: MinimizationEvidence
     poc: PoCEvidence
-    replay_command: StrictStr = Field(min_length=1)
+    replay_command: Literal["qprover replay certificate.json"]
     replay: ReplayEvidence
+    assurance: AssuranceEvidence
     certificate_identity_sha256: Sha256
     certificate_sha256: Sha256
 
@@ -403,7 +464,9 @@ class ProofCertificate(StrictModel):
 
     @model_validator(mode="after")
     def validate_evidence(self, info: ValidationInfo) -> Self:
-        allow_unsealed = bool(info.context and info.context.get("allow_unsealed"))
+        allow_unsealed = bool(
+            info.context and info.context.get("_seal_token") is _SEAL_TOKEN
+        )
         if not allow_unsealed and (
             self.certificate_identity_sha256 != self.compute_identity()
         ):
@@ -458,7 +521,10 @@ class ProofCertificate(StrictModel):
             raise ValueError("attacker impact delta does not match observations")
         if self.impact.protocol_delta != after[protocol] - before[protocol]:
             raise ValueError("protocol impact delta does not match observations")
-        if self.confirmation_status is ConfirmationStatus.CONFIRMED:
+        if (
+            self.confirmation_status is ConfirmationStatus.CONFIRMED
+            and not allow_unsealed
+        ):
             self._validate_confirmation()
         return self
 
@@ -485,6 +551,22 @@ class ProofCertificate(StrictModel):
         expected_indices = (1, 2, 3)
         if tuple(item.index for item in self.replay.records) != expected_indices:
             raise ValueError("CONFIRMED requires exactly three ordered cold replays")
+        if (
+            len({item.stdout_sha256 for item in self.replay.records}) != 1
+            or len({item.stderr_sha256 for item in self.replay.records}) != 1
+        ):
+            raise ValueError("CONFIRMED requires stable cold replay output")
+        commands = tuple(item.command for item in self.replay.records)
+        if (
+            len({command[4] for command in commands}) != 1
+            or commands[0][4] != self.target.project_root
+            or len({command[6] for command in commands}) != 1
+            or len({command[10] for command in commands}) != 3
+            or len({command[12] for command in commands}) != 3
+            or len({str(PurePosixPath(command[10]).parent) for command in commands})
+            != 3
+        ):
+            raise ValueError("CONFIRMED requires exact isolated replay commands")
         artifact_hashes = {item.artifact_sha256 for item in self.artifacts}
         for record in self.replay.records:
             identities_match = (
@@ -500,18 +582,14 @@ class ProofCertificate(StrictModel):
                 )
 
 
-def create_certificate(**data: object) -> ProofCertificate:
-    """Validate, identity-bind, and self-hash a certificate."""
-
+def _finalize_certificate(data: Mapping[str, object]) -> ProofCertificate:
     unsigned = ProofCertificate.model_validate(
         {
             **data,
-            "confirmation_status": ConfirmationStatus.NOT_CONFIRMED,
-            "replay": ReplayEvidence(local_only=True, required_repeats=3, records=()),
             "certificate_identity_sha256": _ZERO_HASH,
             "certificate_sha256": _ZERO_HASH,
         },
-        context={"allow_unsealed": True},
+        context={"_seal_token": _SEAL_TOKEN},
     )
     identity = unsigned.compute_identity()
     identified = ProofCertificate.model_validate(
@@ -520,7 +598,7 @@ def create_certificate(**data: object) -> ProofCertificate:
             "certificate_identity_sha256": identity,
             "certificate_sha256": _ZERO_HASH,
         },
-        context={"allow_unsealed": True},
+        context={"_seal_token": _SEAL_TOKEN},
     )
     return ProofCertificate.model_validate(
         {
@@ -529,6 +607,55 @@ def create_certificate(**data: object) -> ProofCertificate:
             "certificate_sha256": identified.compute_hash(),
         }
     )
+
+
+def create_certificate(**data: object) -> ProofCertificate:
+    """Create a self-hashed draft; confirmation is reserved for cold replay."""
+
+    status = data.get("confirmation_status", ConfirmationStatus.NOT_CONFIRMED)
+    if status not in (
+        ConfirmationStatus.NOT_CONFIRMED,
+        ConfirmationStatus.NOT_CONFIRMED.value,
+    ):
+        raise ValueError("draft certificate status must be NOT_CONFIRMED")
+    supplied_replay = data.get("replay")
+    if supplied_replay is not None:
+        replay = ReplayEvidence.model_validate(supplied_replay)
+        if replay.records:
+            raise ValueError("draft certificate requires empty replay evidence")
+
+    return _finalize_certificate(
+        {
+            **data,
+            "confirmation_status": ConfirmationStatus.NOT_CONFIRMED,
+            "replay": ReplayEvidence(local_only=True, required_repeats=3, records=()),
+        }
+    )
+
+
+def _seal_certificate(
+    draft: ProofCertificate, records: tuple[ReplayRecord, ...]
+) -> ProofCertificate:
+    """Internally replace replay evidence after one complete cold verification."""
+
+    validated = ProofCertificate.model_validate(draft.model_dump(mode="json"))
+    if len(records) != 3:
+        raise ValueError("internal sealing requires exactly three replay records")
+    confirmed = (
+        all(record.success and record.exit_code == 0 for record in records)
+        and len({record.stdout_sha256 for record in records}) == 1
+        and len({record.stderr_sha256 for record in records}) == 1
+    )
+    data = validated.model_dump(mode="python")
+    data.pop("certificate_identity_sha256")
+    data.pop("certificate_sha256")
+    data["confirmation_status"] = (
+        ConfirmationStatus.CONFIRMED if confirmed else ConfirmationStatus.NOT_CONFIRMED
+    )
+    data["replay"] = ReplayEvidence(
+        local_only=True, required_repeats=3, records=records
+    )
+    return _finalize_certificate(data)
 
 
 def write_certificate(certificate: ProofCertificate, output: Path) -> Path:
@@ -564,7 +691,8 @@ def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str
     return (
         f"# QProver proof certificate `{validated.run_id}`\n\n"
         f"- Status: `{validated.confirmation_status.value}`\n"
-        f"- Target: `{validated.target.id}` at `{validated.target.revision}`\n"
+        f"- Target: `{validated.target.id}`\n"
+        f"- Unverified revision label: `{validated.target.revision}`\n"
         f"- Final outcome: `{validated.final_evaluation_outcome.value}`\n"
         f"- Invariant: `{validated.invariant.id}`\n"
         f"- Attacker gain: {impact.attacker_delta:,} {impact.unit}\n"
@@ -572,6 +700,10 @@ def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str
         f"- Gas used: {validated.gas.total_gas_used:,}\n"
         f"- Minimized steps: {validated.minimization.minimized_steps:,}\n"
         f"- Cold replays: {len(validated.replay.records):,}\n"
+        f"- Replay-proven scope: {validated.assurance.replay_proven_scope}\n"
+        "- Historical-only metadata: "
+        f"{validated.assurance.historical_search_metadata_scope}\n"
+        "- Cryptographic attestation: no\n"
         f"- Certificate SHA-256: `{validated.certificate_sha256}`\n"
     )
 
@@ -624,6 +756,7 @@ def write_events(events: tuple[EvidenceEvent, ...], output: Path) -> Path:
 
 __all__ = [
     "ArtifactEvidence",
+    "AssuranceEvidence",
     "AssumptionEvidence",
     "BeforeAfterEvidence",
     "BuildEvidence",

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from qprover.certificate import (
     ArtifactEvidence,
     AssumptionEvidence,
+    AssuranceEvidence,
     BeforeAfterEvidence,
     BuildEvidence,
     ChainEvidence,
@@ -30,6 +31,7 @@ from qprover.certificate import (
     TargetEvidence,
     ToolchainEvidence,
     TransactionEvidence,
+    _seal_certificate,
     create_certificate,
     render_markdown,
     write_certificate,
@@ -49,7 +51,6 @@ def _state_hash(values: dict[str, int]) -> str:
 
 
 def _base(tmp_path: Path) -> dict[str, object]:
-    root = tmp_path.resolve()
     return {
         "run_id": "run-7",
         "generated_at": datetime(2026, 9, 14, 1, 2, 3, tzinfo=UTC),
@@ -57,10 +58,11 @@ def _base(tmp_path: Path) -> dict[str, object]:
         "final_evaluation_outcome": Outcome.VIOLATION,
         "target": TargetEvidence(
             id="scenario_access_control_a",
-            workspace_root=root,
-            project_root=root / "foundry",
+            workspace_root=".",
+            project_root="benchmarks/foundry",
             revision="66e337d",
-            manifest_path=root / "manifest.json",
+            revision_proven=False,
+            manifest_path="benchmarks/manifest.json",
             manifest_sha256=H0,
             source_sha256=H1,
             sources=(SourceEvidence(path="src/Pair.sol", sha256=H2),),
@@ -73,6 +75,7 @@ def _base(tmp_path: Path) -> dict[str, object]:
                 bytecode_sha256=H3,
                 build_info_id="build-1",
                 build_info_sha256=H1,
+                constructor_types=(),
             ),
         ),
         "build": BuildEvidence(
@@ -96,7 +99,12 @@ def _base(tmp_path: Path) -> dict[str, object]:
             external_rpc=False,
         ),
         "funding": (
-            FundingEvidence(actor_id="attacker", slot=1, balance_wei=100 * 10**18),
+            FundingEvidence(
+                actor_id="attacker",
+                slot=1,
+                address="0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                balance_wei=100 * 10**18,
+            ),
         ),
         "assumptions": (
             AssumptionEvidence(id="fixture", description="Educational local fixture."),
@@ -188,6 +196,20 @@ def _base(tmp_path: Path) -> dict[str, object]:
             test_name="test_qprover_replay",
         ),
         "replay_command": "qprover replay certificate.json",
+        "assurance": AssuranceEvidence(
+            replay_proven_scope=(
+                "manifest/source/build/artifact identities; local chain and actor "
+                "funding; "
+                "transaction execution, receipts, gas, traces, intermediate and final "
+                "observations; invariant and impact; single-delete local minimality; "
+                "three stable offline Foundry replays"
+            ),
+            historical_search_metadata_scope=(
+                "revision label; assumptions; run identifier and timestamp; search and "
+                "minimization counters and attempted-operator history"
+            ),
+            cryptographic_attestation=False,
+        ),
     }
 
 
@@ -202,9 +224,23 @@ def _confirmed(tmp_path: Path):
         ReplayRecord(
             index=index,
             success=True,
-            command=("forge", "test", "--offline"),
+            command=(
+                "forge",
+                "test",
+                "--offline",
+                "--root",
+                "benchmarks/foundry",
+                "--match-path",
+                f"test/.qprover_replay_{'a' * 32}.t.sol",
+                "--match-test",
+                "test_qprover_replay",
+                "--out",
+                f".qprover-cold/replay-{index}/out",
+                "--cache-path",
+                f".qprover-cold/replay-{index}/cache",
+            ),
             exit_code=0,
-            stdout_sha256=str(index) * 64,
+            stdout_sha256=H0,
             stderr_sha256=H0,
             duration_seconds=0.25,
             certificate_identity_sha256=provisional.certificate_identity_sha256,
@@ -215,11 +251,7 @@ def _confirmed(tmp_path: Path):
         )
         for index in range(1, 4)
     )
-    return create_certificate(
-        confirmation_status=ConfirmationStatus.CONFIRMED,
-        replay=ReplayEvidence(local_only=True, required_repeats=3, records=records),
-        **base,
-    )
+    return _seal_certificate(provisional, records)
 
 
 def test_complete_confirmed_certificate_validates_with_pydantic_and_schema(
@@ -256,6 +288,227 @@ def test_zero_hashes_cannot_bypass_certificate_integrity(tmp_path: Path) -> None
     data["certificate_sha256"] = H0
     with pytest.raises(ValidationError, match="hash mismatch"):
         ProofCertificate.model_validate(data)
+    with pytest.raises(ValidationError, match="hash mismatch"):
+        ProofCertificate.model_validate(data, context={"allow_unsealed": True})
+
+
+def test_public_creation_rejects_confirmation_and_replay_forgery(
+    tmp_path: Path,
+) -> None:
+    """Only cold verification may transition a draft to CONFIRMED."""
+
+    base = _base(tmp_path)
+    with pytest.raises(ValueError, match="draft.*NOT_CONFIRMED"):
+        create_certificate(
+            confirmation_status=ConfirmationStatus.CONFIRMED,
+            replay=ReplayEvidence(local_only=True, required_repeats=3, records=()),
+            **base,
+        )
+
+    wrong_command = dict(base)
+    wrong_command["replay_command"] = "forge test --offline"
+    with pytest.raises(ValidationError, match="replay_command"):
+        create_certificate(**wrong_command)
+
+    draft = create_certificate(
+        confirmation_status=ConfirmationStatus.NOT_CONFIRMED,
+        replay=ReplayEvidence(local_only=True, required_repeats=3, records=()),
+        **base,
+    )
+    forged = ReplayEvidence(
+        local_only=True,
+        required_repeats=3,
+        records=(
+            ReplayRecord(
+                index=1,
+                success=True,
+                command=(
+                    "forge",
+                    "test",
+                    "--offline",
+                    "--root",
+                    "benchmarks/foundry",
+                    "--match-path",
+                    f"test/.qprover_replay_{'a' * 32}.t.sol",
+                    "--match-test",
+                    "test_qprover_replay",
+                    "--out",
+                    ".qprover-cold/replay-1/out",
+                    "--cache-path",
+                    ".qprover-cold/replay-1/cache",
+                ),
+                exit_code=0,
+                stdout_sha256=H0,
+                stderr_sha256=H0,
+                duration_seconds=0.1,
+                certificate_identity_sha256=draft.certificate_identity_sha256,
+                poc_sha256=H3,
+                manifest_sha256=H0,
+                source_sha256=H1,
+                artifact_sha256=H2,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="draft.*empty replay"):
+        create_certificate(
+            confirmation_status=ConfirmationStatus.NOT_CONFIRMED,
+            replay=forged,
+            **base,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workspace_root", "/tmp/qprover"),
+        ("project_root", "../foundry"),
+        ("manifest_path", "benchmarks/../../manifest.json"),
+    ],
+)
+def test_certificate_target_paths_are_portable_and_cannot_traverse(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """Target paths must remain meaningful after moving a clean workspace."""
+
+    target = {
+        "id": "scenario_access_control_a",
+        "workspace_root": ".",
+        "project_root": "benchmarks/foundry",
+        "revision": "66e337d",
+        "revision_proven": False,
+        "manifest_path": "benchmarks/scenario_access_control_a.json",
+        "manifest_sha256": H0,
+        "source_sha256": H1,
+        "sources": ({"path": "src/Pair.sol", "sha256": H2},),
+    }
+    target[field] = value
+
+    with pytest.raises(
+        ValidationError, match="portable|relative|traversal|Input should"
+    ):
+        TargetEvidence.model_validate(target)
+
+
+def test_certificate_revision_is_explicitly_unverified() -> None:
+    target = {
+        "id": "scenario_access_control_a",
+        "workspace_root": ".",
+        "project_root": "benchmarks/foundry",
+        "revision": "caller-supplied-label",
+        "revision_proven": True,
+        "manifest_path": "benchmarks/scenario_access_control_a.json",
+        "manifest_sha256": H0,
+        "source_sha256": H1,
+        "sources": ({"path": "src/Pair.sol", "sha256": H2},),
+    }
+
+    with pytest.raises(ValidationError, match="revision_proven"):
+        TargetEvidence.model_validate(target)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("forge", "test", "--offline"),
+        (
+            "forge",
+            "test",
+            "--offline",
+            "--root",
+            "/tmp/project",
+            "--match-path",
+            "test/forged.t.sol",
+            "--match-test",
+            "not_the_replay",
+            "--out",
+            "/tmp/run/out",
+            "--cache-path",
+            "/tmp/run/cache",
+        ),
+    ],
+)
+def test_replay_record_rejects_forged_command_shape(command: tuple[str, ...]) -> None:
+    """Replay records accept only QProver's exact isolated Forge invocation."""
+
+    with pytest.raises(ValidationError, match="exact replay command"):
+        ReplayRecord(
+            index=1,
+            success=True,
+            command=command,
+            exit_code=0,
+            stdout_sha256=H0,
+            stderr_sha256=H0,
+            duration_seconds=0.1,
+            certificate_identity_sha256=H0,
+            poc_sha256=H0,
+            manifest_sha256=H0,
+            source_sha256=H0,
+            artifact_sha256=H0,
+        )
+
+
+def test_assurance_explicitly_separates_replay_proof_from_history() -> None:
+    assurance = AssuranceEvidence(
+        replay_proven_scope=(
+            "manifest/source/build/artifact identities; local chain and actor funding; "
+            "transaction execution, receipts, gas, traces, intermediate and final "
+            "observations; invariant and impact; single-delete local minimality; "
+            "three stable offline Foundry replays"
+        ),
+        historical_search_metadata_scope=(
+            "revision label; assumptions; run identifier and timestamp; search and "
+            "minimization counters and attempted-operator history"
+        ),
+        cryptographic_attestation=False,
+    )
+
+    assert "transaction execution" in assurance.replay_proven_scope
+    assert "revision" in assurance.historical_search_metadata_scope
+    assert assurance.cryptographic_attestation is False
+
+
+def test_json_schema_rejects_structural_replay_command_forgery(
+    tmp_path: Path,
+) -> None:
+    schema = json.loads(Path("schemas/certificate.schema.json").read_text())
+    data = json.loads(_confirmed(tmp_path).canonical_json())
+    data["replay"]["records"][0]["command"] = ["forge", "test", "--offline"]
+
+    assert "semantic" in schema["$comment"].lower()
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(data, schema)
+
+
+def test_confirmation_binds_replay_root_to_certificate_target(tmp_path: Path) -> None:
+    draft = create_certificate(**_base(tmp_path))
+    records = tuple(
+        item.model_copy(
+            update={
+                "command": (
+                    *item.command[:4],
+                    "another/project",
+                    *item.command[5:],
+                ),
+                "certificate_identity_sha256": (draft.certificate_identity_sha256),
+            }
+        )
+        for item in _confirmed(tmp_path).replay.records
+    )
+
+    with pytest.raises(ValidationError, match="isolated replay commands"):
+        _seal_certificate(draft, records)
+
+
+def test_json_schema_rejects_claimed_confirmation_with_failed_replay(
+    tmp_path: Path,
+) -> None:
+    schema = json.loads(Path("schemas/certificate.schema.json").read_text())
+    data = json.loads(_confirmed(tmp_path).canonical_json())
+    data["replay"]["records"][0]["success"] = False
+    data["replay"]["records"][0]["exit_code"] = 1
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(data, schema)
 
 
 @pytest.mark.parametrize(
@@ -281,10 +534,22 @@ def test_confirmation_rejects_unexecuted_or_incomplete_evidence(
 ) -> None:
     valid = _confirmed(tmp_path).model_dump(mode="python")
     valid.update(mutation)
-    valid.pop("certificate_sha256")
-    valid.pop("certificate_identity_sha256")
+    for field in (
+        "certificate_sha256",
+        "certificate_identity_sha256",
+        "confirmation_status",
+        "replay",
+    ):
+        valid.pop(field)
+    draft = create_certificate(**valid)
+    records = tuple(
+        item.model_copy(
+            update={"certificate_identity_sha256": draft.certificate_identity_sha256}
+        )
+        for item in _confirmed(tmp_path).replay.records
+    )
     with pytest.raises(ValidationError, match="CONFIRMED"):
-        create_certificate(**valid)
+        _seal_certificate(draft, records)
 
 
 def test_confirmation_rejects_replay_count_failure_and_identity_mismatch(
@@ -295,7 +560,6 @@ def test_confirmation_rejects_replay_count_failure_and_identity_mismatch(
     records = list(certificate.replay.records)
     variants = [
         records[:2],
-        [records[0], records[1].model_copy(update={"success": False}), records[2]],
         [records[0].model_copy(update={"poc_sha256": H0}), *records[1:]],
         [
             records[0].model_copy(update={"certificate_identity_sha256": H0}),
@@ -307,15 +571,59 @@ def test_confirmation_rejects_replay_count_failure_and_identity_mismatch(
             key: value
             for key, value in base.items()
             if key
-            not in {"certificate_sha256", "certificate_identity_sha256", "replay"}
+            not in {
+                "certificate_sha256",
+                "certificate_identity_sha256",
+                "confirmation_status",
+                "replay",
+            }
         }
-        with pytest.raises(ValidationError, match="CONFIRMED"):
-            create_certificate(
-                replay=ReplayEvidence(
-                    local_only=True, required_repeats=3, records=tuple(replay_records)
-                ),
-                **kwargs,
+        draft = create_certificate(**kwargs)
+        rebound = tuple(
+            item.model_copy(
+                update={
+                    "certificate_identity_sha256": (
+                        H0
+                        if item.certificate_identity_sha256 == H0
+                        else draft.certificate_identity_sha256
+                    )
+                }
             )
+            for item in replay_records
+        )
+        with pytest.raises((ValidationError, ValueError), match="CONFIRMED|three"):
+            _seal_certificate(draft, rebound)
+
+    kwargs = {
+        key: value
+        for key, value in base.items()
+        if key
+        not in {
+            "certificate_sha256",
+            "certificate_identity_sha256",
+            "confirmation_status",
+            "replay",
+        }
+    }
+    draft = create_certificate(**kwargs)
+    failed = tuple(
+        item.model_copy(
+            update={
+                "success": False,
+                "exit_code": 1,
+                "certificate_identity_sha256": draft.certificate_identity_sha256,
+            }
+        )
+        if item.index == 2
+        else item.model_copy(
+            update={"certificate_identity_sha256": draft.certificate_identity_sha256}
+        )
+        for item in records
+    )
+    assert (
+        _seal_certificate(draft, failed).confirmation_status
+        is ConfirmationStatus.NOT_CONFIRMED
+    )
 
 
 def test_markdown_uses_only_validated_json_values(tmp_path: Path) -> None:
@@ -324,6 +632,9 @@ def test_markdown_uses_only_validated_json_values(tmp_path: Path) -> None:
     assert "10,000,000,000,000,000,000" in markdown
     assert "42,000" in markdown
     assert "CONFIRMED" in markdown
+    assert "Unverified revision label" in markdown
+    assert "Historical-only metadata" in markdown
+    assert "Cryptographic attestation: no" in markdown
     with pytest.raises(ValidationError):
         render_markdown({**certificate.model_dump(), "unknown": "injected"})
 
@@ -343,5 +654,9 @@ def test_event_record_is_strict_immutable_schema_valid_and_atomic(
     schema = json.loads(Path("schemas/event.schema.json").read_text())
     serialized = event.model_dump(mode="json")
     jsonschema.validate(serialized, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {**serialized, "timestamp": "2026-09-14T09:00:00+09:00"}, schema
+        )
     destination = write_events((event,), tmp_path / "events.jsonl")
     assert json.loads(destination.read_text()) == serialized

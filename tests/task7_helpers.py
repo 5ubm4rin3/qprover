@@ -5,10 +5,13 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from eth_utils.abi import collapse_if_tuple
+
 from qprover.artifacts import ArtifactBundle
 from qprover.certificate import (
     ArtifactEvidence,
     AssumptionEvidence,
+    AssuranceEvidence,
     BeforeAfterEvidence,
     BuildEvidence,
     ChainEvidence,
@@ -31,10 +34,21 @@ from qprover.models import ConfirmationStatus, TargetManifest
 
 ROOT = Path(__file__).parents[1].resolve()
 ZERO_HASH = "0" * 64
+ACTOR_ADDRESSES = {
+    0: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+    1: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+}
 
 
 def digest(data: bytes | str) -> str:
     return hashlib.sha256(data.encode() if isinstance(data, str) else data).hexdigest()
+
+
+def state_evidence(values: dict[str, int | bool]) -> StateEvidence:
+    return StateEvidence(
+        values=values,
+        state_sha256=digest(json.dumps(values, sort_keys=True, separators=(",", ":"))),
+    )
 
 
 def make_executed_certificate(
@@ -45,6 +59,7 @@ def make_executed_certificate(
     minimization: MinimizationResult,
     output_root: Path,
     poc_sha256: str = ZERO_HASH,
+    workspace_root: Path = ROOT,
 ):
     evaluation = minimization.final_evaluation
     metadata = evaluation.metadata
@@ -106,6 +121,12 @@ def make_executed_certificate(
             bytecode_sha256=item.bytecode_sha256,
             build_info_id=item.build_info_id,
             build_info_sha256=bundle.build_info_sha256,
+            constructor_types=tuple(
+                collapse_if_tuple(dict(parameter))
+                for entry in item.abi
+                if entry.get("type") == "constructor"
+                for parameter in entry.get("inputs", ())
+            ),
         )
         for item in bundle.artifacts
     )
@@ -119,10 +140,15 @@ def make_executed_certificate(
         final_evaluation_outcome=evaluation.outcome,
         target=TargetEvidence(
             id=manifest.target.id,
-            workspace_root=ROOT,
-            project_root=manifest.target.project_root,
+            workspace_root=".",
+            project_root=manifest.target.project_root.resolve()
+            .relative_to(workspace_root.resolve())
+            .as_posix(),
             revision="66e337d",
-            manifest_path=manifest_path.resolve(),
+            revision_proven=False,
+            manifest_path=manifest_path.resolve()
+            .relative_to(workspace_root.resolve())
+            .as_posix(),
             manifest_sha256=bundle.manifest_sha256,
             source_sha256=bundle.source_sha256,
             sources=sources,
@@ -150,7 +176,10 @@ def make_executed_certificate(
         ),
         funding=tuple(
             FundingEvidence(
-                actor_id=actor.id, slot=actor.slot, balance_wei=actor.balance_wei
+                actor_id=actor.id,
+                slot=actor.slot,
+                address=ACTOR_ADDRESSES[actor.slot],
+                balance_wei=actor.balance_wei,
             )
             for actor in manifest.actors
         ),
@@ -221,4 +250,18 @@ def make_executed_certificate(
         ),
         replay_command="qprover replay certificate.json",
         replay=ReplayEvidence(local_only=True, required_repeats=3, records=()),
+        assurance=AssuranceEvidence(
+            replay_proven_scope=(
+                "manifest/source/build/artifact identities; local chain and actor "
+                "funding; "
+                "transaction execution, receipts, gas, traces, intermediate and final "
+                "observations; invariant and impact; single-delete local minimality; "
+                "three stable offline Foundry replays"
+            ),
+            historical_search_metadata_scope=(
+                "revision label; assumptions; run identifier and timestamp; search and "
+                "minimization counters and attempted-operator history"
+            ),
+            cryptographic_attestation=False,
+        ),
     )

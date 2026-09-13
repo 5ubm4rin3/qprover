@@ -74,6 +74,13 @@ def test_generated_poc_is_exact_local_assertion_driven_fixture_replay(
     assert "test_qprover_replay" in source
     assert "assert(!" in source
     assert "final_protocol_assets >= initial_protocol_assets" in source
+    assert "contract QProverActor" not in source
+    assert "function prank(address msgSender, address txOrigin) external;" in source
+    assert "address(uint160(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266))" in source
+    initial_assets = certificate.initial_state.values["protocol_assets"]
+    final_assets = certificate.before_after.after.values["protocol_assets"]
+    assert f"assert(initial_protocol_assets == {initial_assets});" in source
+    assert f"assert(final_protocol_assets == {final_assets});" in source
     assert str(abs(certificate.impact.protocol_delta)) in source
     for forbidden in (
         "vm.store",
@@ -85,11 +92,13 @@ def test_generated_poc_is_exact_local_assertion_driven_fixture_replay(
         "createFork",
         "selectFork",
         "private key",
-        "vm.prank",
         "vm.label",
     ):
         assert forbidden not in source
     assert source.count("vm.deal(") == len(manifest.actors)
+    assert source.count("vm.prank(") == len(manifest.deployments) + len(
+        certificate.transactions
+    )
 
 
 def test_poc_generation_rejects_hash_and_manifest_identity_mismatch(
