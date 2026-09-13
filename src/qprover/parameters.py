@@ -394,7 +394,7 @@ class _ConstraintTranslator:
             left, left_defined = self.translate(node.left)
             right, right_defined = self.translate(node.right)
             defined = z3.And(left_defined, right_defined)
-            left, right = self._compatible(left, right)
+            left, right = self._integer(left), self._integer(right)
             if isinstance(node.op, ast.Add):
                 return left + right, defined
             if isinstance(node.op, ast.Sub):
@@ -429,13 +429,13 @@ class _ConstraintTranslator:
                 return result, defined
             if isinstance(node.op, (ast.LShift, ast.RShift)):
                 if not isinstance(node.right, ast.Constant) or not (
-                    type(node.right.value) is int
+                    type(node.right.value) in (int, bool)
                     and 0 <= node.right.value <= _MAX_SHIFT
                 ):
                     raise ParameterError(
                         f"shift must use an integer literal in [0, {_MAX_SHIFT}]"
                     )
-                factor = z3.IntVal(1 << node.right.value)
+                factor = z3.IntVal(1 << int(node.right.value))
                 if isinstance(node.op, ast.LShift):
                     return left * factor, defined
                 return left / factor, defined
@@ -470,18 +470,35 @@ class _ConstraintTranslator:
             for operator, comparator in zip(node.ops, node.comparators, strict=True):
                 right, right_defined = self.translate(comparator)
                 defined = z3.And(defined, z3.Or(z3.Not(truth), right_defined))
-                comparable_left, comparable_right = self._compatible(left, right)
                 if isinstance(operator, ast.Eq):
+                    comparable_left, comparable_right = self._compatible(left, right)
                     comparison = comparable_left == comparable_right
                 elif isinstance(operator, ast.NotEq):
+                    comparable_left, comparable_right = self._compatible(left, right)
                     comparison = comparable_left != comparable_right
                 elif isinstance(operator, ast.Lt):
+                    comparable_left, comparable_right = (
+                        self._integer(left),
+                        self._integer(right),
+                    )
                     comparison = comparable_left < comparable_right
                 elif isinstance(operator, ast.LtE):
+                    comparable_left, comparable_right = (
+                        self._integer(left),
+                        self._integer(right),
+                    )
                     comparison = comparable_left <= comparable_right
                 elif isinstance(operator, ast.Gt):
+                    comparable_left, comparable_right = (
+                        self._integer(left),
+                        self._integer(right),
+                    )
                     comparison = comparable_left > comparable_right
                 elif isinstance(operator, ast.GtE):
+                    comparable_left, comparable_right = (
+                        self._integer(left),
+                        self._integer(right),
+                    )
                     comparison = comparable_left >= comparable_right
                 else:
                     raise ParameterError("unsupported comparison operator")

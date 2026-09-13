@@ -14,6 +14,22 @@ from qprover.parameters import (
     solve_integer_domain,
 )
 
+_BOOLEAN_BINARY_CASES = tuple(
+    (operator, left, right)
+    for operator in ("+", "-", "*", "//", "%", "**", "&", "|", "^", "<<", ">>")
+    for left, right in itertools.product((False, True), repeat=2)
+    if operator not in ("//", "%") or right
+)
+
+
+def _solve_boolean_constraint(constraint: str) -> tuple[tuple[int, ...], ...]:
+    return solve_integer_domain(
+        names=("arg0",),
+        constraints=(constraint,),
+        bounds={"arg0": (0, 0)},
+        max_models=1,
+    )
+
 
 def _manifest(tmp_path, *, max_variants: int = 32) -> TargetManifest:
     source = tmp_path / "Target.sol"
@@ -316,6 +332,51 @@ def test_z3_domains_exclude_undefined_zero_divisors(constraint: str) -> None:
     assert values == ()
 
 
+@pytest.mark.parametrize(("operator", "left", "right"), _BOOLEAN_BINARY_CASES)
+def test_z3_boolean_binary_operator_matrix_matches_expression_evaluator(
+    operator: str, left: bool, right: bool
+) -> None:
+    expression = f"{left} {operator} {right}"
+    result = evaluate_expression(expression, {})
+
+    assert result.status == "evaluated"
+    assert _solve_boolean_constraint(f"({expression}) == {result.value!r}") == ((0,),)
+
+
+@pytest.mark.parametrize("operator", ("<", "<=", ">", ">="))
+@pytest.mark.parametrize(("left", "right"), itertools.product((False, True), repeat=2))
+def test_z3_boolean_ordered_comparison_matrix_matches_expression_evaluator(
+    operator: str, left: bool, right: bool
+) -> None:
+    expression = f"{left} {operator} {right}"
+    result = evaluate_expression(expression, {})
+
+    assert result.status == "evaluated"
+    expected = ((0,),) if result.value else ()
+    assert _solve_boolean_constraint(expression) == expected
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "False == 0",
+        "False != 0",
+        "True == 1",
+        "True != 1",
+        "False < 1",
+        "True >= 1",
+    ),
+)
+def test_z3_boolean_integer_comparisons_match_expression_evaluator(
+    expression: str,
+) -> None:
+    result = evaluate_expression(expression, {})
+
+    assert result.status == "evaluated"
+    expected = ((0,),) if result.value else ()
+    assert _solve_boolean_constraint(expression) == expected
+
+
 @pytest.mark.parametrize(
     ("constraint", "names", "bounds"),
     [
@@ -358,6 +419,21 @@ def test_z3_domains_exclude_undefined_zero_divisors(constraint: str) -> None:
             "arg0 == 0 or arg1 // arg0 == 1",
             ("arg0", "arg1"),
             {"arg0": (0, 1), "arg1": (0, 1)},
+        ),
+        (
+            "(True - False) == 1 and (arg0 != 0 or True // False == 1)",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "False and (True % False == 0) or arg0 == 1",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "(True or True // False == 1) and (False < True)",
+            ("arg0",),
+            {"arg0": (0, 0)},
         ),
         (
             "arg0 and (arg1 or 1 // arg2)",
