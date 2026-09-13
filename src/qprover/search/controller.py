@@ -226,11 +226,19 @@ class SearchController:
             proposal_finished = self._clock()
             finished = proposal_finished
             if proposed is None:
-                stop_reason = (
-                    "wall_budget"
-                    if proposal_finished - started >= limits.wall_seconds
-                    else "search_space_exhausted"
-                )
+                if proposal_finished - started >= limits.wall_seconds:
+                    stop_reason = "wall_budget"
+                else:
+                    proposal_stats = getattr(strategy, "stats", None)
+                    unproven = (
+                        isinstance(proposal_stats, StrategyStats)
+                        and proposal_stats.metadata.get("exhaustion_proven") is False
+                    )
+                    stop_reason = (
+                        "solver_exhausted_unproven"
+                        if unproven
+                        else "search_space_exhausted"
+                    )
                 break
             if not isinstance(proposed, Candidate):
                 failed = True
@@ -288,9 +296,45 @@ class SearchController:
                 )
                 break
             if self._candidate_validator is not None:
-                valid = self._candidate_validator(proposed)
+                try:
+                    valid = self._candidate_validator(proposed)
+                except Exception as error:  # validator boundary normalization
+                    failed = True
+                    failure_reason = (
+                        f"candidate validator raised {type(error).__name__}"
+                    )
+                    stop_reason = "candidate_validation_error"
+                    ledger.record(
+                        proposal_finished,
+                        "proposal",
+                        severity="error",
+                        category="candidate-validator",
+                        payload={
+                            "candidate_id": proposed.canonical_id,
+                            "error_type": type(error).__name__,
+                            "valid": False,
+                        },
+                    )
+                    break
                 if type(valid) is not bool:
-                    raise ValueError("candidate_validator must return an exact boolean")
+                    failed = True
+                    returned_type = type(valid).__name__
+                    failure_reason = (
+                        f"candidate validator returned {returned_type}, expected bool"
+                    )
+                    stop_reason = "candidate_validation_error"
+                    ledger.record(
+                        proposal_finished,
+                        "proposal",
+                        severity="error",
+                        category="candidate-validator",
+                        payload={
+                            "candidate_id": proposed.canonical_id,
+                            "returned_type": returned_type,
+                            "valid": False,
+                        },
+                    )
+                    break
                 if not valid:
                     failed = True
                     failure_reason = "candidate rejected by validator"
@@ -384,6 +428,7 @@ class SearchController:
                     },
                 )
                 break
+            timed_out = finished - started >= limits.wall_seconds
             transactions += result.transaction_count
             outcomes[result.outcome] += 1
             evaluations.append(EvaluatedCandidate(proposed, result))
@@ -400,8 +445,13 @@ class SearchController:
                     "candidate_id": proposed.canonical_id,
                     "outcome": result.outcome.value,
                     "transaction_count": result.transaction_count,
+                    "timed_out": timed_out,
+                    "feedback_applied": not timed_out,
                 },
             )
+            if timed_out:
+                stop_reason = "wall_budget"
+                break
             strategy.observe(proposed, result)
             ledger.record(
                 finished,

@@ -316,6 +316,88 @@ def test_controller_rechecks_wall_budget_after_slow_proposal_at_equality() -> No
     assert run.events[0].timestamp_offset == pytest.approx(3.0)
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [Outcome.PASS, Outcome.VIOLATION, Outcome.REVERT],
+)
+def test_controller_records_but_does_not_credit_evaluation_finishing_at_deadline(
+    outcome: Outcome,
+) -> None:
+    clock = TickClock((10.0, 10.0, 10.0, 13.0, 13.0))
+    strategy = ScriptedStrategy((candidate("prepare"),))
+    evaluator = FakeEvaluator((outcome,), transaction_counts=(1,))
+
+    run = controller(clock=clock).run(
+        strategy=strategy,
+        evaluator=evaluator,
+        limits=limits(wall_seconds=3),
+    )
+
+    assert run.stop_reason == "wall_budget"
+    assert run.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
+    assert run.violation is None
+    assert run.evm_transactions == 1
+    assert run.candidates_evaluated == 1
+    assert run.outcome_counts[outcome] == 1
+    assert strategy.observed == []
+    assert tuple(event.phase for event in run.events) == (
+        "proposal",
+        "execution",
+        "stop",
+    )
+    assert run.events[1].timestamp_offset == pytest.approx(3.0)
+    assert run.events[1].payload["timed_out"] is True
+    assert run.events[1].payload["feedback_applied"] is False
+
+
+def test_controller_normalizes_candidate_validator_exception() -> None:
+    def broken_validator(proposed: Candidate) -> bool:
+        del proposed
+        raise RuntimeError("secret validator detail")
+
+    strategy = ScriptedStrategy((candidate("prepare"),))
+    evaluator = FakeEvaluator((Outcome.PASS,))
+    guarded = SearchController(
+        candidate_validator=broken_validator,
+        run_id_factory=lambda: "run-fixed",
+    )
+
+    run = guarded.run(strategy=strategy, evaluator=evaluator, limits=limits())
+
+    assert run.failed
+    assert run.stop_reason == "candidate_validation_error"
+    assert run.failure_reason == "candidate validator raised RuntimeError"
+    assert evaluator.calls == []
+    assert strategy.observed == []
+    assert run.evm_transactions == 0
+    assert run.candidates_evaluated == 0
+    assert run.events[0].severity == "error"
+    assert run.events[0].category == "candidate-validator"
+    assert "secret" not in json.dumps(run.to_dict())
+
+
+@pytest.mark.parametrize("invalid", [None, 0, 1, object()])
+def test_controller_rejects_non_exact_bool_candidate_validator_result(invalid) -> None:
+    strategy = ScriptedStrategy((candidate("prepare"),))
+    evaluator = FakeEvaluator((Outcome.PASS,))
+    guarded = SearchController(
+        candidate_validator=lambda proposed: invalid,
+        run_id_factory=lambda: "run-fixed",
+    )
+
+    run = guarded.run(strategy=strategy, evaluator=evaluator, limits=limits())
+
+    assert run.failed
+    assert run.stop_reason == "candidate_validation_error"
+    assert run.failure_reason == (
+        f"candidate validator returned {type(invalid).__name__}, expected bool"
+    )
+    assert evaluator.calls == []
+    assert strategy.observed == []
+    assert run.evm_transactions == 0
+    assert run.events[0].payload["returned_type"] == type(invalid).__name__
+
+
 def test_controller_bounds_duplicate_retries() -> None:
     repeated = candidate("prepare")
     strategy = ScriptedStrategy((repeated, repeated, repeated, repeated, repeated))

@@ -5,10 +5,17 @@ from collections import Counter
 
 import pytest
 
-from qprover.models import ActionStep, Candidate, Outcome
+from qprover.models import (
+    ActionStep,
+    Candidate,
+    ConfirmationStatus,
+    Outcome,
+    SearchLimits,
+)
 from qprover.parameters import ActionVariant
 from qprover.search.base import Evaluation, StrategyStats, candidate_is_valid
 from qprover.search.bqm import SampleSet, SearchProblem, sample_from_bits
+from qprover.search.controller import SearchController
 from qprover.search.coverage import CoverageGuidedStrategy
 from qprover.search.exact import ExactBackend
 from qprover.search.qubo import QuboStrategy
@@ -356,6 +363,11 @@ class SparseBackend:
         )
 
 
+class PassingEvaluator:
+    def evaluate(self, proposed: Candidate) -> Evaluation:
+        return evaluation(proposed)
+
+
 def test_qubo_falls_back_when_sparse_batches_repeat_evaluated_candidate() -> None:
     concrete = (variant("first"), variant("second"))
     small = SearchProblem(
@@ -410,6 +422,83 @@ def test_qubo_reports_proven_exhaustion_after_exact_small_space_fallback() -> No
     assert strategy.propose(1) is None
     assert strategy.stats.metadata["exhaustion_proven"] is True
     assert strategy.stats.metadata["solver_calls"] == 2
+
+
+def test_qubo_exact_fallback_counts_only_aggregate_repetition_feasible_sequences() -> (
+    None
+):
+    concrete = (variant("first"), variant("second"))
+    repeated = SearchProblem(
+        actions=("first", "second"),
+        variants=concrete,
+        max_sequence_length=3,
+        repetition_limits={"first": 1, "second": 1},
+    )
+    strategy = QuboStrategy(
+        backend=SparseBackend(),
+        reads=1,
+        resample_attempts=0,
+        max_exact_fallback_sequences=4,
+    )
+    strategy.initialize(repeated, seed=3)
+
+    candidates = []
+    for _ in range(4):
+        proposed = strategy.propose(3)
+        assert proposed is not None
+        candidates.append(proposed)
+        strategy.observe(proposed, evaluation(proposed))
+
+    assert strategy.propose(3) is None
+    assert {
+        tuple(step.action_id for step in proposed.steps) for proposed in candidates
+    } == {
+        ("first",),
+        ("second",),
+        ("first", "second"),
+        ("second", "first"),
+    }
+    assert len({proposed.canonical_id for proposed in candidates}) == 4
+    assert strategy.stats.metadata["feasible_space_count"] == 4
+    assert strategy.stats.metadata["feasible_count_exact"] is True
+    assert strategy.stats.metadata["exhaustion_proven"] is True
+
+
+def test_controller_marks_above_cap_qubo_exhaustion_unproven() -> None:
+    concrete = (
+        variant("first", max_repetitions=3),
+        variant("second", max_repetitions=3),
+    )
+    large = SearchProblem(
+        actions=("first", "second"),
+        variants=concrete,
+        max_sequence_length=3,
+        repetition_limits={"first": 3, "second": 3},
+    )
+    strategy = QuboStrategy(
+        backend=SparseBackend(),
+        reads=1,
+        resample_attempts=0,
+        max_exact_fallback_sequences=4,
+    )
+    strategy.initialize(large, seed=3)
+
+    run = SearchController(run_id_factory=lambda: "run-fixed").run(
+        strategy=strategy,
+        evaluator=PassingEvaluator(),
+        limits=SearchLimits(
+            max_sequence_length=3,
+            transaction_budget=10,
+            candidate_budget=10,
+            wall_seconds=30,
+        ),
+    )
+
+    assert run.stop_reason == "solver_exhausted_unproven"
+    assert run.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
+    assert run.strategy_stats.metadata["exhaustion_proven"] is False
+    assert run.strategy_stats.metadata["feasible_count_exact"] is False
+    assert run.strategy_stats.metadata["feasible_space_count"] == 5
 
 
 def test_fake_violation_sequence_is_known_only_to_evaluator(

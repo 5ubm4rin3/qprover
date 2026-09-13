@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 from collections import Counter
 from typing import Protocol
 
@@ -31,9 +30,9 @@ class BQMBackend(Protocol):
 class QuboStrategy:
     """Decode BQM samples, resample sparsity, then prove small-space exhaustion.
 
-    Exact fallback is deliberately disabled when the raw native sequence bound
-    exceeds ``max_exact_fallback_sequences``. In that case ``None`` follows only
-    bounded solver attempts and ``exhaustion_proven`` remains false.
+    Exact fallback is deliberately disabled when the concrete feasible-sequence
+    count exceeds ``max_exact_fallback_sequences``. In that case ``None`` follows
+    only bounded solver attempts and ``exhaustion_proven`` remains false.
     """
 
     name = "qubo"
@@ -88,10 +87,13 @@ class QuboStrategy:
         self._decoded_infeasible = 0
         self._solver_metadata: dict[str, object] = {}
         self._ranked: tuple[tuple[float, Candidate], ...] = ()
+        self._ranked_is_exact = False
         self._last_bqm: BinaryQuadraticModel | None = None
         self._resample_attempts = 0
         self._exact_fallbacks = 0
         self._fallback_space_bound = 0
+        self._feasible_space_count = 0
+        self._feasible_count_exact = False
         self._exhaustion_proven = False
         self._initialized = True
 
@@ -178,6 +180,7 @@ class QuboStrategy:
                 key=lambda item: (item[0], len(item[1].steps), item[1].canonical_id),
             )
         )
+        self._ranked_is_exact = False
         self._decoded_feasible += feasible
         self._decoded_infeasible += infeasible
         self._solver_metadata = dict(samples.metadata)
@@ -198,40 +201,57 @@ class QuboStrategy:
         remaining_transactions: int,
     ) -> tuple[Candidate | None, bool]:
         horizon = min(remaining_transactions, self._problem.max_sequence_length)
-        sequence_bound = 0
-        sequences_at_length = 1
-        for _ in range(horizon):
-            sequences_at_length *= len(self._tokens)
-            sequence_bound += sequences_at_length
-            if sequence_bound > self._max_exact_fallback_sequences:
-                self._fallback_space_bound = sequence_bound
-                return None, False
-        self._fallback_space_bound = sequence_bound
+        sequences: list[tuple[str, ...]] = []
+        action_counts: Counter[str] = Counter()
+
+        def enumerate_prefix(prefix: tuple[str, ...]) -> bool:
+            if prefix:
+                sequences.append(prefix)
+                if len(sequences) > self._max_exact_fallback_sequences:
+                    return False
+            if len(prefix) == horizon:
+                return True
+            for token in self._tokens:
+                action = self._variant_by_token[token].action_id
+                if action_counts[action] >= self._problem.repetition_limits[action]:
+                    continue
+                action_counts[action] += 1
+                complete = enumerate_prefix((*prefix, token))
+                action_counts[action] -= 1
+                if not complete:
+                    return False
+            return True
+
+        count_exact = enumerate_prefix(())
+        self._feasible_space_count = len(sequences)
+        self._feasible_count_exact = count_exact
+        self._fallback_space_bound = len(sequences)
+        if not count_exact:
+            return None, False
         self._exact_fallbacks += 1
         if self._last_bqm is None:
             raise AssertionError("exact fallback requires a built BQM")
         candidates: dict[str, tuple[float, Candidate]] = {}
-        for length in range(1, horizon + 1):
-            for sequence in itertools.product(self._tokens, repeat=length):
-                candidate = Candidate(
-                    tuple(
-                        step_from_variant(self._variant_by_token[token])
-                        for token in sequence
-                    )
+        for sequence in sequences:
+            candidate = Candidate(
+                tuple(
+                    step_from_variant(self._variant_by_token[token])
+                    for token in sequence
                 )
-                if candidate.canonical_id in self._proposed or not candidate_is_valid(
-                    self._problem, candidate
-                ):
-                    continue
-                energy = self._last_bqm.energy(self._last_bqm.encode(sequence))
-                candidates[candidate.canonical_id] = (energy, candidate)
-        if not candidates:
-            return None, True
-        _, candidate = min(
-            candidates.values(),
-            key=lambda item: (item[0], len(item[1].steps), item[1].canonical_id),
+            )
+            if not candidate_is_valid(self._problem, candidate):
+                raise AssertionError("feasible enumeration produced invalid candidate")
+            energy = self._last_bqm.energy(self._last_bqm.encode(sequence))
+            candidates[candidate.canonical_id] = (energy, candidate)
+        self._ranked = tuple(
+            sorted(
+                candidates.values(),
+                key=lambda item: (item[0], len(item[1].steps), item[1].canonical_id),
+            )
         )
-        return candidate, False
+        self._ranked_is_exact = True
+        candidate = self._next_unseen(remaining_transactions)
+        return candidate, candidate is None
 
     def propose(self, remaining_transactions: int) -> Candidate | None:
         if not self._initialized:
@@ -245,6 +265,9 @@ class QuboStrategy:
             self._proposed.add(candidate.canonical_id)
             self._exhaustion_proven = False
             return candidate
+        if self._ranked_is_exact:
+            self._exhaustion_proven = True
+            return None
         for _ in range(self._resample_limit):
             self._resample_attempts += 1
             self._rebuild()
@@ -284,6 +307,8 @@ class QuboStrategy:
                 "decoded_infeasible": self._decoded_infeasible,
                 "exact_fallbacks": self._exact_fallbacks,
                 "exhaustion_proven": self._exhaustion_proven,
+                "feasible_count_exact": self._feasible_count_exact,
+                "feasible_space_count": self._feasible_space_count,
                 "fallback_space_bound": self._fallback_space_bound,
                 "max_exact_fallback_sequences": self._max_exact_fallback_sequences,
                 "repair_count": 0,
