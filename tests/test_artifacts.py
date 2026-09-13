@@ -156,6 +156,8 @@ def test_build_target_preserves_compiler_evidence(analysis_manifest: Path) -> No
             "--build-info",
             "--extra-output",
             "storageLayout",
+            "--skip",
+            "test",
         )
         assert bundle.tool_version.startswith("forge Version:")
         assert bundle.artifacts[0].ast["nodeType"] == "SourceUnit"

@@ -275,7 +275,7 @@ Expected: import failure for `qprover.artifacts`.
 
 - [ ] **Step 3: Implement deterministic Foundry artifact loading**
 
-Run `forge build --build-info --extra-output storageLayout` with a scrubbed
+Run `forge build --build-info --extra-output storageLayout --skip test` with a scrubbed
 environment and `cwd=project_root`. Reject missing/multiple requested artifacts,
 compiler drift from the manifest, failed builds, paths outside the root, and
 artifacts missing ABI/bytecode/AST. Hash inputs with canonical relative paths.

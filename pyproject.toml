@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "qprover"
 version = "0.1.0"
 description = "Optimization-guided smart-contract exploit prover"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.12"
 dependencies = [
   "networkx>=3.4,<4",

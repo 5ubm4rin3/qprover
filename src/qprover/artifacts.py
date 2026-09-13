@@ -23,6 +23,8 @@ BUILD_COMMAND = (
     "--build-info",
     "--extra-output",
     "storageLayout",
+    "--skip",
+    "test",
 )
 
 
@@ -225,9 +227,13 @@ def _load_build_info(
     for source_name, record in sources.items():
         if not isinstance(source_name, str) or not isinstance(record, dict):
             raise ArtifactError("build-info contains invalid compiler source")
-        source_path = _inside(
-            project_root / source_name, project_root, "compiler source"
+        direct_source = project_root / source_name
+        source_path = (
+            direct_source
+            if direct_source.is_file()
+            else project_root / "src" / source_name
         )
+        source_path = _inside(source_path, project_root, "compiler source")
         content = record.get("content")
         if (
             not isinstance(content, str)
@@ -287,14 +293,23 @@ def _load_artifact(
     targets = settings.get("compilationTarget") if isinstance(settings, dict) else None
     if not isinstance(evm_version, str):
         raise ArtifactError(f"artifact is missing EVM version: {artifact_path}")
-    if targets != {source_name: contract_name}:
+    if not isinstance(targets, dict) or len(targets) != 1:
+        raise ArtifactError(
+            f"artifact compilation target mismatch: {source_name}:{contract_name}"
+        )
+    compilation_source, compilation_contract = next(iter(targets.items()))
+    if (
+        not isinstance(compilation_source, str)
+        or compilation_contract != contract_name
+        or compilation_source.rsplit("/", maxsplit=1)[-1] != source_name
+    ):
         raise ArtifactError(
             f"artifact compilation target mismatch: {source_name}:{contract_name}"
         )
     output_contract = (
         build_info.get("output", {})
         .get("contracts", {})
-        .get(source_name, {})
+        .get(compilation_source, {})
         .get(contract_name)
     )
     if not isinstance(output_contract, dict):
@@ -317,16 +332,16 @@ def _load_artifact(
         or output_method_identifiers != method_identifiers
         or not layout_matches
         or output_bytecode != bytecode[2:]
-        or build_info["output"]["sources"][source_name].get("ast") != ast
+        or build_info["output"]["sources"][compilation_source].get("ast") != ast
     ):
         raise ArtifactError(
             f"artifact does not match fresh build-info: {source_name}:{contract_name}"
         )
     return (
         ContractArtifact(
-            source_name=source_name,
+            source_name=compilation_source,
             contract_name=contract_name,
-            compilation_target=f"{source_name}:{contract_name}",
+            compilation_target=f"{compilation_source}:{contract_name}",
             build_info_id=build_info_id,
             artifact_path=artifact_path,
             artifact_sha256=_sha256(artifact_bytes),
@@ -445,7 +460,10 @@ def build_target(manifest: TargetManifest) -> ArtifactBundle:
             source_name, contract_name = reference.rsplit(":", maxsplit=1)
         except ValueError as error:
             raise ArtifactError(f"invalid artifact reference: {reference}") from error
-        if source_name not in declared_sources:
+        source_is_declared = source_name in declared_sources or (
+            f"src/{source_name}" in declared_sources
+        )
+        if not source_is_declared:
             raise ArtifactError(
                 f"deployment artifact source is not declared: {source_name}"
             )

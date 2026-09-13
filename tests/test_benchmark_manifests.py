@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from qprover.analysis import analyze
+from qprover.artifacts import build_target
+from qprover.graph import build_program_graph
 from qprover.manifest import load_manifest
 from qprover.models import TargetManifest
+from qprover.parameters import expand_action_variants
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARKS = ROOT / "benchmarks"
-MANIFESTS = BENCHMARKS / "manifests"
+MANIFESTS = BENCHMARKS
 FORBIDDEN = ("vulnerable", "sound", "safe", "fixed", "exploit")
 FAMILIES = (
     "access_control",
@@ -23,7 +27,7 @@ FAMILIES = (
 
 
 def _manifest_paths() -> tuple[Path, ...]:
-    return tuple(sorted(MANIFESTS.glob("*.json")))
+    return tuple(sorted(MANIFESTS.glob("scenario_*.json")))
 
 
 def _normalized_actions(manifest: TargetManifest) -> tuple[object, ...]:
@@ -103,3 +107,17 @@ def test_labels_and_known_sequences_are_scorer_only() -> None:
         assert "expected" not in raw
         assert "positive" not in raw
         assert "negative" not in raw
+
+
+def test_every_benchmark_manifest_has_a_production_analysis_closure() -> None:
+    for path in _manifest_paths():
+        manifest = load_manifest(path)
+        with build_target(manifest) as bundle:
+            assert bundle.closed is False
+            assert all(not source.startswith("test/") for source in bundle.source_names)
+            assert all("labels" not in source for source in bundle.source_names)
+            report = analyze(bundle)
+            graph = build_program_graph(report)
+            assert graph.nodes
+            assert expand_action_variants(manifest, report)
+        assert bundle.closed is True
