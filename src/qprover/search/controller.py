@@ -432,15 +432,15 @@ class SearchController:
             transactions += result.transaction_count
             outcomes[result.outcome] += 1
             evaluations.append(EvaluatedCandidate(proposed, result))
+            is_infrastructure_error = result.outcome is Outcome.INFRA_ERROR
+            if is_infrastructure_error:
+                failed = True
+                failure_reason = "evaluator returned INFRA_ERROR"
             ledger.record(
                 finished,
                 "execution",
-                severity="error" if result.outcome is Outcome.INFRA_ERROR else "info",
-                category=(
-                    "infrastructure"
-                    if result.outcome is Outcome.INFRA_ERROR
-                    else "candidate"
-                ),
+                severity="error" if is_infrastructure_error else "info",
+                category="infrastructure" if is_infrastructure_error else "candidate",
                 payload={
                     "candidate_id": proposed.canonical_id,
                     "outcome": result.outcome.value,
@@ -465,8 +465,7 @@ class SearchController:
                 violation = proposed
                 stop_reason = "violation"
                 break
-            if result.outcome is Outcome.INFRA_ERROR:
-                failed = True
+            if is_infrastructure_error:
                 stop_reason = "infrastructure_error"
                 break
 

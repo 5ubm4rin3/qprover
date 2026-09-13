@@ -334,6 +334,8 @@ def test_controller_records_but_does_not_credit_evaluation_finishing_at_deadline
     )
 
     assert run.stop_reason == "wall_budget"
+    assert not run.failed
+    assert run.failure_reason is None
     assert run.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
     assert run.violation is None
     assert run.evm_transactions == 1
@@ -348,6 +350,50 @@ def test_controller_records_but_does_not_credit_evaluation_finishing_at_deadline
     assert run.events[1].timestamp_offset == pytest.approx(3.0)
     assert run.events[1].payload["timed_out"] is True
     assert run.events[1].payload["feedback_applied"] is False
+
+
+@pytest.mark.parametrize("finished_at", [13.0, 14.0])
+@pytest.mark.parametrize("transaction_count", [0, 1])
+def test_controller_marks_late_infrastructure_evaluation_as_failed(
+    finished_at: float,
+    transaction_count: int,
+) -> None:
+    clock = TickClock((10.0, 10.0, 10.0, finished_at))
+    proposed = candidate("prepare")
+    strategy = ScriptedStrategy((proposed,))
+    evaluator = FakeEvaluator(
+        (Outcome.INFRA_ERROR,), transaction_counts=(transaction_count,)
+    )
+
+    run = controller(clock=clock).run(
+        strategy=strategy,
+        evaluator=evaluator,
+        limits=limits(wall_seconds=3),
+    )
+
+    assert run.failed
+    assert run.failure_reason == "evaluator returned INFRA_ERROR"
+    assert run.stop_reason == "wall_budget"
+    assert run.wall_seconds == pytest.approx(finished_at - 10.0)
+    assert run.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
+    assert run.violation is None
+    assert run.evm_transactions == transaction_count
+    assert run.candidates_evaluated == 1
+    assert run.outcome_counts[Outcome.INFRA_ERROR] == 1
+    assert run.evaluations[0].candidate == proposed
+    assert run.evaluations[0].evaluation.transaction_count == transaction_count
+    assert strategy.observed == []
+    assert tuple(event.phase for event in run.events) == (
+        "proposal",
+        "execution",
+        "stop",
+    )
+    assert run.events[1].severity == "error"
+    assert run.events[1].category == "infrastructure"
+    assert run.events[1].payload["timed_out"] is True
+    assert run.events[1].payload["feedback_applied"] is False
+    assert run.events[2].severity == "error"
+    assert run.events[2].category == "infrastructure"
 
 
 def test_controller_normalizes_candidate_validator_exception() -> None:
