@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,13 +14,72 @@ from qprover.parameters import ActionVariant
 from qprover.search.bqm import SearchProblem
 
 
-def _mapping(value: Mapping | None = None) -> MappingProxyType:
-    return MappingProxyType(dict(value or {}))
+def freeze_json(value: object) -> object:
+    """Recursively snapshot supported JSON-like data into immutable records."""
+
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise TypeError("JSON-like numeric values must be finite")
+        return value
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze_json(item) for item in value)
+    if isinstance(value, Mapping):
+        if any(type(key) is not str for key in value):
+            raise TypeError("JSON-like mapping keys must be strings")
+        return MappingProxyType({key: freeze_json(item) for key, item in value.items()})
+    raise TypeError(f"unsupported JSON-like value: {type(value).__name__}")
+
+
+def freeze_json_mapping(value: Mapping | None = None) -> MappingProxyType:
+    frozen = freeze_json(dict(value or {}))
+    if not isinstance(frozen, MappingProxyType):
+        raise AssertionError("mapping freeze did not produce a mapping proxy")
+    return frozen
+
+
+def thaw_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [thaw_json(item) for item in value]
+    return value
+
+
+def candidate_to_dict(candidate: Candidate) -> dict[str, object]:
+    def thaw_argument(value: object) -> object:
+        if isinstance(value, bytes):
+            return f"0x{value.hex()}"
+        if isinstance(value, tuple):
+            return [thaw_argument(item) for item in value]
+        return value
+
+    return {
+        "canonical_id": candidate.canonical_id,
+        "steps": [
+            {
+                "action_id": step.action_id,
+                "target_id": step.target_id,
+                "signature": step.signature,
+                "sender_slot": step.sender_slot,
+                "args": [thaw_argument(item) for item in step.args],
+                "value_wei": step.value_wei,
+            }
+            for step in candidate.steps
+        ],
+    }
 
 
 @dataclass(frozen=True, slots=True)
 class Evaluation:
-    """Label-neutral result returned by a concrete local evaluator."""
+    """Label-neutral result returned by a concrete local evaluator.
+
+    The controller interprets ``transaction_count`` by outcome: successful and
+    violating candidates must execute every step, a revert must execute a
+    positive prefix, and infrastructure/inconclusive outcomes may occur before
+    any transaction is sent.
+    """
 
     outcome: Outcome
     transaction_count: int
@@ -40,7 +100,16 @@ class Evaluation:
         ):
             raise ValueError("state_fingerprint must be a nonempty string or None")
         object.__setattr__(self, "trace_features", features)
-        object.__setattr__(self, "metadata", _mapping(self.metadata))
+        object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "outcome": self.outcome.value,
+            "transaction_count": self.transaction_count,
+            "trace_features": sorted(self.trace_features),
+            "state_fingerprint": self.state_fingerprint,
+            "metadata": thaw_json(self.metadata),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,14 +127,14 @@ class StrategyStats:
             for key, value in counters.items()
         ):
             raise ValueError("strategy counters must be nonnegative exact integers")
-        object.__setattr__(self, "counters", _mapping(counters))
-        object.__setattr__(self, "metadata", _mapping(self.metadata))
+        object.__setattr__(self, "counters", MappingProxyType(counters))
+        object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
             "counters": dict(self.counters),
-            "metadata": dict(self.metadata),
+            "metadata": thaw_json(self.metadata),
         }
 
 

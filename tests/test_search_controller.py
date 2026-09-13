@@ -13,7 +13,7 @@ from qprover.models import (
     SearchLimits,
 )
 from qprover.search.base import Evaluation, StrategyStats
-from qprover.search.controller import SearchController
+from qprover.search.controller import SearchController, SearchEvent
 
 
 def candidate(*actions: str) -> Candidate:
@@ -135,6 +135,101 @@ def test_controller_stops_on_executed_violation_without_confirming() -> None:
     assert run.confirmation_status is not ConfirmationStatus.CONFIRMED
 
 
+def test_controller_rejects_empty_candidate_before_evaluation() -> None:
+    empty = Candidate(())
+    strategy = ScriptedStrategy((empty,))
+    evaluator = FakeEvaluator((Outcome.VIOLATION,), transaction_counts=(0,))
+
+    run = controller().run(strategy=strategy, evaluator=evaluator, limits=limits())
+
+    assert run.failed
+    assert run.stop_reason == "invalid_candidate"
+    assert run.failure_reason == "candidate must contain at least one transaction"
+    assert run.candidates_evaluated == 0
+    assert run.evm_transactions == 0
+    assert run.outcome_counts[Outcome.VIOLATION] == 0
+    assert evaluator.calls == []
+    assert strategy.observed == []
+    assert run.events[0].severity == "error"
+    assert run.events[0].category == "strategy-contract"
+    assert "duplicate" not in run.events[0].payload
+
+
+def test_controller_applies_injected_candidate_validator_before_evaluation() -> None:
+    proposed = candidate("prepare")
+    strategy = ScriptedStrategy((proposed,))
+    evaluator = FakeEvaluator((Outcome.PASS,))
+    guarded = SearchController(
+        candidate_validator=lambda item: item.steps[0].action_id != "prepare",
+        run_id_factory=lambda: "run-fixed",
+    )
+
+    run = guarded.run(strategy=strategy, evaluator=evaluator, limits=limits())
+
+    assert run.failed
+    assert run.stop_reason == "invalid_candidate"
+    assert run.failure_reason == "candidate rejected by validator"
+    assert evaluator.calls == []
+
+
+@pytest.mark.parametrize("outcome", [Outcome.PASS, Outcome.VIOLATION])
+@pytest.mark.parametrize("transaction_count", [0, 1])
+def test_controller_rejects_unexecuted_or_partial_success_records(
+    outcome: Outcome,
+    transaction_count: int,
+) -> None:
+    proposed = candidate("prepare", "trigger")
+    strategy = ScriptedStrategy((proposed,))
+    evaluator = FakeEvaluator((outcome,), transaction_counts=(transaction_count,))
+
+    run = controller().run(strategy=strategy, evaluator=evaluator, limits=limits())
+
+    assert run.failed
+    assert run.stop_reason == "invalid_evaluation"
+    assert run.failure_reason == (
+        f"{outcome.value} transaction_count must equal candidate length"
+    )
+    assert run.candidates_evaluated == 0
+    assert run.evm_transactions == 0
+    assert run.outcome_counts[outcome] == 0
+    assert strategy.observed == []
+
+
+def test_controller_rejects_zero_transaction_revert_record() -> None:
+    proposed = candidate("prepare")
+    strategy = ScriptedStrategy((proposed,))
+    evaluator = FakeEvaluator((Outcome.REVERT,), transaction_counts=(0,))
+
+    run = controller().run(strategy=strategy, evaluator=evaluator, limits=limits())
+
+    assert run.failed
+    assert run.stop_reason == "invalid_evaluation"
+    assert run.failure_reason == "REVERT transaction_count must be a positive prefix"
+    assert run.candidates_evaluated == 0
+    assert run.outcome_counts[Outcome.REVERT] == 0
+
+
+def test_controller_documents_zero_execution_error_outcomes() -> None:
+    inconclusive = controller().run(
+        strategy=ScriptedStrategy((candidate("prepare"), None)),
+        evaluator=FakeEvaluator((Outcome.INCONCLUSIVE,), transaction_counts=(0,)),
+        limits=limits(),
+    )
+    infrastructure = controller().run(
+        strategy=ScriptedStrategy((candidate("prepare"),)),
+        evaluator=FakeEvaluator((Outcome.INFRA_ERROR,), transaction_counts=(0,)),
+        limits=limits(),
+    )
+
+    assert not inconclusive.failed
+    assert inconclusive.candidates_evaluated == 1
+    assert inconclusive.evm_transactions == 0
+    assert inconclusive.outcome_counts[Outcome.INCONCLUSIVE] == 1
+    assert infrastructure.failed
+    assert infrastructure.stop_reason == "infrastructure_error"
+    assert infrastructure.outcome_counts[Outcome.INFRA_ERROR] == 1
+
+
 def test_controller_propagates_infrastructure_error_as_failed_run() -> None:
     strategy = ScriptedStrategy((candidate("prepare"), candidate("trigger")))
     evaluator = FakeEvaluator((Outcome.INFRA_ERROR, Outcome.PASS))
@@ -188,7 +283,7 @@ class TickClock:
 
 
 def test_controller_enforces_wall_budget_with_injected_monotonic_clock() -> None:
-    clock = TickClock((100.0, 100.0, 101.0, 105.0))
+    clock = TickClock((100.0, 100.0, 100.5, 101.0, 105.0))
     strategy = ScriptedStrategy((candidate("prepare"), candidate("trigger")))
     evaluator = FakeEvaluator((Outcome.PASS, Outcome.PASS))
 
@@ -201,6 +296,24 @@ def test_controller_enforces_wall_budget_with_injected_monotonic_clock() -> None
     assert run.candidates_evaluated == 1
     assert run.stop_reason == "wall_budget"
     assert run.wall_seconds == pytest.approx(5.0)
+
+
+def test_controller_rechecks_wall_budget_after_slow_proposal_at_equality() -> None:
+    clock = TickClock((20.0, 20.0, 23.0))
+    strategy = ScriptedStrategy((candidate("prepare"),))
+    evaluator = FakeEvaluator((Outcome.PASS,))
+
+    run = controller(clock=clock).run(
+        strategy=strategy,
+        evaluator=evaluator,
+        limits=limits(wall_seconds=3),
+    )
+
+    assert run.stop_reason == "wall_budget"
+    assert run.wall_seconds == pytest.approx(3.0)
+    assert evaluator.calls == []
+    assert tuple(event.phase for event in run.events) == ("proposal", "stop")
+    assert run.events[0].timestamp_offset == pytest.approx(3.0)
 
 
 def test_controller_bounds_duplicate_retries() -> None:
@@ -242,6 +355,47 @@ def test_controller_records_stable_event_ledger() -> None:
     assert json.loads(json.dumps(run.events[-1].to_dict()))["run_id"] == "run-fixed"
 
 
+def test_event_and_run_records_snapshot_nested_payloads() -> None:
+    source = {"nested": {"items": [1, {"value": "before"}]}}
+    event = SearchEvent(
+        run_id="run",
+        sequence=0,
+        timestamp_offset=0.0,
+        phase="proposal",
+        severity="info",
+        category="search",
+        payload=source,
+    )
+    source["nested"]["items"][1]["value"] = "after"
+    source["nested"]["items"].append(2)
+
+    assert event.to_dict()["payload"] == {"nested": {"items": [1, {"value": "before"}]}}
+    assert json.loads(json.dumps(event.to_dict()))["payload"]["nested"]["items"] == [
+        1,
+        {"value": "before"},
+    ]
+
+    run = controller().run(
+        strategy=ScriptedStrategy((candidate("prepare"), None)),
+        evaluator=FakeEvaluator((Outcome.PASS,)),
+        limits=limits(),
+    )
+    assert json.loads(json.dumps(run.to_dict()))["events"][-1]["phase"] == "stop"
+
+
+def test_event_rejects_non_json_payload_values() -> None:
+    with pytest.raises(TypeError, match="JSON-like"):
+        SearchEvent(
+            run_id="run",
+            sequence=0,
+            timestamp_offset=0.0,
+            phase="proposal",
+            severity="info",
+            category="search",
+            payload={"mutable": {1, 2}},
+        )
+
+
 def test_controller_accepts_exact_lifecycle_without_optional_stats() -> None:
     class LifecycleOnlyStrategy:
         def initialize(self, problem, seed: int) -> None:
@@ -273,5 +427,13 @@ def test_controller_rejects_impossible_evaluator_transaction_counts(
     strategy = ScriptedStrategy((one_step,))
     evaluator = FakeEvaluator((Outcome.PASS,), transaction_counts=(bad_count,))
 
-    with pytest.raises(ValueError, match="transaction_count"):
-        controller().run(strategy=strategy, evaluator=evaluator, limits=limits())
+    if bad_count < 0:
+        run = controller().run(strategy=strategy, evaluator=evaluator, limits=limits())
+        assert run.failed
+        assert run.stop_reason == "evaluator_error"
+        assert run.failure_reason == "evaluator raised ValueError"
+        assert run.candidates_evaluated == 0
+    else:
+        run = controller().run(strategy=strategy, evaluator=evaluator, limits=limits())
+        assert run.failed
+        assert run.stop_reason == "invalid_evaluation"

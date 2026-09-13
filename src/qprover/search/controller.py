@@ -15,11 +15,10 @@ from qprover.search.base import (
     Evaluation,
     SearchStrategy,
     StrategyStats,
+    candidate_to_dict,
+    freeze_json_mapping,
+    thaw_json,
 )
-
-
-def _mapping(value: Mapping | None = None) -> MappingProxyType:
-    return MappingProxyType(dict(value or {}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +32,7 @@ class SearchEvent:
     payload: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "payload", _mapping(self.payload))
+        object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -43,7 +42,7 @@ class SearchEvent:
             "phase": self.phase,
             "severity": self.severity,
             "category": self.category,
-            "payload": dict(self.payload),
+            "payload": thaw_json(self.payload),
         }
 
 
@@ -68,9 +67,55 @@ class SearchRun:
     strategy_stats: StrategyStats
     violation: Candidate | None = None
     failed: bool = False
+    failure_reason: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "outcome_counts", _mapping(self.outcome_counts))
+        counts = dict(self.outcome_counts)
+        if any(
+            not isinstance(outcome, Outcome) or type(count) is not int or count < 0
+            for outcome, count in counts.items()
+        ):
+            raise ValueError("outcome counts must be nonnegative exact integers")
+        evaluations = tuple(self.evaluations)
+        events = tuple(self.events)
+        if any(not isinstance(item, EvaluatedCandidate) for item in evaluations):
+            raise TypeError("evaluations must contain EvaluatedCandidate records")
+        if any(not isinstance(item, SearchEvent) for item in events):
+            raise TypeError("events must contain SearchEvent records")
+        object.__setattr__(self, "outcome_counts", MappingProxyType(counts))
+        object.__setattr__(self, "evaluations", evaluations)
+        object.__setattr__(self, "events", events)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "stop_reason": self.stop_reason,
+            "confirmation_status": self.confirmation_status.value,
+            "candidates_evaluated": self.candidates_evaluated,
+            "evm_transactions": self.evm_transactions,
+            "duplicate_proposals": self.duplicate_proposals,
+            "wall_seconds": self.wall_seconds,
+            "outcome_counts": {
+                outcome.value: self.outcome_counts.get(outcome, 0)
+                for outcome in Outcome
+            },
+            "evaluations": [
+                {
+                    "candidate": candidate_to_dict(item.candidate),
+                    "evaluation": item.evaluation.to_dict(),
+                }
+                for item in self.evaluations
+            ],
+            "events": [event.to_dict() for event in self.events],
+            "strategy_stats": self.strategy_stats.to_dict(),
+            "violation": (
+                candidate_to_dict(self.violation)
+                if self.violation is not None
+                else None
+            ),
+            "failed": self.failed,
+            "failure_reason": self.failure_reason,
+        }
 
 
 class _EventLedger:
@@ -96,24 +141,49 @@ class _EventLedger:
                 phase=phase,
                 severity=severity,
                 category=category,
-                payload=_mapping(payload),
+                payload=freeze_json_mapping(payload),
             )
         )
 
 
+def _evaluation_contract_error(
+    candidate: Candidate,
+    result: Evaluation,
+) -> str | None:
+    length = len(candidate.steps)
+    count = result.transaction_count
+    if result.outcome in {Outcome.PASS, Outcome.VIOLATION} and count != length:
+        return f"{result.outcome.value} transaction_count must equal candidate length"
+    if result.outcome is Outcome.REVERT and not 1 <= count <= length:
+        return "REVERT transaction_count must be a positive prefix"
+    if result.outcome in {Outcome.INCONCLUSIVE, Outcome.INFRA_ERROR} and count > length:
+        return f"{result.outcome.value} transaction_count exceeds candidate length"
+    return None
+
+
 class SearchController:
+    """Run a strategy under hard proposal, transaction, and wall-clock gates.
+
+    ``candidate_validator`` permits callers that own a ``SearchProblem`` to
+    inject exact allowed-variant validation without changing the specified
+    ``run(strategy, evaluator, limits)`` interface. Structural validation is
+    always enforced, even when no validator is provided.
+    """
+
     def __init__(
         self,
         *,
         clock: Callable[[], float] = time.monotonic,
         run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
         duplicate_retry_limit: int = 32,
+        candidate_validator: Callable[[Candidate], bool] | None = None,
     ) -> None:
         if type(duplicate_retry_limit) is not int or duplicate_retry_limit <= 0:
             raise ValueError("duplicate_retry_limit must be an exact positive integer")
         self._clock = clock
         self._run_id_factory = run_id_factory
         self._duplicate_retry_limit = duplicate_retry_limit
+        self._candidate_validator = candidate_validator
 
     def run(
         self,
@@ -123,6 +193,8 @@ class SearchController:
     ) -> SearchRun:
         started = self._clock()
         run_id = self._run_id_factory()
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id_factory must return a nonempty string")
         ledger = _EventLedger(run_id, started)
         seen: set[str] = set()
         evaluations: list[EvaluatedCandidate] = []
@@ -132,6 +204,7 @@ class SearchController:
         consecutive_duplicates = 0
         violation: Candidate | None = None
         failed = False
+        failure_reason: str | None = None
         stop_reason = "search_space_exhausted"
         finished = started
 
@@ -150,17 +223,99 @@ class SearchController:
                 break
 
             proposed = strategy.propose(remaining)
+            proposal_finished = self._clock()
+            finished = proposal_finished
             if proposed is None:
-                stop_reason = "search_space_exhausted"
+                stop_reason = (
+                    "wall_budget"
+                    if proposal_finished - started >= limits.wall_seconds
+                    else "search_space_exhausted"
+                )
                 break
+            if not isinstance(proposed, Candidate):
+                failed = True
+                failure_reason = "strategy proposal must be a Candidate or None"
+                stop_reason = "invalid_candidate"
+                ledger.record(
+                    proposal_finished,
+                    "proposal",
+                    severity="error",
+                    category="strategy-contract",
+                    payload={"candidate_id": None, "valid": False},
+                )
+                break
+            if proposal_finished - started >= limits.wall_seconds:
+                ledger.record(
+                    proposal_finished,
+                    "proposal",
+                    payload={
+                        "candidate_id": proposed.canonical_id,
+                        "transactions": len(proposed.steps),
+                    },
+                )
+                stop_reason = "wall_budget"
+                break
+            if not proposed.steps:
+                failed = True
+                failure_reason = "candidate must contain at least one transaction"
+                stop_reason = "invalid_candidate"
+                ledger.record(
+                    proposal_finished,
+                    "proposal",
+                    severity="error",
+                    category="strategy-contract",
+                    payload={
+                        "candidate_id": proposed.canonical_id,
+                        "transactions": 0,
+                        "valid": False,
+                    },
+                )
+                break
+            if len(proposed.steps) > limits.max_sequence_length:
+                failed = True
+                failure_reason = "candidate exceeds maximum sequence length"
+                stop_reason = "invalid_candidate"
+                ledger.record(
+                    proposal_finished,
+                    "proposal",
+                    severity="error",
+                    category="strategy-contract",
+                    payload={
+                        "candidate_id": proposed.canonical_id,
+                        "transactions": len(proposed.steps),
+                        "valid": False,
+                    },
+                )
+                break
+            if self._candidate_validator is not None:
+                valid = self._candidate_validator(proposed)
+                if type(valid) is not bool:
+                    raise ValueError("candidate_validator must return an exact boolean")
+                if not valid:
+                    failed = True
+                    failure_reason = "candidate rejected by validator"
+                    stop_reason = "invalid_candidate"
+                    ledger.record(
+                        proposal_finished,
+                        "proposal",
+                        severity="error",
+                        category="strategy-contract",
+                        payload={
+                            "candidate_id": proposed.canonical_id,
+                            "transactions": len(proposed.steps),
+                            "valid": False,
+                        },
+                    )
+                    break
             is_duplicate = proposed.canonical_id in seen
             ledger.record(
-                now,
+                proposal_finished,
                 "proposal",
                 payload={
                     "candidate_id": proposed.canonical_id,
                     "duplicate": is_duplicate,
                     "transactions": len(proposed.steps),
+                    "valid": True,
                 },
             )
             if is_duplicate:
@@ -176,13 +331,60 @@ class SearchController:
                 stop_reason = "transaction_budget"
                 break
 
-            result = evaluator.evaluate(proposed)
-            if result.transaction_count > len(proposed.steps):
-                raise ValueError(
-                    "evaluation transaction_count exceeds candidate length"
+            try:
+                result = evaluator.evaluate(proposed)
+            except Exception as error:  # evaluator boundary normalization
+                finished = self._clock()
+                failed = True
+                failure_reason = f"evaluator raised {type(error).__name__}"
+                stop_reason = "evaluator_error"
+                ledger.record(
+                    finished,
+                    "execution",
+                    severity="error",
+                    category="evaluator",
+                    payload={
+                        "candidate_id": proposed.canonical_id,
+                        "error_type": type(error).__name__,
+                        "valid": False,
+                    },
                 )
-            transactions += result.transaction_count
+                break
             finished = self._clock()
+            if not isinstance(result, Evaluation):
+                failed = True
+                failure_reason = "evaluator must return an Evaluation record"
+                stop_reason = "invalid_evaluation"
+                ledger.record(
+                    finished,
+                    "execution",
+                    severity="error",
+                    category="evaluator-contract",
+                    payload={
+                        "candidate_id": proposed.canonical_id,
+                        "valid": False,
+                    },
+                )
+                break
+            accounting_error = _evaluation_contract_error(proposed, result)
+            if accounting_error is not None:
+                failed = True
+                failure_reason = accounting_error
+                stop_reason = "invalid_evaluation"
+                ledger.record(
+                    finished,
+                    "execution",
+                    severity="error",
+                    category="evaluator-contract",
+                    payload={
+                        "candidate_id": proposed.canonical_id,
+                        "outcome": result.outcome.value,
+                        "transaction_count": result.transaction_count,
+                        "valid": False,
+                    },
+                )
+                break
+            transactions += result.transaction_count
             outcomes[result.outcome] += 1
             evaluations.append(EvaluatedCandidate(proposed, result))
             ledger.record(
@@ -219,12 +421,18 @@ class SearchController:
                 break
 
         severity = "error" if failed else "info"
+        if failed:
+            stop_category = "infrastructure"
+        elif stop_reason.endswith("_budget"):
+            stop_category = "budget"
+        else:
+            stop_category = "search"
         ledger.record(
             finished,
             "stop",
             severity=severity,
-            category="infrastructure" if failed else "budget",
-            payload={"reason": stop_reason},
+            category=stop_category,
+            payload={"reason": stop_reason, "failure_reason": failure_reason},
         )
         strategy_stats = getattr(
             strategy,
@@ -251,4 +459,5 @@ class SearchController:
             strategy_stats=strategy_stats,
             violation=violation,
             failed=failed,
+            failure_reason=failure_reason,
         )

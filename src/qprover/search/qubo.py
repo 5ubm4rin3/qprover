@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections import Counter
 from typing import Protocol
 
@@ -28,6 +29,13 @@ class BQMBackend(Protocol):
 
 
 class QuboStrategy:
+    """Decode BQM samples, resample sparsity, then prove small-space exhaustion.
+
+    Exact fallback is deliberately disabled when the raw native sequence bound
+    exceeds ``max_exact_fallback_sequences``. In that case ``None`` follows only
+    bounded solver attempts and ``exhaustion_proven`` remains false.
+    """
+
     name = "qubo"
 
     def __init__(
@@ -37,15 +45,28 @@ class QuboStrategy:
         reads: int = 64,
         transition_enabled: bool = True,
         feedback_batch_size: int = 8,
+        resample_attempts: int = 3,
+        max_exact_fallback_sequences: int = 4096,
     ) -> None:
         if type(reads) is not int or reads <= 0:
             raise ValueError("reads must be an exact positive integer")
         if type(feedback_batch_size) is not int or feedback_batch_size <= 0:
             raise ValueError("feedback_batch_size must be an exact positive integer")
+        if type(resample_attempts) is not int or resample_attempts < 0:
+            raise ValueError("resample_attempts must be a nonnegative exact integer")
+        if (
+            type(max_exact_fallback_sequences) is not int
+            or max_exact_fallback_sequences < 0
+        ):
+            raise ValueError(
+                "max_exact_fallback_sequences must be a nonnegative exact integer"
+            )
         self._backend = backend
         self._reads = reads
         self._transition_enabled = transition_enabled
         self._feedback_batch_size = feedback_batch_size
+        self._resample_limit = resample_attempts
+        self._max_exact_fallback_sequences = max_exact_fallback_sequences
         self._initialized = False
 
     def initialize(self, problem: SearchProblem, seed: int) -> None:
@@ -67,6 +88,11 @@ class QuboStrategy:
         self._decoded_infeasible = 0
         self._solver_metadata: dict[str, object] = {}
         self._ranked: tuple[tuple[float, Candidate], ...] = ()
+        self._last_bqm: BinaryQuadraticModel | None = None
+        self._resample_attempts = 0
+        self._exact_fallbacks = 0
+        self._fallback_space_bound = 0
+        self._exhaustion_proven = False
         self._initialized = True
 
     def _optimization_problem(self) -> SearchProblem:
@@ -105,7 +131,11 @@ class QuboStrategy:
 
     def _sample(self, bqm: BinaryQuadraticModel) -> SampleSet:
         if isinstance(self._backend, SimulatedAnnealingBackend):
-            return self._backend.sample(bqm, seed=self._seed, reads=self._reads)
+            return self._backend.sample(
+                bqm,
+                seed=self._seed + self._builds,
+                reads=self._reads,
+            )
         return self._backend.sample(bqm, reads=self._reads)
 
     def _rebuild(self) -> None:
@@ -119,6 +149,7 @@ class QuboStrategy:
             SearchFeedback(revert_penalties=penalties),
         )
         samples = self._sample(bqm)
+        self._last_bqm = bqm
         ranked: dict[str, tuple[float, Candidate]] = {}
         feasible = 0
         infeasible = 0
@@ -153,6 +184,55 @@ class QuboStrategy:
         self._builds += 1
         self._feedback_since_build = 0
 
+    def _next_unseen(self, remaining_transactions: int) -> Candidate | None:
+        for _, candidate in self._ranked:
+            if (
+                len(candidate.steps) <= remaining_transactions
+                and candidate.canonical_id not in self._proposed
+            ):
+                return candidate
+        return None
+
+    def _exact_fallback(
+        self,
+        remaining_transactions: int,
+    ) -> tuple[Candidate | None, bool]:
+        horizon = min(remaining_transactions, self._problem.max_sequence_length)
+        sequence_bound = 0
+        sequences_at_length = 1
+        for _ in range(horizon):
+            sequences_at_length *= len(self._tokens)
+            sequence_bound += sequences_at_length
+            if sequence_bound > self._max_exact_fallback_sequences:
+                self._fallback_space_bound = sequence_bound
+                return None, False
+        self._fallback_space_bound = sequence_bound
+        self._exact_fallbacks += 1
+        if self._last_bqm is None:
+            raise AssertionError("exact fallback requires a built BQM")
+        candidates: dict[str, tuple[float, Candidate]] = {}
+        for length in range(1, horizon + 1):
+            for sequence in itertools.product(self._tokens, repeat=length):
+                candidate = Candidate(
+                    tuple(
+                        step_from_variant(self._variant_by_token[token])
+                        for token in sequence
+                    )
+                )
+                if candidate.canonical_id in self._proposed or not candidate_is_valid(
+                    self._problem, candidate
+                ):
+                    continue
+                energy = self._last_bqm.energy(self._last_bqm.encode(sequence))
+                candidates[candidate.canonical_id] = (energy, candidate)
+        if not candidates:
+            return None, True
+        _, candidate = min(
+            candidates.values(),
+            key=lambda item: (item[0], len(item[1].steps), item[1].canonical_id),
+        )
+        return candidate, False
+
     def propose(self, remaining_transactions: int) -> Candidate | None:
         if not self._initialized:
             raise RuntimeError("strategy is not initialized")
@@ -160,14 +240,24 @@ class QuboStrategy:
             return None
         if not self._ranked or self._feedback_since_build >= self._feedback_batch_size:
             self._rebuild()
-        for _, candidate in self._ranked:
-            if (
-                len(candidate.steps) <= remaining_transactions
-                and candidate.canonical_id not in self._proposed
-            ):
+        candidate = self._next_unseen(remaining_transactions)
+        if candidate is not None:
+            self._proposed.add(candidate.canonical_id)
+            self._exhaustion_proven = False
+            return candidate
+        for _ in range(self._resample_limit):
+            self._resample_attempts += 1
+            self._rebuild()
+            candidate = self._next_unseen(remaining_transactions)
+            if candidate is not None:
                 self._proposed.add(candidate.canonical_id)
+                self._exhaustion_proven = False
                 return candidate
-        return None
+        candidate, exhausted = self._exact_fallback(remaining_transactions)
+        self._exhaustion_proven = exhausted
+        if candidate is not None:
+            self._proposed.add(candidate.canonical_id)
+        return candidate
 
     def observe(self, candidate: Candidate, result: Evaluation) -> None:
         if not self._initialized:
@@ -192,8 +282,14 @@ class QuboStrategy:
             metadata={
                 "decoded_feasible": self._decoded_feasible,
                 "decoded_infeasible": self._decoded_infeasible,
+                "exact_fallbacks": self._exact_fallbacks,
+                "exhaustion_proven": self._exhaustion_proven,
+                "fallback_space_bound": self._fallback_space_bound,
+                "max_exact_fallback_sequences": self._max_exact_fallback_sequences,
                 "repair_count": 0,
+                "resample_attempts": self._resample_attempts,
                 "solver": dict(self._solver_metadata),
+                "solver_calls": self._builds,
                 "transition_enabled": self._transition_enabled,
             },
         )

@@ -7,8 +7,8 @@ import pytest
 
 from qprover.models import ActionStep, Candidate, Outcome
 from qprover.parameters import ActionVariant
-from qprover.search.base import Evaluation, candidate_is_valid
-from qprover.search.bqm import SearchProblem
+from qprover.search.base import Evaluation, StrategyStats, candidate_is_valid
+from qprover.search.bqm import SampleSet, SearchProblem, sample_from_bits
 from qprover.search.coverage import CoverageGuidedStrategy
 from qprover.search.exact import ExactBackend
 from qprover.search.qubo import QuboStrategy
@@ -250,6 +250,35 @@ def test_coverage_strategy_exercises_all_required_mutation_families(
     assert json.loads(json.dumps(strategy.stats.to_dict()))["name"] == "coverage"
 
 
+def test_evaluation_and_strategy_stats_snapshot_nested_metadata() -> None:
+    evaluation_source = {"solver": {"reads": [1, 2]}}
+    stats_source = {"mutation": {"names": ["append", "splice"]}}
+    result = Evaluation(
+        outcome=Outcome.INCONCLUSIVE,
+        transaction_count=0,
+        metadata=evaluation_source,
+    )
+    stats = StrategyStats(name="test", metadata=stats_source)
+    evaluation_source["solver"]["reads"].append(3)
+    stats_source["mutation"]["names"].append("delete")
+
+    assert result.to_dict()["metadata"] == {"solver": {"reads": [1, 2]}}
+    assert stats.to_dict()["metadata"] == {"mutation": {"names": ["append", "splice"]}}
+    json.dumps(result.to_dict())
+    json.dumps(stats.to_dict())
+
+
+@pytest.mark.parametrize("factory", [Evaluation, StrategyStats])
+def test_metadata_records_reject_non_json_values(factory) -> None:
+    kwargs = (
+        {"outcome": Outcome.PASS, "transaction_count": 1}
+        if factory is Evaluation
+        else {"name": "test"}
+    )
+    with pytest.raises(TypeError, match="JSON-like"):
+        factory(**kwargs, metadata={"unsupported": object()})
+
+
 def test_risk_strategy_prioritizes_public_dependency(problem: SearchProblem) -> None:
     strategy = RiskGuidedStrategy(beam_width=8)
     strategy.initialize(problem, seed=11)
@@ -313,6 +342,74 @@ def test_qubo_transition_ablation_changes_publicly_guided_proposal(
     assert guided_candidate.canonical_id != ablated_candidate.canonical_id
     assert guided.stats.metadata["transition_enabled"] is True
     assert ablated.stats.metadata["transition_enabled"] is False
+
+
+class SparseBackend:
+    """Returns one identical feasible sample regardless of repeated calls."""
+
+    def sample(self, bqm, **options) -> SampleSet:
+        del options
+        bits = bqm.encode((bqm.problem.actions[0],))
+        return SampleSet(
+            (sample_from_bits(bqm, bits),),
+            {"backend": "sparse", "details": {"reads": [1]}},
+        )
+
+
+def test_qubo_falls_back_when_sparse_batches_repeat_evaluated_candidate() -> None:
+    concrete = (variant("first"), variant("second"))
+    small = SearchProblem(
+        actions=("first", "second"),
+        variants=concrete,
+        max_sequence_length=1,
+        repetition_limits={"first": 1, "second": 1},
+    )
+    strategy = QuboStrategy(
+        backend=SparseBackend(),
+        reads=1,
+        resample_attempts=2,
+        max_exact_fallback_sequences=8,
+    )
+    strategy.initialize(small, seed=9)
+
+    first = strategy.propose(1)
+    assert first is not None
+    strategy.observe(first, evaluation(first))
+    second = strategy.propose(1)
+
+    assert second is not None
+    assert second.canonical_id != first.canonical_id
+    assert {first.steps[0].action_id, second.steps[0].action_id} == {
+        "first",
+        "second",
+    }
+    assert strategy.stats.metadata["resample_attempts"] == 2
+    assert strategy.stats.metadata["exact_fallbacks"] == 1
+
+
+def test_qubo_reports_proven_exhaustion_after_exact_small_space_fallback() -> None:
+    concrete = (variant("only"),)
+    small = SearchProblem(
+        actions=("only",),
+        variants=concrete,
+        max_sequence_length=1,
+        repetition_limits={"only": 1},
+    )
+    strategy = QuboStrategy(
+        backend=SparseBackend(),
+        reads=1,
+        resample_attempts=1,
+        max_exact_fallback_sequences=4,
+    )
+    strategy.initialize(small, seed=1)
+
+    first = strategy.propose(1)
+    assert first is not None
+    strategy.observe(first, evaluation(first))
+
+    assert strategy.propose(1) is None
+    assert strategy.stats.metadata["exhaustion_proven"] is True
+    assert strategy.stats.metadata["solver_calls"] == 2
 
 
 def test_fake_violation_sequence_is_known_only_to_evaluator(
