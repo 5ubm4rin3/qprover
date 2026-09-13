@@ -63,7 +63,7 @@ pytest, Hypothesis, Ruff, Foundry/Anvil/Cast 1.4.0, Solidity 0.8.34.
 | `src/qprover/report.py` | Derive summaries only from raw records |
 | `src/qprover/cli.py` | Noninteractive command interface |
 | `benchmarks/foundry` | Original vulnerable/sound paired scenarios and tests |
-| `benchmarks/manifests` | Label-neutral executable manifests |
+| `benchmarks` | Label-neutral executable manifests |
 | `benchmarks/labels.json` | Scorer-only expected labels and regression witnesses |
 | `schemas` | Published target, certificate, event, and benchmark JSON schemas |
 
@@ -275,7 +275,7 @@ Expected: import failure for `qprover.artifacts`.
 
 - [ ] **Step 3: Implement deterministic Foundry artifact loading**
 
-Run `forge build --build-info --extra-output storageLayout --skip test` with a scrubbed
+Run `forge build <declared-source-paths> --skip test --build-info --extra-output storageLayout` with a scrubbed
 environment and `cwd=project_root`. Reject missing/multiple requested artifacts,
 compiler drift from the manifest, failed builds, paths outside the root, and
 artifacts missing ABI/bytecode/AST. Hash inputs with canonical relative paths.
@@ -564,7 +564,7 @@ git --git-dir=.qprover-git --work-tree=. commit -m "feat: implement interchangea
 - Create: `benchmarks/foundry/src/GovernancePair.sol`
 - Create: `benchmarks/foundry/src/SignatureReplayPair.sol`
 - Create: `benchmarks/foundry/test/ScenarioWitnesses.t.sol`
-- Create: `benchmarks/manifests/*.json` (twelve label-neutral manifests)
+- Create: `benchmarks/*.json` (twelve label-neutral manifests)
 - Create: `benchmarks/suite.json`
 - Create: `benchmarks/labels.json`
 - Create: `benchmarks/PROVENANCE.md`

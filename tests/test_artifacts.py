@@ -153,11 +153,12 @@ def test_build_target_preserves_compiler_evidence(analysis_manifest: Path) -> No
         assert bundle.build_command == (
             "forge",
             "build",
+            "Fixture.sol",
+            "--skip",
+            "test",
             "--build-info",
             "--extra-output",
             "storageLayout",
-            "--skip",
-            "test",
         )
         assert bundle.tool_version.startswith("forge Version:")
         assert bundle.artifacts[0].ast["nodeType"] == "SourceUnit"

@@ -20,11 +20,11 @@ from qprover.models import TargetManifest
 BUILD_COMMAND = (
     "forge",
     "build",
+    "--skip",
+    "test",
     "--build-info",
     "--extra-output",
     "storageLayout",
-    "--skip",
-    "test",
 )
 
 
@@ -293,23 +293,15 @@ def _load_artifact(
     targets = settings.get("compilationTarget") if isinstance(settings, dict) else None
     if not isinstance(evm_version, str):
         raise ArtifactError(f"artifact is missing EVM version: {artifact_path}")
-    if not isinstance(targets, dict) or len(targets) != 1:
+    if targets != {source_name: contract_name}:
         raise ArtifactError(
             f"artifact compilation target mismatch: {source_name}:{contract_name}"
         )
-    compilation_source, compilation_contract = next(iter(targets.items()))
-    if (
-        not isinstance(compilation_source, str)
-        or compilation_contract != contract_name
-        or compilation_source.rsplit("/", maxsplit=1)[-1] != source_name
-    ):
-        raise ArtifactError(
-            f"artifact compilation target mismatch: {source_name}:{contract_name}"
-        )
+    compilation_source = source_name
     output_contract = (
         build_info.get("output", {})
         .get("contracts", {})
-        .get(compilation_source, {})
+        .get(source_name, {})
         .get(contract_name)
     )
     if not isinstance(output_contract, dict):
@@ -373,7 +365,12 @@ def _build_target_in_workspace(
         "FOUNDRY_OUT": str(output_root),
         "FOUNDRY_CACHE_PATH": str(build_root / "cache"),
     }
-    _run(BUILD_COMMAND, root, overrides)
+    build_command = (
+        *BUILD_COMMAND[:2],
+        *manifest_source_paths(manifest, root),
+        *BUILD_COMMAND[2:],
+    )
+    _run(build_command, root, overrides)
     build_info, build_info_path, build_info_bytes = _load_build_info(output_root, root)
     build_info_id = build_info.get("id")
     if not isinstance(build_info_id, str) or not build_info_id:
@@ -388,7 +385,9 @@ def _build_target_in_workspace(
     evm_versions: set[str] = set()
     for source_name, contract_name in parsed_requests:
         path = _inside(
-            output_root / source_name / f"{contract_name}.json",
+            output_root
+            / source_name.removeprefix("src/")
+            / f"{contract_name}.json",
             output_root,
             "artifact",
         )
@@ -437,7 +436,7 @@ def _build_target_in_workspace(
         compiler_version=expected_compiler,
         evm_version=expected_evm,
         tool_version=tool_version,
-        build_command=BUILD_COMMAND,
+        build_command=build_command,
         artifacts=tuple(artifacts),
         _evidence_root=build_root,
     )
@@ -460,10 +459,7 @@ def build_target(manifest: TargetManifest) -> ArtifactBundle:
             source_name, contract_name = reference.rsplit(":", maxsplit=1)
         except ValueError as error:
             raise ArtifactError(f"invalid artifact reference: {reference}") from error
-        source_is_declared = source_name in declared_sources or (
-            f"src/{source_name}" in declared_sources
-        )
-        if not source_is_declared:
+        if source_name not in declared_sources:
             raise ArtifactError(
                 f"deployment artifact source is not declared: {source_name}"
             )
@@ -481,3 +477,14 @@ def build_target(manifest: TargetManifest) -> ArtifactBundle:
     except BaseException:
         shutil.rmtree(build_root, ignore_errors=True)
         raise
+
+
+def manifest_source_paths(manifest: TargetManifest, root: Path) -> tuple[str, ...]:
+    """Return validated canonical Forge inputs for one target's source closure."""
+
+    return tuple(
+        sorted(
+            _inside(source, root, "source file").relative_to(root).as_posix()
+            for source in manifest.target.source_files
+        )
+    )

@@ -234,7 +234,7 @@ produce `INCONCLUSIVE`, never pass or violation.
 
 ### 7.1 Artifact loader
 
-QProver invokes `forge build --build-info --extra-output storageLayout --skip test` in the
+QProver invokes `forge build <declared-source-paths> --skip test --build-info --extra-output storageLayout` in the
 target project. It reads generated artifact JSON without importing target code
 into the Python process. Every analysis records source hashes, manifest hash,
 artifact hash, compiler version, bytecode hash, EVM version, and build command.

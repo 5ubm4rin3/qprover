@@ -8,6 +8,7 @@ from pathlib import Path
 from qprover.analysis import analyze
 from qprover.artifacts import build_target
 from qprover.graph import build_program_graph
+from qprover.hypotheses import generate_hypotheses
 from qprover.manifest import load_manifest
 from qprover.models import TargetManifest
 from qprover.parameters import expand_action_variants
@@ -82,6 +83,7 @@ def test_twins_have_identical_public_search_contracts() -> None:
         second = load_manifest(MANIFESTS / f"scenario_{family}_b.json")
 
         assert _normalized_actions(first) == _normalized_actions(second)
+        assert first.actors == second.actors
         assert tuple(
             observation.model_dump(mode="json") for observation in first.observations
         ) == tuple(
@@ -116,8 +118,13 @@ def test_every_benchmark_manifest_has_a_production_analysis_closure() -> None:
             assert bundle.closed is False
             assert all(not source.startswith("test/") for source in bundle.source_names)
             assert all("labels" not in source for source in bundle.source_names)
+            assert set(bundle.source_names) == {
+                manifest.deployments[0].artifact.rsplit(":", 1)[0],
+                "src/IQProverScenario.sol",
+            }
             report = analyze(bundle)
             graph = build_program_graph(report)
             assert graph.nodes
             assert expand_action_variants(manifest, report)
+            generate_hypotheses(graph, manifest)
         assert bundle.closed is True
