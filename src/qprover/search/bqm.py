@@ -79,6 +79,13 @@ class SearchProblem:
         transitions = dict(self.transitions or {})
         limits = dict(self.repetition_limits or {})
         known = set(actions)
+        if any(
+            type(key) is not tuple
+            or len(key) != 2
+            or any(type(endpoint) is not str for endpoint in key)
+            for key in transitions
+        ):
+            raise ValueError("transition keys must be exact two-string action tuples")
         unknown = set(utilities) - known
         unknown.update(set(limits) - known)
         unknown.update(
@@ -271,6 +278,8 @@ class BinaryQuadraticModel:
         raise AssertionError("unreachable action lookup")
 
     def index(self, position: int, action: str) -> int:
+        if type(position) is not int:
+            raise ValueError("position must be an exact integer")
         if not 0 <= position < self.problem.max_sequence_length:
             raise ValueError("position is outside the sequence horizon")
         try:

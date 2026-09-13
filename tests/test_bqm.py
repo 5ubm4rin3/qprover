@@ -14,6 +14,14 @@ from qprover.search.bqm import (
 )
 
 
+class _TransitionTuple(tuple):
+    pass
+
+
+class _ActionText(str):
+    pass
+
+
 @pytest.fixture
 def tiny_problem() -> SearchProblem:
     return SearchProblem(
@@ -185,6 +193,37 @@ def test_search_problem_rejects_coerced_repetition_limits(bad_limit) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        ("a",),
+        ("a", "a", "a"),
+        "a",
+        (True, "a"),
+        ("a", 1),
+        _TransitionTuple(("a", "a")),
+        (_ActionText("a"), "a"),
+        ("a", _ActionText("a")),
+    ],
+)
+def test_search_problem_rejects_malformed_transition_keys(bad_key) -> None:
+    with pytest.raises(ValueError, match="transition keys"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            transitions={bad_key: 1.0},
+        )
+
+
+def test_search_problem_rejects_unknown_transition_actions() -> None:
+    with pytest.raises(ValueError, match="unknown action"):
+        SearchProblem(
+            actions=("a",),
+            max_sequence_length=2,
+            transitions={("a", "other"): 1.0},
+        )
+
+
 @pytest.mark.parametrize("bad_score", [True, "1", float("inf"), float("nan")])
 def test_search_problem_rejects_non_real_or_nonfinite_scores(bad_score) -> None:
     with pytest.raises(ValueError, match="utilities"):
@@ -260,3 +299,13 @@ def test_bqm_samples_reject_coerced_bits(tiny_problem: SearchProblem, bad_bit) -
 
     with pytest.raises(ValueError, match="exact integers"):
         bqm.energy(bits)
+
+
+@pytest.mark.parametrize("bad_position", [True, False, 0.0, 1.0])
+def test_bqm_index_rejects_coerced_positions(
+    tiny_problem: SearchProblem, bad_position
+) -> None:
+    bqm = SequenceBQMBuilder().build(tiny_problem, SearchFeedback.empty())
+
+    with pytest.raises(ValueError, match="exact integer"):
+        bqm.index(bad_position, "prepare")

@@ -216,12 +216,14 @@ class _ConstraintTranslator:
         self.variables = variables
         self.constants = constants
         self.bounds = bounds
-        self.definedness: list[z3.BoolRef] = []
         del trees
 
     def _interval(self, node: ast.AST) -> tuple[int, int] | None:
         if isinstance(node, ast.Expression):
             return self._interval(node.body)
+        if isinstance(node, ast.Constant) and type(node.value) is bool:
+            value = int(node.value)
+            return value, value
         if isinstance(node, ast.Constant) and type(node.value) is int:
             return node.value, node.value
         if isinstance(node, ast.Name):
@@ -338,47 +340,75 @@ class _ConstraintTranslator:
             return value != 0
         raise ParameterError("boolean constraint operand must be integer or boolean")
 
-    def translate(self, node: ast.AST) -> z3.ExprRef:
+    @staticmethod
+    def _integer(value: z3.ExprRef) -> z3.ArithRef:
+        if z3.is_arith(value):
+            return value
+        if z3.is_bool(value):
+            return z3.If(value, z3.IntVal(1), z3.IntVal(0))
+        raise ParameterError("arithmetic constraint operand must be integer or boolean")
+
+    @classmethod
+    def _compatible(
+        cls, left: z3.ExprRef, right: z3.ExprRef
+    ) -> tuple[z3.ExprRef, z3.ExprRef]:
+        if z3.is_bool(left) and z3.is_bool(right):
+            return left, right
+        return cls._integer(left), cls._integer(right)
+
+    @classmethod
+    def _select(
+        cls,
+        condition: z3.BoolRef,
+        when_true: z3.ExprRef,
+        when_false: z3.ExprRef,
+    ) -> z3.ExprRef:
+        when_true, when_false = cls._compatible(when_true, when_false)
+        return z3.If(condition, when_true, when_false)
+
+    def translate(self, node: ast.AST) -> tuple[z3.ExprRef, z3.BoolRef]:
         if isinstance(node, ast.Expression):
             return self.translate(node.body)
         if isinstance(node, ast.Constant):
             if type(node.value) is bool:
-                return z3.BoolVal(node.value)
+                return z3.BoolVal(node.value), z3.BoolVal(True)
             if type(node.value) is not int:
                 raise ParameterError("constraints allow only integer/boolean constants")
-            return z3.IntVal(node.value)
+            return z3.IntVal(node.value), z3.BoolVal(True)
         if isinstance(node, ast.Name):
             if node.id in self.variables:
-                return self.variables[node.id]
+                return self.variables[node.id], z3.BoolVal(True)
             if node.id in self.constants:
-                return z3.IntVal(self.constants[node.id])
+                return z3.IntVal(self.constants[node.id]), z3.BoolVal(True)
             raise ParameterError(f"unknown constraint name: {node.id}")
         if isinstance(node, ast.UnaryOp):
-            operand = self.translate(node.operand)
+            operand, defined = self.translate(node.operand)
             if isinstance(node.op, ast.UAdd):
-                return operand
+                return self._integer(operand), defined
             if isinstance(node.op, ast.USub):
-                return -operand
+                return -self._integer(operand), defined
             if isinstance(node.op, ast.Not):
-                return z3.Not(self._truth(operand))
+                return z3.Not(self._truth(operand)), defined
             raise ParameterError("unsupported unary constraint operator")
         if isinstance(node, ast.BinOp):
-            left = self.translate(node.left)
-            right = self.translate(node.right)
+            left, left_defined = self.translate(node.left)
+            right, right_defined = self.translate(node.right)
+            defined = z3.And(left_defined, right_defined)
+            left, right = self._compatible(left, right)
             if isinstance(node.op, ast.Add):
-                return left + right
+                return left + right, defined
             if isinstance(node.op, ast.Sub):
-                return left - right
+                return left - right, defined
             if isinstance(node.op, ast.Mult):
-                return left * right
+                return left * right, defined
             if isinstance(node.op, ast.Div):
                 raise ParameterError("unsupported binary constraint operator: Div")
             if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
-                self.definedness.append(right != 0)
+                defined = z3.And(defined, right != 0)
                 quotient = z3.If(right > 0, left / right, (-left) / (-right))
                 if isinstance(node.op, ast.FloorDiv):
-                    return quotient
-                return left - quotient * right
+                    return quotient, defined
+                return left - quotient * right, defined
             if isinstance(node.op, ast.Pow):
                 exponent_interval = self._interval(node.right)
                 if exponent_interval is None or not (
@@ -392,11 +422,11 @@ class _ConstraintTranslator:
                 for _ in range(high):
                     powers.append(powers[-1] * left)
                 if low == high:
-                    return powers[low]
+                    return powers[low], defined
                 result = powers[high]
                 for exponent in range(high - 1, low - 1, -1):
                     result = z3.If(right == exponent, powers[exponent], result)
-                return result
+                return result, defined
             if isinstance(node.op, (ast.LShift, ast.RShift)):
                 if not isinstance(node.right, ast.Constant) or not (
                     type(node.right.value) is int
@@ -407,40 +437,57 @@ class _ConstraintTranslator:
                     )
                 factor = z3.IntVal(1 << node.right.value)
                 if isinstance(node.op, ast.LShift):
-                    return left * factor
-                return left / factor
+                    return left * factor, defined
+                return left / factor, defined
             if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
-                return self._bitwise(node, left, right)
+                return self._bitwise(node, left, right), defined
             raise ParameterError("unsupported binary constraint operator")
         if isinstance(node, ast.BoolOp):
-            values = tuple(self._truth(self.translate(value)) for value in node.values)
+            first_value, first_defined = self.translate(node.values[0])
+            result = first_value
+            defined = first_defined
             if isinstance(node.op, ast.And):
-                return z3.And(*values)
-            if isinstance(node.op, ast.Or):
-                return z3.Or(*values)
-            raise ParameterError("unsupported boolean constraint operator")
+                for child in node.values[1:]:
+                    child_value, child_defined = self.translate(child)
+                    truth = self._truth(result)
+                    defined = z3.And(
+                        defined,
+                        z3.Or(z3.Not(truth), child_defined),
+                    )
+                    result = self._select(truth, child_value, result)
+                return result, defined
+            if not isinstance(node.op, ast.Or):
+                raise ParameterError("unsupported boolean constraint operator")
+            for child in node.values[1:]:
+                child_value, child_defined = self.translate(child)
+                truth = self._truth(result)
+                defined = z3.And(defined, z3.Or(truth, child_defined))
+                result = self._select(truth, result, child_value)
+            return result, defined
         if isinstance(node, ast.Compare):
-            operands = (node.left, *node.comparators)
-            expressions = tuple(self.translate(item) for item in operands)
-            comparisons: list[z3.BoolRef] = []
-            for operator, left, right in zip(
-                node.ops, expressions[:-1], expressions[1:], strict=True
-            ):
+            left, defined = self.translate(node.left)
+            truth = z3.BoolVal(True)
+            for operator, comparator in zip(node.ops, node.comparators, strict=True):
+                right, right_defined = self.translate(comparator)
+                defined = z3.And(defined, z3.Or(z3.Not(truth), right_defined))
+                comparable_left, comparable_right = self._compatible(left, right)
                 if isinstance(operator, ast.Eq):
-                    comparisons.append(left == right)
+                    comparison = comparable_left == comparable_right
                 elif isinstance(operator, ast.NotEq):
-                    comparisons.append(left != right)
+                    comparison = comparable_left != comparable_right
                 elif isinstance(operator, ast.Lt):
-                    comparisons.append(left < right)
+                    comparison = comparable_left < comparable_right
                 elif isinstance(operator, ast.LtE):
-                    comparisons.append(left <= right)
+                    comparison = comparable_left <= comparable_right
                 elif isinstance(operator, ast.Gt):
-                    comparisons.append(left > right)
+                    comparison = comparable_left > comparable_right
                 elif isinstance(operator, ast.GtE):
-                    comparisons.append(left >= right)
+                    comparison = comparable_left >= comparable_right
                 else:
                     raise ParameterError("unsupported comparison operator")
-            return z3.And(*comparisons)
+                truth = z3.And(truth, comparison)
+                left = right
+            return truth, defined
         raise ParameterError(f"unsupported constraint syntax: {type(node).__name__}")
 
 
@@ -513,11 +560,8 @@ def solve_integer_domain(
         minimum, maximum = bounds[name]
         solver.add(variables[name] >= minimum, variables[name] <= maximum)
     for tree in trees:
-        expression = translator.translate(tree)
-        if not z3.is_bool(expression):
-            raise ParameterError("each constraint must evaluate to a boolean")
-        solver.add(expression)
-    solver.add(*translator.definedness)
+        expression, defined = translator.translate(tree)
+        solver.add(defined, translator._truth(expression))
 
     models: list[tuple[int, ...]] = []
     while len(models) < max_models:
@@ -535,8 +579,7 @@ def solve_integer_domain(
                 "constraint differs from invariant expression semantics"
             ) from error
         if any(
-            result.status != "evaluated" or result.value is not True
-            for result in results
+            result.status != "evaluated" or not bool(result.value) for result in results
         ):
             raise ParameterError("SMT model failed concrete semantic revalidation")
         models.append(values)

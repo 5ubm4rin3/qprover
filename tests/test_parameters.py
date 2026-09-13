@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import itertools
 from types import SimpleNamespace
 
 import pytest
 
+from qprover.expression import evaluate_expression
 from qprover.models import ArgumentSpec, TargetManifest
 from qprover.parameters import (
     ParameterError,
@@ -312,6 +314,113 @@ def test_z3_domains_exclude_undefined_zero_divisors(constraint: str) -> None:
     )
 
     assert values == ()
+
+
+@pytest.mark.parametrize(
+    ("constraint", "names", "bounds"),
+    [
+        (
+            "arg0 == 0 or 1 // arg0 == 1",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0 == 0 or 1 % arg0 == 0",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0 != 0 and 1 // arg0 == 1",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0 != 0 and 1 % arg0 == 0",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "(arg0 == 0 or 1 // arg0 == 1) and (arg0 != 1 or 1 % (arg0 - 1) == 0)",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0 != 0 and (arg0 == 1 or 1 % (arg0 - 1) == 0)",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0 == 0 or arg0 == 1 or 1 // (arg0 - 1) == 0",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0 == 0 or arg1 // arg0 == 1",
+            ("arg0", "arg1"),
+            {"arg0": (0, 1), "arg1": (0, 1)},
+        ),
+        (
+            "arg0 and (arg1 or 1 // arg2)",
+            ("arg0", "arg1", "arg2"),
+            {"arg0": (-1, 1), "arg1": (-1, 1), "arg2": (-1, 1)},
+        ),
+        (
+            "(arg0 and arg1) or 1 % arg2",
+            ("arg0", "arg1", "arg2"),
+            {"arg0": (-1, 1), "arg1": (-1, 1), "arg2": (-1, 1)},
+        ),
+        (
+            "arg0 < arg1 < 1 // arg2",
+            ("arg0", "arg1", "arg2"),
+            {"arg0": (-1, 1), "arg1": (-1, 1), "arg2": (-1, 1)},
+        ),
+        (
+            "arg0 < arg1 < 1 // (arg0 - arg1) or arg0 == arg1",
+            ("arg0", "arg1"),
+            {"arg0": (-1, 1), "arg1": (-1, 1)},
+        ),
+        (
+            "(arg0 < arg1 < arg2) or 1 // (arg0 - arg1)",
+            ("arg0", "arg1", "arg2"),
+            {"arg0": (-1, 1), "arg1": (-1, 1), "arg2": (-1, 1)},
+        ),
+        (
+            "(arg0 and 2) == 2",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "(arg0 or 2) == 2",
+            ("arg0",),
+            {"arg0": (0, 1)},
+        ),
+        (
+            "arg0",
+            ("arg0",),
+            {"arg0": (-1, 1)},
+        ),
+    ],
+)
+def test_z3_short_circuit_definedness_matches_concrete_evaluator(
+    constraint: str,
+    names: tuple[str, ...],
+    bounds: dict[str, tuple[int, int]],
+) -> None:
+    concrete = []
+    domains = [range(bounds[name][0], bounds[name][1] + 1) for name in names]
+    for values in itertools.product(*domains):
+        result = evaluate_expression(constraint, dict(zip(names, values, strict=True)))
+        if result.status == "evaluated" and bool(result.value):
+            concrete.append(values)
+
+    solved = solve_integer_domain(
+        names=names,
+        constraints=(constraint,),
+        bounds=bounds,
+        max_models=len(tuple(itertools.product(*domains))),
+    )
+
+    assert solved == tuple(concrete)
 
 
 def test_z3_shift_has_exact_non_overflowing_semantics() -> None:
