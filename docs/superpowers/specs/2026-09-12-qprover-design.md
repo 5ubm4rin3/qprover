@@ -162,7 +162,7 @@ qprover/
       foundry.toml
       src/
       test/
-    manifests/
+    scenario_*.json
     labels.json
   docs/
   schemas/
@@ -619,4 +619,3 @@ planned:
 11. GitHub CI passes on the release commit.
 12. The public remote, tag, GitHub release, demo instructions, pitch PDF, and
     video storyboard reference the same verified commit and measured artifacts.
-

@@ -84,6 +84,7 @@ def test_twins_have_identical_public_search_contracts() -> None:
 
         assert _normalized_actions(first) == _normalized_actions(second)
         assert first.actors == second.actors
+        assert first.actions == second.actions
         assert tuple(
             observation.model_dump(mode="json") for observation in first.observations
         ) == tuple(
@@ -92,6 +93,34 @@ def test_twins_have_identical_public_search_contracts() -> None:
         assert first.limits == second.limits
         assert first.invariants == second.invariants
         assert first.impact == second.impact
+
+
+def test_attacker_impact_is_the_authoritative_eoa_native_balance() -> None:
+    for path in _manifest_paths():
+        manifest = load_manifest(path)
+        attacker_observation = next(
+            observation
+            for observation in manifest.observations
+            if observation.id == "attacker_assets"
+        )
+
+        assert attacker_observation.id == "attacker_assets"
+        assert attacker_observation.kind == "native_balance"
+        assert attacker_observation.actor_id == "attacker"
+        assert attacker_observation.target_id is None
+        assert attacker_observation.signature is None
+        assert manifest.impact.attacker_asset_observation == "attacker_assets"
+
+
+def test_oracle_pair_requires_the_same_exact_collateral() -> None:
+    for variant in "ab":
+        manifest = load_manifest(MANIFESTS / f"scenario_oracle_{variant}.json")
+        borrow = next(action for action in manifest.actions if action.id == "step_beta")
+
+        assert borrow.value_domain.model_dump(mode="json") == {
+            "kind": "finite",
+            "values": [10**18],
+        }
 
 
 def test_labels_and_known_sequences_are_scorer_only() -> None:
@@ -112,9 +141,18 @@ def test_labels_and_known_sequences_are_scorer_only() -> None:
 
 
 def test_every_benchmark_manifest_has_a_production_analysis_closure() -> None:
+    expected_hypotheses = {
+        "access_control": ("authorization-writer-to-guarded-value-sink",),
+        "governance": ("authorization-writer-to-guarded-value-sink",),
+        "oracle": ("public-value-sink-with-weak-or-unknown-guard",),
+        "side_entrance": ("public-value-sink-with-weak-or-unknown-guard",),
+        "signature_replay": ("public-value-sink-with-weak-or-unknown-guard",),
+    }
+    built_targets: list[str] = []
     for path in _manifest_paths():
         manifest = load_manifest(path)
         with build_target(manifest) as bundle:
+            built_targets.append(manifest.target.id)
             assert bundle.closed is False
             assert all(not source.startswith("test/") for source in bundle.source_names)
             assert all("labels" not in source for source in bundle.source_names)
@@ -126,5 +164,18 @@ def test_every_benchmark_manifest_has_a_production_analysis_closure() -> None:
             graph = build_program_graph(report)
             assert graph.nodes
             assert expand_action_variants(manifest, report)
-            generate_hypotheses(graph, manifest)
+            hypotheses = generate_hypotheses(graph, manifest)
+            family = manifest.target.id.removeprefix("scenario_").rsplit("_", 1)[0]
+            if family == "reentrancy":
+                # The current static lead rules do not model the dynamically created
+                # callback actor, so the executable reentrancy pair intentionally has
+                # no static hypothesis. Ground-truth Foundry witnesses cover it.
+                assert hypotheses == ()
+            else:
+                assert tuple(hypothesis.kind for hypothesis in hypotheses) == (
+                    expected_hypotheses[family]
+                )
         assert bundle.closed is True
+
+    assert built_targets == [path.stem for path in _manifest_paths()]
+    assert len(built_targets) == 12

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.34;
 
-import {IQProverScenario} from "./IQProverScenario.sol";
+import {NetAccounting} from "./IQProverScenario.sol";
 
-contract AccessControlA is IQProverScenario {
+contract AccessControlA is NetAccounting {
     address public immutable owner;
     address public operator;
-    uint256 private paidOut;
     uint256 public note;
 
     constructor() payable {
@@ -20,11 +19,14 @@ contract AccessControlA is IQProverScenario {
     function drain() external {
         require(msg.sender == operator, "operator");
         uint256 amount = address(this).balance;
-        paidOut += amount;
+        _recordReceipt(amount);
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "pay");
     }
-    function donate() external payable {}
+
+    function donate() external payable {
+        _recordContribution(msg.value);
+    }
 
     function writeNote(uint256 value) external {
         note = value;
@@ -33,16 +35,11 @@ contract AccessControlA is IQProverScenario {
     function protocolAssets() external view returns (uint256) {
         return address(this).balance;
     }
-
-    function attackerAssets() external view returns (uint256) {
-        return paidOut;
-    }
 }
 
-contract AccessControlB is IQProverScenario {
+contract AccessControlB is NetAccounting {
     address public immutable owner;
     address public operator;
-    uint256 private paidOut;
     uint256 public note;
 
     constructor() payable {
@@ -57,11 +54,14 @@ contract AccessControlB is IQProverScenario {
     function drain() external {
         require(msg.sender == operator, "operator");
         uint256 amount = address(this).balance;
-        paidOut += amount;
+        _recordReceipt(amount);
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "pay");
     }
-    function donate() external payable {}
+
+    function donate() external payable {
+        _recordContribution(msg.value);
+    }
 
     function writeNote(uint256 value) external {
         note = value;
@@ -70,9 +70,4 @@ contract AccessControlB is IQProverScenario {
     function protocolAssets() external view returns (uint256) {
         return address(this).balance;
     }
-
-    function attackerAssets() external view returns (uint256) {
-        return paidOut;
-    }
 }
-

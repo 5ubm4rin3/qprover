@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.34;
 
-import {IQProverScenario} from "./IQProverScenario.sol";
+import {NetAccounting} from "./IQProverScenario.sol";
 
 interface IReentryTarget {
     function deposit() external payable;
@@ -33,10 +33,10 @@ contract ReentryActor {
     }
 }
 
-contract ReentrancyA is IQProverScenario {
+contract ReentrancyA is NetAccounting {
     mapping(address => uint256) private credit;
     mapping(address => uint256) private primed;
-    uint256 private paidOut;
+    address private activeReentryActor;
     uint256 public note;
 
     constructor() payable {}
@@ -44,6 +44,7 @@ contract ReentrancyA is IQProverScenario {
     function prime(uint256 amount) external payable {
         require(msg.value == amount, "amount");
         primed[msg.sender] += amount;
+        _recordContribution(amount);
     }
 
     function attack() external {
@@ -51,22 +52,30 @@ contract ReentrancyA is IQProverScenario {
         require(amount != 0, "prime");
         primed[msg.sender] = 0;
         ReentryActor actor = new ReentryActor{value: amount}(address(this), msg.sender);
+        activeReentryActor = address(actor);
         actor.begin();
+        activeReentryActor = address(0);
     }
 
     function deposit() external payable {
         credit[msg.sender] += msg.value;
+        if (msg.sender != activeReentryActor) {
+            _recordContribution(msg.value);
+        }
     }
 
     function withdraw() external {
         uint256 amount = credit[msg.sender];
         require(amount != 0, "credit");
-        paidOut += amount;
+        _recordReceipt(amount);
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "pay");
         credit[msg.sender] = 0;
     }
-    function donate() external payable {}
+
+    function donate() external payable {
+        _recordContribution(msg.value);
+    }
 
     function writeNote(uint256 value) external {
         note = value;
@@ -75,16 +84,12 @@ contract ReentrancyA is IQProverScenario {
     function protocolAssets() external view returns (uint256) {
         return address(this).balance;
     }
-
-    function attackerAssets() external view returns (uint256) {
-        return paidOut;
-    }
 }
 
-contract ReentrancyB is IQProverScenario {
+contract ReentrancyB is NetAccounting {
     mapping(address => uint256) private credit;
     mapping(address => uint256) private primed;
-    uint256 private paidOut;
+    address private activeReentryActor;
     uint256 public note;
 
     constructor() payable {}
@@ -92,6 +97,7 @@ contract ReentrancyB is IQProverScenario {
     function prime(uint256 amount) external payable {
         require(msg.value == amount, "amount");
         primed[msg.sender] += amount;
+        _recordContribution(amount);
     }
 
     function attack() external {
@@ -99,22 +105,30 @@ contract ReentrancyB is IQProverScenario {
         require(amount != 0, "prime");
         primed[msg.sender] = 0;
         ReentryActor actor = new ReentryActor{value: amount}(address(this), msg.sender);
+        activeReentryActor = address(actor);
         actor.begin();
+        activeReentryActor = address(0);
     }
 
     function deposit() external payable {
         credit[msg.sender] += msg.value;
+        if (msg.sender != activeReentryActor) {
+            _recordContribution(msg.value);
+        }
     }
 
     function withdraw() external {
         uint256 amount = credit[msg.sender];
         require(amount != 0, "credit");
         credit[msg.sender] = 0;
-        paidOut += amount;
+        _recordReceipt(amount);
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "pay");
     }
-    function donate() external payable {}
+
+    function donate() external payable {
+        _recordContribution(msg.value);
+    }
 
     function writeNote(uint256 value) external {
         note = value;
@@ -123,9 +137,4 @@ contract ReentrancyB is IQProverScenario {
     function protocolAssets() external view returns (uint256) {
         return address(this).balance;
     }
-
-    function attackerAssets() external view returns (uint256) {
-        return paidOut;
-    }
 }
-

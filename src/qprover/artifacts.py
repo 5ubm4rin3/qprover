@@ -362,10 +362,7 @@ def _find_artifact_path(
     candidates: list[Path] = []
     for candidate in output_root.rglob(f"{contract_name}.json"):
         contained = _inside(candidate, output_root, "artifact")
-        try:
-            raw, _ = _load_json(contained, "artifact candidate")
-        except ArtifactError:
-            continue
+        raw, _ = _load_json(contained, "artifact candidate")
         metadata = raw.get("metadata")
         settings = metadata.get("settings") if isinstance(metadata, dict) else None
         target = (

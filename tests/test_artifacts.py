@@ -136,6 +136,73 @@ def fixture_manifest_data(project_root: str = "fixture") -> dict[str, Any]:
     }
 
 
+def _write_project_manifest(
+    tmp_path: Path,
+    *,
+    source_root: str,
+    contracts: tuple[tuple[str, str], ...],
+) -> Path:
+    """Create a real Foundry project whose artifacts exercise path discovery."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "foundry.toml").write_text(
+        "[profile.default]\n"
+        f'src = "{source_root}"\n'
+        'out = "out"\n'
+        'cache_path = "cache"\n'
+        'solc_version = "0.8.34"\n'
+        'evm_version = "prague"\n'
+        "optimizer = false\n",
+        encoding="utf-8",
+    )
+    for source_name, contract_name in contracts:
+        source_path = project / source_name
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(
+            "// SPDX-License-Identifier: Apache-2.0\n"
+            "pragma solidity 0.8.34;\n"
+            f"contract {contract_name} {{ uint256 public value; }}\n",
+            encoding="utf-8",
+        )
+
+    raw = fixture_manifest_data("project")
+    raw["target"]["source_files"] = [source for source, _ in contracts]
+    raw["deployments"] = [
+        {
+            "id": "fixture" if index == 0 else f"fixture_{index}",
+            "artifact": f"{source_name}:{contract_name}",
+            "constructor_args": [],
+            "sender_slot": 0,
+            "value_wei": 0,
+        }
+        for index, (source_name, contract_name) in enumerate(contracts)
+    ]
+    manifest_path = tmp_path / "target.json"
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    return manifest_path
+
+
+def _reuse_existing_build(
+    bundle: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Make a second loader pass inspect deliberately modified fresh outputs."""
+
+    def preserve_existing_output(*args: object, **kwargs: object) -> object:
+        del kwargs
+        command = args[0]
+        stdout = "forge Version: test\n" if command == ("forge", "--version") else ""
+        return type(
+            "Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""}
+        )()
+
+    monkeypatch.setattr("qprover.artifacts.subprocess.run", preserve_existing_output)
+    monkeypatch.setattr(
+        "qprover.artifacts.tempfile.mkdtemp",
+        lambda **kwargs: str(bundle.evidence_root),
+    )
+
+
 @pytest.fixture
 def analysis_manifest(tmp_path: Path) -> Path:
     source = Path(__file__).parent / "fixtures" / "analysis"
@@ -290,6 +357,127 @@ def test_each_build_is_bound_to_fresh_isolated_build_info(
         assert first.build_info_path != second.build_info_path
         assert first.artifacts[0].artifact_path != second.artifacts[0].artifact_path
         assert first.build_info_sha256 == second.build_info_sha256
+
+
+def test_build_target_finds_contract_below_nested_standard_source_root(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_project_manifest(
+        tmp_path,
+        source_root="src",
+        contracts=(("src/nested/Widget.sol", "Widget"),),
+    )
+
+    with build_target(load_manifest(manifest_path)) as bundle:
+        artifact = bundle.artifacts[0]
+        assert artifact.compilation_target == "src/nested/Widget.sol:Widget"
+        assert artifact.source_name == "src/nested/Widget.sol"
+        assert bundle.source_names == ("src/nested/Widget.sol",)
+        assert artifact.artifact_path.resolve().is_relative_to(
+            bundle.evidence_root.resolve()
+        )
+
+
+def test_build_target_finds_contract_below_nested_custom_source_root(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_project_manifest(
+        tmp_path,
+        source_root="contracts",
+        contracts=(("contracts/deep/Widget.sol", "Widget"),),
+    )
+
+    with build_target(load_manifest(manifest_path)) as bundle:
+        artifact = bundle.artifacts[0]
+        assert artifact.compilation_target == "contracts/deep/Widget.sol:Widget"
+        assert artifact.source_name == "contracts/deep/Widget.sol"
+        assert bundle.source_names == ("contracts/deep/Widget.sol",)
+        assert artifact.artifact_path.resolve().is_relative_to(
+            bundle.evidence_root.resolve()
+        )
+
+
+def test_build_target_distinguishes_duplicate_basenames_by_canonical_target(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _write_project_manifest(
+        tmp_path,
+        source_root="src",
+        contracts=(
+            ("src/alpha/Twin.sol", "AlphaTwin"),
+            ("src/beta/Twin.sol", "BetaTwin"),
+        ),
+    )
+
+    with build_target(load_manifest(manifest_path)) as bundle:
+        assert {artifact.compilation_target for artifact in bundle.artifacts} == {
+            "src/alpha/Twin.sol:AlphaTwin",
+            "src/beta/Twin.sol:BetaTwin",
+        }
+        assert bundle.source_names == (
+            "src/alpha/Twin.sol",
+            "src/beta/Twin.sol",
+        )
+
+
+def test_build_target_rejects_duplicate_exact_compilation_target(
+    analysis_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = load_manifest(analysis_manifest)
+    bundle = build_target(manifest)
+    duplicate = bundle.evidence_root / "out" / "duplicate" / "Fixture.json"
+    duplicate.parent.mkdir()
+    shutil.copyfile(bundle.artifacts[0].artifact_path, duplicate)
+    _reuse_existing_build(bundle, monkeypatch)
+
+    try:
+        with pytest.raises(ArtifactError, match="artifact candidate ambiguity"):
+            build_target(manifest)
+    finally:
+        bundle.close()
+
+
+def test_build_target_rejects_malformed_recursive_artifact_candidate(
+    analysis_manifest: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = load_manifest(analysis_manifest)
+    bundle = build_target(manifest)
+    malformed = bundle.evidence_root / "out" / "malformed" / "Fixture.json"
+    malformed.parent.mkdir()
+    malformed.write_text("{not-json", encoding="utf-8")
+    _reuse_existing_build(bundle, monkeypatch)
+    rebuilt = None
+
+    try:
+        with pytest.raises(ArtifactError, match="invalid artifact candidate JSON"):
+            rebuilt = build_target(manifest)
+    finally:
+        if rebuilt is not None:
+            rebuilt.close()
+        bundle.close()
+
+
+def test_build_target_rejects_recursive_candidate_symlink_escape(
+    analysis_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = load_manifest(analysis_manifest)
+    bundle = build_target(manifest)
+    external = tmp_path / "Fixture.json"
+    external.write_bytes(bundle.artifacts[0].artifact_path.read_bytes())
+    escaped = bundle.evidence_root / "out" / "escaped" / "Fixture.json"
+    escaped.parent.mkdir()
+    escaped.symlink_to(external)
+    _reuse_existing_build(bundle, monkeypatch)
+
+    try:
+        with pytest.raises(ArtifactError, match="artifact is outside project root"):
+            build_target(manifest)
+    finally:
+        bundle.close()
+
+    assert external.is_file()
 
 
 @pytest.mark.parametrize(
