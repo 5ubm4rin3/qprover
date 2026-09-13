@@ -354,6 +354,32 @@ def _load_artifact(
     )
 
 
+def _find_artifact_path(
+    output_root: Path, source_name: str, contract_name: str
+) -> Path:
+    """Find one contained artifact by its exact canonical compilation target."""
+
+    candidates: list[Path] = []
+    for candidate in output_root.rglob(f"{contract_name}.json"):
+        contained = _inside(candidate, output_root, "artifact")
+        try:
+            raw, _ = _load_json(contained, "artifact candidate")
+        except ArtifactError:
+            continue
+        metadata = raw.get("metadata")
+        settings = metadata.get("settings") if isinstance(metadata, dict) else None
+        target = (
+            settings.get("compilationTarget") if isinstance(settings, dict) else None
+        )
+        if target == {source_name: contract_name}:
+            candidates.append(contained)
+    if len(candidates) != 1:
+        raise ArtifactError(
+            f"artifact candidate ambiguity for {source_name}:{contract_name}"
+        )
+    return candidates[0]
+
+
 def _build_target_in_workspace(
     manifest: TargetManifest,
     root: Path,
@@ -384,18 +410,7 @@ def _build_target_in_workspace(
     compiler_versions: set[str] = set()
     evm_versions: set[str] = set()
     for source_name, contract_name in parsed_requests:
-        path = _inside(
-            output_root
-            / source_name.removeprefix("src/")
-            / f"{contract_name}.json",
-            output_root,
-            "artifact",
-        )
-        if not path.is_file():
-            raise ArtifactError(
-                f"requested artifact is missing from fresh build: "
-                f"{source_name}:{contract_name}"
-            )
+        path = _find_artifact_path(output_root, source_name, contract_name)
         artifact, compiler_version, evm_version = _load_artifact(
             path, source_name, contract_name, build_info, build_info_id
         )
