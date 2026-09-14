@@ -8,11 +8,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
-import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,10 @@ from qprover.artifacts import (
     manifest_source_paths,
 )
 from qprover.certificate import (
+    REPLAY_ARGV_TEMPLATE,
+    REPLAY_MATERIALIZATION,
     ProofCertificate,
+    ReplayRecipe,
     ReplayRecord,
     _seal_certificate,
     write_certificate,
@@ -56,6 +60,27 @@ class ReplayVerification:
     confirmation_status: ConfirmationStatus
     records: tuple[ReplayRecord, ...]
     certificate: ProofCertificate
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayMaterialization:
+    """One private, hash-verified realization of a portable replay recipe."""
+
+    root: Path
+    project: Path
+    argv: tuple[str, ...]
+    staging_tree_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredReplayResult:
+    success: bool
+    normalized_sha256: str
+    suite_count: int
+    test_count: int
+    executed_suite: str | None
+    executed_test: str | None
+    executed_status: str | None
 
 
 def _digest(data: bytes | str) -> str:
@@ -629,7 +654,226 @@ def _safe_environment(overrides: dict[str, str]) -> dict[str, str]:
     return environment
 
 
+def _tree_digest(entries: Mapping[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(entries):
+        encoded_name = name.encode()
+        content = entries[name]
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _staging_entries(
+    certificate: ProofCertificate,
+    manifest: TargetManifest,
+    poc_bytes: bytes,
+) -> dict[str, bytes]:
+    project = manifest.target.project_root.resolve()
+    config = project / "foundry.toml"
+    if config.is_symlink() or not config.is_file():
+        raise ReplayError("Foundry config must be one local regular file")
+    entries = {"foundry.toml": config.read_bytes()}
+    for source in certificate.target.sources:
+        path = _resolve_workspace_path(project, source.path, "source path")
+        if path.is_symlink() or not path.is_file():
+            raise ReplayError("source closure entry must be one local regular file")
+        content = path.read_bytes()
+        if _digest(content) != source.sha256:
+            raise ReplayError("source closure hash mismatch")
+        entries[source.path] = content
+    staged_poc = "test/QProverReplay.t.sol"
+    if staged_poc in entries:
+        raise ReplayError("PoC staging path collides with source closure")
+    entries[staged_poc] = poc_bytes
+    return entries
+
+
+def build_replay_recipe(
+    certificate: ProofCertificate,
+    manifest: TargetManifest,
+    poc_bytes: bytes,
+) -> ReplayRecipe:
+    """Derive the portable private-staging recipe from validated evidence."""
+
+    if _digest(poc_bytes) != certificate.poc.sha256:
+        raise ReplayError("PoC hash mismatch")
+    entries = _staging_entries(certificate, manifest, poc_bytes)
+    return ReplayRecipe(
+        workspace_cwd=".",
+        source_project=certificate.target.project_root,
+        source_poc=certificate.poc.path,
+        foundry_config="foundry.toml",
+        foundry_config_sha256=_digest(entries["foundry.toml"]),
+        source_sha256=certificate.target.source_sha256,
+        poc_sha256=certificate.poc.sha256,
+        staged_project="{private_project}",
+        execution_cwd="{private_project}",
+        staged_poc="test/QProverReplay.t.sol",
+        materialization=REPLAY_MATERIALIZATION,
+        argv_template=REPLAY_ARGV_TEMPLATE,
+        staging_tree_sha256=_tree_digest(entries),
+    )
+
+
+def _staged_file_entries(project: Path) -> dict[str, bytes]:
+    entries: dict[str, bytes] = {}
+    for path in sorted(item for item in project.rglob("*") if item.is_file()):
+        if path.is_symlink():
+            raise ReplayError("private staging contains a symlink")
+        entries[path.relative_to(project).as_posix()] = path.read_bytes()
+    return entries
+
+
+def _verify_private_staging(
+    materialization: ReplayMaterialization, recipe: ReplayRecipe
+) -> None:
+    if _tree_digest(_staged_file_entries(materialization.project)) != (
+        recipe.staging_tree_sha256
+    ):
+        raise ReplayError("private replay staging hash mismatch")
+
+
+def _freeze_private_staging(project: Path) -> None:
+    for path in sorted(project.rglob("*"), reverse=True):
+        if path.is_file():
+            path.chmod(stat.S_IRUSR)
+        elif path.is_dir():
+            path.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    project.chmod(stat.S_IRUSR | stat.S_IXUSR)
+
+
+def materialize_replay_recipe(
+    certificate: ProofCertificate,
+    manifest: TargetManifest,
+    recipe: ReplayRecipe,
+    poc_bytes: bytes,
+    destination: Path,
+) -> ReplayMaterialization:
+    """Materialize one recipe in a caller-owned, new private directory."""
+
+    expected = build_replay_recipe(certificate, manifest, poc_bytes)
+    if recipe != expected:
+        raise ReplayError("persisted replay recipe does not match local evidence")
+    if destination.is_symlink():
+        raise ReplayError("private replay destination must not be a symlink")
+    root = destination.resolve()
+    if not root.is_dir() or any(root.iterdir()):
+        raise ReplayError("private replay destination must be new and empty")
+    root.chmod(stat.S_IRWXU)
+    project = root / "project"
+    project.mkdir(mode=0o700)
+    try:
+        for relative, content in _staging_entries(
+            certificate, manifest, poc_bytes
+        ).items():
+            target = project / relative
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with target.open("xb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        staging_hash = _tree_digest(_staged_file_entries(project))
+        if staging_hash != recipe.staging_tree_sha256:
+            raise ReplayError("private replay materialization hash mismatch")
+        argv = tuple(
+            item.format(
+                private_project=str(project),
+                private_out=str(root / "out"),
+                private_cache=str(root / "cache"),
+            )
+            for item in recipe.argv_template
+        )
+        materialization = ReplayMaterialization(root, project, argv, staging_hash)
+        _freeze_private_staging(project)
+        _verify_private_staging(materialization, recipe)
+        return materialization
+    except BaseException:
+        _clean_directory(root)
+        raise
+
+
+def _normalize_structured_json(value: object) -> object:
+    """Remove only Forge timing/gas noise while retaining result semantics."""
+
+    if isinstance(value, dict):
+        return {
+            key: _normalize_structured_json(item)
+            for key, item in value.items()
+            if key not in {"duration", "gas", "gas_snapshots"}
+        }
+    if isinstance(value, list):
+        return [_normalize_structured_json(item) for item in value]
+    return value
+
+
+def parse_structured_replay_output(
+    stdout: str, exit_code: int
+) -> StructuredReplayResult:
+    """Require exactly one named suite/test with an explicit Success status."""
+
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        normalized = {"malformed_stdout_sha256": _digest(stdout)}
+        return StructuredReplayResult(
+            False,
+            _digest(json.dumps(normalized, sort_keys=True, separators=(",", ":"))),
+            0,
+            0,
+            None,
+            None,
+            None,
+        )
+    normalized = _normalize_structured_json(parsed)
+    normalized_hash = _digest(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    )
+    if not isinstance(parsed, dict):
+        return StructuredReplayResult(False, normalized_hash, 0, 0, None, None, None)
+    suite_count = len(parsed)
+    suite = next(iter(parsed)) if suite_count == 1 else None
+    suite_record = parsed.get(suite) if suite is not None else None
+    tests = suite_record.get("test_results") if isinstance(suite_record, dict) else None
+    test_count = len(tests) if isinstance(tests, dict) else 0
+    test = next(iter(tests)) if test_count == 1 else None
+    test_record = tests.get(test) if isinstance(tests, dict) and test else None
+    status = test_record.get("status") if isinstance(test_record, dict) else None
+    success = (
+        exit_code == 0
+        and suite_count == 1
+        and suite == "test/QProverReplay.t.sol:QProverReplayTest"
+        and test_count == 1
+        and test == "test_qprover_replay()"
+        and status == "Success"
+        and test_record.get("reason") is None
+        and test_record.get("counterexample") is None
+    )
+    return StructuredReplayResult(
+        success,
+        normalized_hash,
+        suite_count,
+        test_count,
+        suite,
+        test,
+        status if isinstance(status, str) else None,
+    )
+
+
 def _clean_directory(path: Path) -> None:
+    if path.exists():
+        for item in sorted(path.rglob("*"), reverse=True):
+            with suppress(OSError):
+                if item.is_symlink():
+                    continue
+                if item.is_dir():
+                    item.chmod(stat.S_IRWXU)
+                else:
+                    item.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        with suppress(OSError):
+            path.chmod(stat.S_IRWXU)
     try:
         shutil.rmtree(path)
     except FileNotFoundError:
@@ -1046,55 +1290,20 @@ def cold_verify(
     test_directory = project / "test"
     if test_directory.is_symlink():
         raise ReplayError("project test directory must not be a symlink")
-    created_test_directory = not test_directory.exists()
-    test_directory.mkdir(parents=True, exist_ok=True)
-    try:
-        test_directory.resolve().relative_to(project)
-    except ValueError as error:
-        raise ReplayError("project test directory escapes project") from error
-    temporary_test = test_directory / f".qprover_replay_{uuid.uuid4().hex}.t.sol"
+    recipe = build_replay_recipe(certificate, manifest, poc_bytes)
     records: list[ReplayRecord] = []
-    try:
-        with temporary_test.open("xb") as handle:
-            handle.write(poc_bytes)
-        relative_test = temporary_test.relative_to(project).as_posix()
-        for index in range(1, 4):
-            run_root = Path(tempfile.mkdtemp(prefix=f"qprover-cold-{index}-"))
-            execution_command = (
-                "forge",
-                "test",
-                "--offline",
-                "--root",
-                str(project),
-                "--match-path",
-                relative_test,
-                "--match-test",
-                "test_qprover_replay",
-                "--out",
-                str(run_root / "out"),
-                "--cache-path",
-                str(run_root / "cache"),
+    for index in range(1, 4):
+        run_root = Path(tempfile.mkdtemp(prefix=f"qprover-cold-{index}-"))
+        try:
+            materialization = materialize_replay_recipe(
+                certificate, manifest, recipe, poc_bytes, run_root
             )
-            evidence_command = (
-                "forge",
-                "test",
-                "--offline",
-                "--root",
-                certificate.target.project_root,
-                "--match-path",
-                relative_test,
-                "--match-test",
-                "test_qprover_replay",
-                "--out",
-                f".qprover-cold/replay-{index}/out",
-                "--cache-path",
-                f".qprover-cold/replay-{index}/cache",
-            )
+            _verify_private_staging(materialization, recipe)
             started = time.monotonic()
             try:
                 result = subprocess.run(
-                    execution_command,
-                    cwd=project,
+                    materialization.argv,
+                    cwd=materialization.project,
                     env=_safe_environment({}),
                     capture_output=True,
                     text=True,
@@ -1107,18 +1316,34 @@ def cold_verify(
                 exit_code = -1
                 stdout = ""
                 stderr = type(error).__name__
-            finally:
-                duration = float(time.monotonic() - started)
-                _clean_directory(run_root)
+            duration = float(time.monotonic() - started)
+            try:
+                _verify_private_staging(materialization, recipe)
+                staging_unchanged = True
+            except ReplayError:
+                staging_unchanged = False
+            structured = parse_structured_replay_output(stdout, exit_code)
             records.append(
                 ReplayRecord(
                     index=index,
-                    success=exit_code == 0,
-                    command=evidence_command,
+                    success=structured.success and staging_unchanged,
                     exit_code=exit_code,
-                    stdout_sha256=_stable_output_digest(stdout),
+                    stdout_sha256=structured.normalized_sha256,
                     stderr_sha256=_stable_output_digest(stderr),
+                    structured_result_sha256=structured.normalized_sha256,
                     duration_seconds=duration,
+                    recipe_sha256=recipe.compute_hash(),
+                    execution_argv_sha256=_digest(
+                        json.dumps(materialization.argv, separators=(",", ":"))
+                    ),
+                    execution_cwd_sha256=_digest(str(materialization.project)),
+                    staging_tree_sha256=materialization.staging_tree_sha256,
+                    staging_unchanged=staging_unchanged,
+                    suite_count=structured.suite_count,
+                    test_count=structured.test_count,
+                    executed_suite=structured.executed_suite,
+                    executed_test=structured.executed_test,
+                    executed_status=structured.executed_status,
                     certificate_identity_sha256=(
                         certificate.certificate_identity_sha256
                     ),
@@ -1128,24 +1353,24 @@ def cold_verify(
                     artifact_sha256=certificate.poc.artifact_sha256,
                 )
             )
-    finally:
-        temporary_test.unlink(missing_ok=True)
-        if created_test_directory:
-            try:
-                test_directory.rmdir()
-            except OSError as error:
-                raise ReplayError("could not clean temporary test directory") from error
+        finally:
+            _clean_directory(run_root)
 
-    updated = _seal_certificate(certificate, tuple(records))
+    updated = _seal_certificate(certificate, recipe, tuple(records))
     write_certificate(updated, path)
     return ReplayVerification(updated.confirmation_status, tuple(records), updated)
 
 
 __all__ = [
     "ReplayError",
+    "ReplayMaterialization",
     "ReplayVerification",
+    "StructuredReplayResult",
+    "build_replay_recipe",
     "cold_verify",
     "foundry_poc_source",
     "generate_foundry_poc",
+    "materialize_replay_recipe",
+    "parse_structured_replay_output",
     "validate_semantic_binding",
 ]

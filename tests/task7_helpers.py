@@ -9,6 +9,7 @@ from eth_utils.abi import collapse_if_tuple
 
 from qprover.artifacts import ArtifactBundle
 from qprover.certificate import (
+    REPLAY_COMMAND,
     ArtifactEvidence,
     AssumptionEvidence,
     AssuranceEvidence,
@@ -248,15 +249,18 @@ def make_executed_certificate(
             artifact_sha256=artifacts[0].artifact_sha256,
             test_name="test_qprover_replay",
         ),
-        replay_command="qprover replay certificate.json",
-        replay=ReplayEvidence(local_only=True, required_repeats=3, records=()),
+        replay_command=REPLAY_COMMAND,
+        replay=ReplayEvidence(
+            local_only=True, required_repeats=3, recipe=None, records=()
+        ),
         assurance=AssuranceEvidence(
             replay_proven_scope=(
                 "manifest/source/build/artifact identities; local chain and actor "
                 "funding; "
                 "transaction execution, receipts, gas, traces, intermediate and final "
                 "observations; invariant and impact; single-delete local minimality; "
-                "three stable offline Foundry replays"
+                "three private staged offline Foundry executions of exactly one named "
+                "passing test with stable structured results"
             ),
             historical_search_metadata_scope=(
                 "revision label; assumptions; run identifier and timestamp; search and "

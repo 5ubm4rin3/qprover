@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -33,6 +32,29 @@ NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 _ZERO_HASH = "0" * 64
 _SEAL_TOKEN = object()
+REPLAY_COMMAND = "qprover replay --workspace {workspace} {certificate}"
+REPLAY_MATERIALIZATION = (
+    "copy hash-verified foundry.toml and certificate source closure into "
+    "{private_project}; write and hash-check the certificate PoC only at "
+    "test/QProverReplay.t.sol; make staged inputs read-only; revalidate the "
+    "complete staged tree immediately before and after Forge"
+)
+REPLAY_ARGV_TEMPLATE = (
+    "forge",
+    "test",
+    "--offline",
+    "--root",
+    "{private_project}",
+    "--match-path",
+    "test/QProverReplay.t.sol",
+    "--match-test",
+    "test_qprover_replay",
+    "--json",
+    "--out",
+    "{private_out}",
+    "--cache-path",
+    "{private_cache}",
+)
 
 
 def _freeze_abi(value: object) -> object:
@@ -260,7 +282,9 @@ class MinimizationEvidence(StrictModel):
     transaction_count: NonNegativeInt
     attempted_operators: tuple[StrictStr, ...] = Field(min_length=1)
     locally_minimal: StrictBool
-    minimality_claim: StrictStr = Field(min_length=1)
+    minimality_claim: Literal[
+        "Replay-verified local minimum under one-step deletion only."
+    ]
     final_outcome: Outcome
 
     @model_validator(mode="after")
@@ -271,8 +295,6 @@ class MinimizationEvidence(StrictModel):
             raise ValueError("unique candidates cannot exceed attempts")
         if self.uncached_candidate_count != self.evaluation_count:
             raise ValueError("uncached candidate and evaluation counts must match")
-        if "global" in self.minimality_claim.lower():
-            raise ValueError("minimization evidence cannot claim a global minimum")
         return self
 
 
@@ -296,14 +318,62 @@ class PoCEvidence(StrictModel):
         return value
 
 
+class ReplayRecipe(StrictModel):
+    workspace_cwd: Literal["."]
+    source_project: StrictStr = Field(min_length=1)
+    source_poc: StrictStr = Field(min_length=1)
+    foundry_config: Literal["foundry.toml"]
+    foundry_config_sha256: Sha256
+    source_sha256: Sha256
+    poc_sha256: Sha256
+    staged_project: Literal["{private_project}"]
+    execution_cwd: Literal["{private_project}"]
+    staged_poc: Literal["test/QProverReplay.t.sol"]
+    materialization: Literal[REPLAY_MATERIALIZATION]
+    argv_template: tuple[StrictStr, ...]
+    staging_tree_sha256: Sha256
+
+    @field_validator("source_project", "source_poc")
+    @classmethod
+    def source_paths_are_portable(cls, value: str) -> str:
+        parsed = PurePosixPath(value)
+        if (
+            "://" in value
+            or parsed.is_absolute()
+            or ".." in parsed.parts
+            or value in {"", "."}
+        ):
+            raise ValueError("replay recipe source path must be portable")
+        return parsed.as_posix()
+
+    @model_validator(mode="after")
+    def argv_is_exact_template(self) -> Self:
+        if self.argv_template != REPLAY_ARGV_TEMPLATE:
+            raise ValueError("replay recipe argv template must be exact")
+        return self
+
+    def compute_hash(self) -> str:
+        return _digest(_canonical(self.model_dump(mode="json")))
+
+
 class ReplayRecord(StrictModel):
     index: PositiveInt
     success: StrictBool
-    command: tuple[StrictStr, ...] = Field(min_length=1)
     exit_code: StrictInt
     stdout_sha256: Sha256
     stderr_sha256: Sha256
+    structured_result_sha256: Sha256
     duration_seconds: Annotated[StrictFloat, Field(ge=0)]
+    recipe_sha256: Sha256
+    execution_argv_sha256: Sha256
+    execution_cwd_sha256: Sha256
+    staging_tree_sha256: Sha256
+    staging_unchanged: StrictBool
+    suite_count: NonNegativeInt
+    test_count: NonNegativeInt
+    executed_suite: StrictStr | None
+    executed_test: StrictStr | None
+    executed_status: StrictStr | None
     certificate_identity_sha256: Sha256
     poc_sha256: Sha256
     manifest_sha256: Sha256
@@ -311,50 +381,32 @@ class ReplayRecord(StrictModel):
     artifact_sha256: Sha256
 
     @model_validator(mode="after")
-    def command_is_local_offline_foundry(self) -> Self:
-        fixed = {
-            0: "forge",
-            1: "test",
-            2: "--offline",
-            3: "--root",
-            5: "--match-path",
-            7: "--match-test",
-            8: "test_qprover_replay",
-            9: "--out",
-            11: "--cache-path",
-        }
-        if len(self.command) != 13 or any(
-            self.command[index] != value for index, value in fixed.items()
-        ):
-            raise ValueError("record must use the exact replay command shape")
-        match_path = self.command[6]
-        if (
-            re.fullmatch(r"test/\.qprover_replay_[0-9a-f]{32}\.t\.sol", match_path)
-            is None
-        ):
-            raise ValueError("record must use the exact replay command match path")
-        root = PurePosixPath(self.command[4])
-        out = PurePosixPath(self.command[10])
-        cache = PurePosixPath(self.command[12])
-        if (
-            root.is_absolute()
-            or root == PurePosixPath(".")
-            or ".." in root.parts
-            or out != PurePosixPath(f".qprover-cold/replay-{self.index}/out")
-            or cache != PurePosixPath(f".qprover-cold/replay-{self.index}/cache")
-        ):
-            raise ValueError("record must use exact replay command isolation paths")
-        if self.success != (self.exit_code == 0):
-            raise ValueError("replay success must match the process exit code")
-        if any("://" in item or "--fork-url" in item for item in self.command):
-            raise ValueError("record must use the exact replay command without network")
+    def success_requires_exact_named_structured_pass(self) -> Self:
+        exact_pass = (
+            self.exit_code == 0
+            and self.staging_unchanged
+            and self.suite_count == 1
+            and self.test_count == 1
+            and self.executed_suite == "test/QProverReplay.t.sol:QProverReplayTest"
+            and self.executed_test == "test_qprover_replay()"
+            and self.executed_status == "Success"
+        )
+        if self.success != exact_pass:
+            raise ValueError("replay success requires one exact structured test pass")
         return self
 
 
 class ReplayEvidence(StrictModel):
     local_only: StrictBool
     required_repeats: Literal[3]
+    recipe: ReplayRecipe | None
     records: tuple[ReplayRecord, ...]
+
+    @model_validator(mode="after")
+    def recipe_matches_records(self) -> Self:
+        if bool(self.records) != (self.recipe is not None):
+            raise ValueError("replay recipe is required exactly when records exist")
+        return self
 
 
 class AssuranceEvidence(StrictModel):
@@ -362,7 +414,8 @@ class AssuranceEvidence(StrictModel):
         "manifest/source/build/artifact identities; local chain and actor funding; "
         "transaction execution, receipts, gas, traces, intermediate and final "
         "observations; invariant and impact; single-delete local minimality; "
-        "three stable offline Foundry replays"
+        "three private staged offline Foundry executions of exactly one named "
+        "passing test with stable structured results"
     ]
     historical_search_metadata_scope: Literal[
         "revision label; assumptions; run identifier and timestamp; search and "
@@ -424,7 +477,7 @@ class ProofCertificate(StrictModel):
     gas: GasEvidence
     minimization: MinimizationEvidence
     poc: PoCEvidence
-    replay_command: Literal["qprover replay certificate.json"]
+    replay_command: Literal[REPLAY_COMMAND]
     replay: ReplayEvidence
     assurance: AssuranceEvidence
     certificate_identity_sha256: Sha256
@@ -485,6 +538,14 @@ class ProofCertificate(StrictModel):
             artifact.artifact_sha256 for artifact in self.artifacts
         }:
             raise ValueError("PoC artifact identity mismatch")
+        recipe = self.replay.recipe
+        if recipe is not None and (
+            recipe.source_project != self.target.project_root
+            or recipe.source_poc != self.poc.path
+            or recipe.source_sha256 != self.target.source_sha256
+            or recipe.poc_sha256 != self.poc.sha256
+        ):
+            raise ValueError("replay recipe identity mismatch")
         if len(self.transactions) != self.minimization.minimized_steps:
             raise ValueError("transaction sequence and minimization size mismatch")
         if tuple(item.index for item in self.transactions) != tuple(
@@ -542,9 +603,8 @@ class ProofCertificate(StrictModel):
             or self.impact.protocol_delta >= 0
             or self.chain.external_rpc
             or not self.replay.local_only
+            or self.replay.recipe is None
             or len(self.replay.records) != 3
-            or "://" in self.replay_command
-            or "--fork-url" in self.replay_command
         )
         if failed:
             raise ValueError("CONFIRMED requires complete executed local evidence")
@@ -554,19 +614,21 @@ class ProofCertificate(StrictModel):
         if (
             len({item.stdout_sha256 for item in self.replay.records}) != 1
             or len({item.stderr_sha256 for item in self.replay.records}) != 1
+            or len({item.structured_result_sha256 for item in self.replay.records}) != 1
+            or len({item.staging_tree_sha256 for item in self.replay.records}) != 1
         ):
-            raise ValueError("CONFIRMED requires stable cold replay output")
-        commands = tuple(item.command for item in self.replay.records)
+            raise ValueError("CONFIRMED requires stable structured replay evidence")
+        assert self.replay.recipe is not None
+        recipe_hash = self.replay.recipe.compute_hash()
         if (
-            len({command[4] for command in commands}) != 1
-            or commands[0][4] != self.target.project_root
-            or len({command[6] for command in commands}) != 1
-            or len({command[10] for command in commands}) != 3
-            or len({command[12] for command in commands}) != 3
-            or len({str(PurePosixPath(command[10]).parent) for command in commands})
-            != 3
+            self.replay.recipe.staging_tree_sha256
+            != self.replay.records[0].staging_tree_sha256
+            or len({item.recipe_sha256 for item in self.replay.records}) != 1
+            or self.replay.records[0].recipe_sha256 != recipe_hash
+            or len({item.execution_argv_sha256 for item in self.replay.records}) != 3
+            or len({item.execution_cwd_sha256 for item in self.replay.records}) != 3
         ):
-            raise ValueError("CONFIRMED requires exact isolated replay commands")
+            raise ValueError("CONFIRMED requires exact isolated private executions")
         artifact_hashes = {item.artifact_sha256 for item in self.artifacts}
         for record in self.replay.records:
             identities_match = (
@@ -628,13 +690,17 @@ def create_certificate(**data: object) -> ProofCertificate:
         {
             **data,
             "confirmation_status": ConfirmationStatus.NOT_CONFIRMED,
-            "replay": ReplayEvidence(local_only=True, required_repeats=3, records=()),
+            "replay": ReplayEvidence(
+                local_only=True, required_repeats=3, recipe=None, records=()
+            ),
         }
     )
 
 
 def _seal_certificate(
-    draft: ProofCertificate, records: tuple[ReplayRecord, ...]
+    draft: ProofCertificate,
+    recipe: ReplayRecipe,
+    records: tuple[ReplayRecord, ...],
 ) -> ProofCertificate:
     """Internally replace replay evidence after one complete cold verification."""
 
@@ -645,6 +711,8 @@ def _seal_certificate(
         all(record.success and record.exit_code == 0 for record in records)
         and len({record.stdout_sha256 for record in records}) == 1
         and len({record.stderr_sha256 for record in records}) == 1
+        and len({record.structured_result_sha256 for record in records}) == 1
+        and len({record.staging_tree_sha256 for record in records}) == 1
     )
     data = validated.model_dump(mode="python")
     data.pop("certificate_identity_sha256")
@@ -653,7 +721,7 @@ def _seal_certificate(
         ConfirmationStatus.CONFIRMED if confirmed else ConfirmationStatus.NOT_CONFIRMED
     )
     data["replay"] = ReplayEvidence(
-        local_only=True, required_repeats=3, records=records
+        local_only=True, required_repeats=3, recipe=recipe, records=records
     )
     return _finalize_certificate(data)
 
@@ -770,6 +838,7 @@ __all__ = [
     "PoCEvidence",
     "ProofCertificate",
     "ReplayEvidence",
+    "ReplayRecipe",
     "ReplayRecord",
     "SourceEvidence",
     "StateEvidence",

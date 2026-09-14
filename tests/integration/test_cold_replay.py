@@ -27,6 +27,8 @@ from qprover.replay import (
     cold_verify,
     foundry_poc_source,
     generate_foundry_poc,
+    materialize_replay_recipe,
+    parse_structured_replay_output,
 )
 
 ROOT = Path(__file__).parents[2]
@@ -99,19 +101,25 @@ def test_cold_verify_runs_three_separate_offline_foundry_replays(
     assert all(
         record.success and record.exit_code == 0 for record in verification.records
     )
-    assert all(
-        record.command[:3] == ("forge", "test", "--offline")
-        for record in verification.records
-    )
+    assert verification.certificate.replay.recipe is not None
+    recipe = verification.certificate.replay.recipe
+    assert recipe.argv_template[:3] == ("forge", "test", "--offline")
+    assert recipe.execution_cwd == "{private_project}"
+    assert recipe.staged_poc == "test/QProverReplay.t.sol"
     assert len({record.stdout_sha256 for record in verification.records}) == 1
     assert len({record.stderr_sha256 for record in verification.records}) == 1
-    assert len({record.command[-3] for record in verification.records}) == 3
-    assert len({record.command[6] for record in verification.records}) == 1
-    assert all(
-        record.command[8] == "test_qprover_replay" for record in verification.records
+    assert (
+        len({record.structured_result_sha256 for record in verification.records}) == 1
     )
-    assert len({record.command[10] for record in verification.records}) == 3
-    assert len({record.command[12] for record in verification.records}) == 3
+    assert len({record.execution_argv_sha256 for record in verification.records}) == 3
+    assert len({record.execution_cwd_sha256 for record in verification.records}) == 3
+    assert all(record.suite_count == 1 for record in verification.records)
+    assert all(record.test_count == 1 for record in verification.records)
+    assert all(
+        record.executed_test == "test_qprover_replay()"
+        and record.executed_status == "Success"
+        for record in verification.records
+    )
     persisted = ProofCertificate.model_validate_json(certificate_path.read_text())
     assert persisted == verification.certificate
     assert persisted.certificate_sha256 == persisted.compute_hash()
@@ -200,6 +208,174 @@ def test_zero_exit_replays_with_distinct_output_remain_unconfirmed(
     assert test_index == 3
     assert verification.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
     assert len({record.stdout_sha256 for record in verification.records}) == 3
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        "{}",
+        json.dumps(
+            {
+                "test/QProverReplay.t.sol:QProverReplayTest": {
+                    "test_results": {"different_test()": {"status": "Success"}}
+                }
+            }
+        ),
+        json.dumps(
+            {
+                "test/QProverReplay.t.sol:QProverReplayTest": {
+                    "test_results": {
+                        "test_qprover_replay()": {"status": "Success"},
+                        "extra_test()": {"status": "Success"},
+                    }
+                }
+            }
+        ),
+        json.dumps(
+            {
+                "test/QProverReplay.t.sol:QProverReplayTest": {
+                    "test_results": {
+                        "test_qprover_replay()": {
+                            "status": "Failure",
+                            "reason": "assertion failed",
+                            "counterexample": None,
+                        }
+                    }
+                }
+            }
+        ),
+        json.dumps(
+            {
+                "test/QProverReplay.t.sol:QProverReplayTest": {
+                    "test_results": {
+                        "test_qprover_replay()": {
+                            "status": "Skipped",
+                            "reason": None,
+                            "counterexample": None,
+                        }
+                    }
+                }
+            }
+        ),
+        "not-json",
+    ),
+)
+def test_zero_exit_without_exact_structured_test_pass_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    certificate_path = _prepare(tmp_path, "access_control")
+    real_run = subprocess.run
+    temp_root = Path(tempfile.gettempdir())
+    cold_directories_before = set(temp_root.glob("qprover-cold-*"))
+
+    def forged_result(command, **kwargs):
+        if command[:2] == ("forge", "test"):
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("qprover.replay.subprocess.run", forged_result)
+
+    verification = cold_verify(certificate_path)
+
+    assert verification.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
+    assert all(not record.success for record in verification.records)
+    assert set(temp_root.glob("qprover-cold-*")) == cold_directories_before
+
+
+def test_staged_poc_replacement_cannot_confirm_zero_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    certificate_path = _prepare(tmp_path, "access_control")
+    real_run = subprocess.run
+
+    def replace_staged_poc(command, **kwargs):
+        if command[:2] == ("forge", "test"):
+            staged_poc = Path(command[4]) / command[6]
+            staged_poc.write_text(
+                "// SPDX-License-Identifier: Apache-2.0\n"
+                "pragma solidity 0.8.34;\n"
+                "contract NoReplayTest {}\n"
+            )
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("qprover.replay.subprocess.run", replace_staged_poc)
+
+    verification = cold_verify(certificate_path)
+
+    assert verification.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
+    assert all(not record.success for record in verification.records)
+    assert not tuple((ROOT / "benchmarks/foundry/test").glob(".qprover_replay_*.t.sol"))
+
+
+def test_post_execution_hash_rejects_same_process_staging_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    certificate_path = _prepare(tmp_path, "access_control")
+    valid_json = json.dumps(
+        {
+            "test/QProverReplay.t.sol:QProverReplayTest": {
+                "test_results": {
+                    "test_qprover_replay()": {
+                        "status": "Success",
+                        "reason": None,
+                        "counterexample": None,
+                    }
+                }
+            }
+        }
+    )
+
+    def mutate_and_forge_success(command, **kwargs):
+        assert command[:2] == ("forge", "test")
+        staged_poc = Path(command[4]) / command[6]
+        staged_poc.chmod(0o600)
+        staged_poc.write_text("contract NoReplayTest {}\n")
+        return subprocess.CompletedProcess(command, 0, valid_json, "")
+
+    real_run = subprocess.run
+
+    def dispatch(command, **kwargs):
+        if command[:2] == ("forge", "test"):
+            return mutate_and_forge_success(command, **kwargs)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr("qprover.replay.subprocess.run", dispatch)
+
+    verification = cold_verify(certificate_path)
+
+    assert verification.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
+    assert all(not record.staging_unchanged for record in verification.records)
+
+
+def test_persisted_replay_evidence_reproduces_the_named_test_after_relocation(
+    tmp_path: Path,
+) -> None:
+    certificate_path = _prepare(tmp_path / "run", "access_control")
+    verification = cold_verify(certificate_path)
+    relocated = tmp_path / "clean-clone"
+    shutil.copytree(ROOT / "benchmarks", relocated / "benchmarks")
+    certificate = verification.certificate
+    recipe = certificate.replay.recipe
+    assert recipe is not None
+    manifest = load_manifest(relocated / certificate.target.manifest_path)
+    poc_bytes = (certificate_path.parent / certificate.poc.path).read_bytes()
+    private_root = Path(tempfile.mkdtemp(prefix="qprover-recipe-test-"))
+    try:
+        materialization = materialize_replay_recipe(
+            certificate, manifest, recipe, poc_bytes, private_root
+        )
+        result = subprocess.run(
+            materialization.argv,
+            cwd=materialization.project,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        structured = parse_structured_replay_output(result.stdout, result.returncode)
+        assert structured.success
+        assert structured.executed_test == "test_qprover_replay()"
+    finally:
+        replay_module._clean_directory(private_root)
 
 
 def test_cold_verify_rejects_artifact_identity_tampering(tmp_path: Path) -> None:
@@ -332,12 +508,9 @@ def test_draft_replays_from_a_clean_relocated_workspace(
     verification = cold_verify(certificate_path)
 
     assert verification.confirmation_status is ConfirmationStatus.CONFIRMED
-    assert all(
-        record.command[4] == "benchmarks/foundry"
-        and all(str(relocated) not in item for item in record.command)
-        and all(not Path(item).is_absolute() for item in record.command)
-        for record in verification.records
-    )
+    assert verification.certificate.replay.recipe is not None
+    assert verification.certificate.replay.recipe.source_project == "benchmarks/foundry"
+    assert str(relocated) not in verification.certificate.canonical_json()
 
 
 def test_cold_verify_rejects_preexisting_project_test_symlink(tmp_path: Path) -> None:
@@ -629,7 +802,9 @@ def test_cold_verify_reruns_single_delete_local_minimality(tmp_path: Path) -> No
             transaction_count=3,
             attempted_operators=("single-delete-fixed-point",),
             locally_minimal=True,
-            minimality_claim="Locally minimal under single deletion.",
+            minimality_claim=(
+                "Replay-verified local minimum under one-step deletion only."
+            ),
         )
         provisional = make_executed_certificate(
             manifest=manifest,

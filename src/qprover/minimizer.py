@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Literal, Protocol
 
 from qprover.models import ActionSpec, Candidate, Outcome, TargetManifest
 from qprover.search.base import CandidateEvaluator, Evaluation
@@ -46,7 +46,9 @@ class MinimizationResult:
     transaction_count: int
     attempted_operators: tuple[str, ...]
     locally_minimal: bool
-    minimality_claim: str
+    minimality_claim: Literal[
+        "Replay-verified local minimum under one-step deletion only."
+    ]
 
 
 def _is_violation(evaluation: Evaluation) -> bool:
@@ -412,8 +414,6 @@ def minimize(
         attempted_operators=operators,
         locally_minimal=True,
         minimality_claim=(
-            "Locally minimal under attempted contiguous-chunk deletion, "
-            "single deletion, allowed actor normalization, and allowed "
-            "argument/value simplification operators."
+            "Replay-verified local minimum under one-step deletion only."
         ),
     )
