@@ -9,6 +9,7 @@ import pytest
 from qprover.certificate import ProofCertificate
 from qprover.models import ConfirmationStatus, SearchLimits
 from qprover.pipeline import prove_violation
+from qprover.safeio import PublicationOutcome
 from qprover.search.annealing import SimulatedAnnealingBackend
 from qprover.search.qubo import QuboStrategy
 
@@ -27,8 +28,11 @@ def _strategy() -> QuboStrategy:
 def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import qprover.pipeline as pipeline
+
     original_read_bytes = Path.read_bytes
     original_read_text = Path.read_text
+    original_publish = pipeline.publish_private_directory
 
     def guarded_read_bytes(path: Path) -> bytes:
         if path.name in {"labels.json", "ScenarioWitnesses.t.sol"}:
@@ -42,6 +46,12 @@ def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
 
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
     monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    def publish_with_warning(*args, **kwargs) -> PublicationOutcome:
+        outcome = original_publish(*args, **kwargs)
+        return PublicationOutcome(outcome.destination, "simulated durability warning")
+
+    monkeypatch.setattr(pipeline, "publish_private_directory", publish_with_warning)
     limits = SearchLimits(
         max_sequence_length=3,
         transaction_budget=3,
@@ -66,6 +76,7 @@ def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
     )
 
     assert vulnerable.status is ConfirmationStatus.CONFIRMED
+    assert vulnerable.durability_warning == "simulated durability warning"
     assert vulnerable.output_root.parent == tmp_path / "shared" / "runs"
     assert vulnerable.result_path == vulnerable.output_root / "result.json"
     assert vulnerable.output_root.stat().st_mode & 0o777 == 0o700
@@ -100,6 +111,7 @@ def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
     )
 
     assert sound.status is ConfirmationStatus.NOT_CONFIRMED
+    assert sound.durability_warning == "simulated durability warning"
     assert sound.output_root != vulnerable.output_root
     assert sound.result_path == sound.output_root / "result.json"
     assert json.loads(sound.result_path.read_text())["disposition"] == "not_confirmed"
@@ -182,11 +194,19 @@ def test_late_render_failure_publishes_only_a_failed_result(
 ) -> None:
     import qprover.pipeline as pipeline
 
+    original_publish = pipeline.publish_private_directory
+
     def fail_render(*args, **kwargs):
         del args, kwargs
-        raise OSError("late render failure")
+        raise OSError("late render\nfailure")
 
     monkeypatch.setattr(pipeline, "write_markdown", fail_render)
+
+    def publish_with_warning(*args, **kwargs) -> PublicationOutcome:
+        outcome = original_publish(*args, **kwargs)
+        return PublicationOutcome(outcome.destination, "simulated durability warning")
+
+    monkeypatch.setattr(pipeline, "publish_private_directory", publish_with_warning)
     result = prove_violation(
         ROOT / "benchmarks/scenario_reentrancy_a.json",
         strategy=_strategy(),
@@ -205,12 +225,14 @@ def test_late_render_failure_publishes_only_a_failed_result(
     assert result.certificate_path is None
     assert result.markdown_path is None
     assert result.poc_path is None
+    assert result.durability_warning == "simulated durability warning"
     assert result.result_path == result.output_root / "result.json"
     assert tuple(path.name for path in result.output_root.iterdir()) == ("result.json",)
     published = json.loads(result.result_path.read_text())
     assert published["disposition"] == "failed"
     assert published["artifacts"] == {}
     assert "late render failure" in published["error"]
+    assert "\n" not in published["error"]
 
 
 def test_run_id_collision_never_reuses_or_overwrites_published_directory(

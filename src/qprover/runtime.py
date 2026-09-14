@@ -11,6 +11,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import TypeVar
 
 
 class ExecutionCancelled(BaseException):
@@ -20,6 +21,7 @@ class ExecutionCancelled(BaseException):
 _ACTIVE: contextvars.ContextVar[ExecutionRuntime | None] = contextvars.ContextVar(
     "qprover_execution_runtime", default=None
 )
+_OwnedPath = TypeVar("_OwnedPath")
 
 
 class ExecutionRuntime:
@@ -55,8 +57,9 @@ class ExecutionRuntime:
         except BaseException:
             with runtime._blocked_signals():
                 runtime.cleanup()
-                with suppress(Exception):
-                    atexit.unregister(runtime.cleanup)
+                if not runtime.has_pending_cleanup:
+                    with suppress(Exception):
+                        atexit.unregister(runtime.cleanup)
                 for number, handler in prior_handlers.items():
                     signal.signal(number, handler)
                 if token is not None:
@@ -68,8 +71,9 @@ class ExecutionRuntime:
         finally:
             with runtime._blocked_signals():
                 runtime.cleanup()
-                with suppress(Exception):
-                    atexit.unregister(runtime.cleanup)
+                if not runtime.has_pending_cleanup:
+                    with suppress(Exception):
+                        atexit.unregister(runtime.cleanup)
                 for number, handler in prior_handlers.items():
                     signal.signal(number, handler)
                 assert token is not None
@@ -117,36 +121,53 @@ class ExecutionRuntime:
             self._callbacks[token] = cleanup
             return token
 
-    def unregister(self, token: int) -> None:
-        with self._lock:
-            self._callbacks.pop(token, None)
+    def release(self, token: int) -> None:
+        """Run one cleanup and forget it only after successful completion."""
+
+        with self._blocked_signals():
+            with self._lock:
+                callback = self._callbacks.get(token)
+            if callback is None:
+                return
+            callback()
+            with self._lock:
+                if self._callbacks.get(token) is callback:
+                    self._callbacks.pop(token)
 
     def own_path(
-        self, create: Callable[[], Path], cleanup: Callable[[Path], None]
-    ) -> tuple[Path, int]:
-        """Create and register one exact cleanup target while signals are blocked."""
+        self,
+        target: Path,
+        create: Callable[[Path], _OwnedPath],
+        cleanup: Callable[[Path], None],
+    ) -> tuple[_OwnedPath, int]:
+        """Pre-register an exact target before its creator can mutate it."""
 
         with self._blocked_signals():
             self.checkpoint()
-            path = create()
+            token = self.register(lambda owned=target: cleanup(owned))
             try:
-                token = self.register(lambda owned=path: cleanup(owned))
+                owned = create(target)
             except BaseException:
                 with suppress(BaseException):
-                    cleanup(path)
+                    self.release(token)
                 raise
-        return path, token
+        return owned, token
 
     def cleanup(self) -> None:
-        with self._lock:
+        with self._blocked_signals(), self._lock:
             if self._cleaned:
                 return
-            callbacks = tuple(reversed(tuple(self._callbacks.values())))
-            self._callbacks.clear()
-            self._cleaned = True
-        for callback in callbacks:
+            tokens = tuple(reversed(tuple(self._callbacks)))
+        for token in tokens:
             with suppress(BaseException):
-                callback()
+                self.release(token)
+        with self._lock:
+            self._cleaned = not self._callbacks
+
+    @property
+    def has_pending_cleanup(self) -> bool:
+        with self._lock:
+            return bool(self._callbacks)
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:
@@ -163,6 +184,8 @@ class ExecutionRuntime:
                 os.killpg(process.pid, signal.SIGKILL)
             with suppress(BaseException):
                 process.wait(timeout=2)
+        if process.poll() is None:
+            raise RuntimeError("owned process remains alive after termination")
 
     def spawn(
         self,
@@ -174,7 +197,9 @@ class ExecutionRuntime:
         with self._blocked_signals():
             self.checkpoint()
             process = subprocess.Popen(
-                tuple(command), start_new_session=True, **kwargs  # type: ignore[arg-type]
+                tuple(command),
+                start_new_session=True,
+                **kwargs,  # type: ignore[arg-type]
             )
             try:
                 token = self.register(lambda: self._terminate_process(process))
@@ -222,7 +247,7 @@ class ExecutionRuntime:
             self._terminate_process(process)
             raise
         finally:
-            self.unregister(cleanup_token)
+            self.release(cleanup_token)
 
 
 def current_runtime() -> ExecutionRuntime | None:

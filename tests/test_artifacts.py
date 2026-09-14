@@ -8,6 +8,7 @@ import pytest
 
 from qprover.artifacts import ArtifactError, build_target
 from qprover.manifest import load_manifest
+from qprover.runtime import ExecutionRuntime
 
 
 def _argument(name: str, abi_type: str) -> dict[str, Any]:
@@ -183,9 +184,7 @@ def _write_project_manifest(
     return manifest_path
 
 
-def _reuse_existing_build(
-    bundle: object, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _reuse_existing_build(bundle: object, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make a second loader pass inspect deliberately modified fresh outputs."""
 
     def preserve_existing_output(*args: object, **kwargs: object) -> object:
@@ -250,9 +249,7 @@ def test_build_target_source_hash_changes_with_source(
     manifest = load_manifest(analysis_manifest)
     with build_target(manifest) as first:
         source = manifest.target.source_files[0]
-        source.write_text(
-            source.read_text(encoding="utf-8") + "\n", encoding="utf-8"
-        )
+        source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         with build_target(manifest) as second:
             assert first.source_sha256 != second.source_sha256
 
@@ -659,6 +656,21 @@ def test_artifact_bundle_close_does_not_claim_failed_removal(
     bundle.close()
     assert bundle.closed is True
     assert not evidence_root.exists()
+
+
+def test_successful_bundle_close_releases_runtime_path_ownership(
+    analysis_manifest: Path,
+) -> None:
+    with ExecutionRuntime.activate():
+        bundle = build_target(load_manifest(analysis_manifest))
+        evidence_root = bundle.evidence_root
+        bundle.close()
+        evidence_root.mkdir()
+        marker = evidence_root / "new-owner"
+        marker.write_text("must survive")
+
+    assert marker.read_text() == "must survive"
+    shutil.rmtree(evidence_root)
 
 
 def test_build_failure_cleans_evidence_workspace(

@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from eth_utils.abi import collapse_if_tuple
-from pydantic import Field, StrictStr, model_validator
+from pydantic import Field, StrictStr, field_validator, model_validator
 
 from qprover.analysis import AnalysisReport, analyze
 from qprover.artifacts import ArtifactBundle, build_target
@@ -70,10 +70,9 @@ from qprover.parameters import expand_action_variants
 from qprover.replay import cold_verify, foundry_poc_source, generate_foundry_poc
 from qprover.runtime import ExecutionRuntime, current_runtime
 from qprover.safeio import (
+    PrivateDirectoryLease,
     SafeOutputError,
-    create_private_directory,
     publish_private_directory,
-    remove_private_directory,
     safe_atomic_write,
     validated_private_tree,
 )
@@ -125,6 +124,33 @@ class ProofRunArtifact(StrictModel):
     path: StrictStr = Field(min_length=1)
     sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @field_validator("path")
+    @classmethod
+    def safe_relative_path(cls, value: str) -> str:
+        candidate = Path(value)
+        normalized = candidate.as_posix()
+        scheme, separator, _ = value.partition(":")
+        has_uri_scheme = bool(
+            separator
+            and scheme
+            and scheme[0].isalpha()
+            and all(character.isalnum() or character in "+-." for character in scheme)
+        )
+        if (
+            candidate.is_absolute()
+            or normalized != value
+            or value in {".", ".."}
+            or value.startswith("./")
+            or value.endswith("/")
+            or has_uri_scheme
+            or "\\" in value
+            or "://" in value
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError("artifact path must be a safe relative path")
+        return value
+
 
 class ProofRunResult(StrictModel):
     schema_version: Literal["1.0"]
@@ -134,23 +160,36 @@ class ProofRunResult(StrictModel):
     error: StrictStr | None
     artifacts: Mapping[StrictStr, ProofRunArtifact]
 
+    @field_validator("error")
+    @classmethod
+    def sanitized_error(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value
+            or len(value) > 2048
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError("result error must be nonempty sanitized text")
+        return value
+
     @model_validator(mode="after")
     def consistent(self) -> ProofRunResult:
         names = set(self.artifacts)
         proof = {"certificate", "markdown", "poc"}
+        allowed = {"certificate", "markdown", "poc", "events", "qubo"}
+        if not names <= allowed:
+            raise ValueError("result contains an unsafe artifact label")
         if self.disposition == "confirmed":
             if (
                 self.confirmation_status is not ConfirmationStatus.CONFIRMED
                 or self.error
             ):
                 raise ValueError("confirmed result must be confirmed without error")
-            allowed = {"certificate", "markdown", "poc", "events", "qubo"}
             if not proof <= names or "events" not in names or not names <= allowed:
                 raise ValueError("confirmed result is missing required proof artifacts")
         elif self.disposition == "not_confirmed":
             if (
                 self.confirmation_status is not ConfirmationStatus.NOT_CONFIRMED
-                or names & proof
+                or not names <= {"events", "qubo"}
                 or self.error is not None
             ):
                 raise ValueError("not-confirmed result cannot carry proof artifacts")
@@ -164,6 +203,14 @@ class ProofRunResult(StrictModel):
         else:
             raise ValueError("invalid result disposition")
         return self
+
+
+def _sanitize_result_error(message: str) -> str:
+    cleaned = "".join(
+        " " if ord(character) < 32 or ord(character) == 127 else character
+        for character in message
+    ).strip()
+    return (cleaned or "unspecified proof failure")[:2048]
 
 
 def monotonic_events_to_evidence(
@@ -811,43 +858,79 @@ def _new_run_id() -> str:
     return uuid.uuid4().hex
 
 
-def _new_staging_directory(output_base: Path, run_id: str) -> tuple[Path, int | None]:
+def _new_staging_directory(
+    output_base: Path, run_id: str
+) -> tuple[PrivateDirectoryLease, int | None]:
     path = output_base / "runs" / f".{run_id}.{secrets.token_hex(12)}.staging"
+    lease = PrivateDirectoryLease(path)
     runtime = current_runtime()
     if runtime is None:
-        return create_private_directory(path), None
+        return lease.create(), None
     owned, token = runtime.own_path(
-        create=lambda: create_private_directory(path),
-        cleanup=remove_private_directory,
+        path,
+        lambda target: lease.create(),
+        lambda target: lease.cleanup(),
     )
     return owned, token
+
+
+def _release_staging(staging: PrivateDirectoryLease, cleanup_token: int | None) -> None:
+    runtime = current_runtime()
+    if runtime is not None and cleanup_token is not None:
+        runtime.release(cleanup_token)
+        return
+    staging.cleanup()
+
+
+def _warning(previous: str | None, message: str) -> str:
+    return f"{previous}; {message}" if previous else message
+
+
+def _release_committed_staging(
+    staging: PrivateDirectoryLease,
+    cleanup_token: int | None,
+    durability_warning: str | None,
+) -> str | None:
+    """Finalize ownership after rename without revoking the committed result."""
+
+    try:
+        _release_staging(staging, cleanup_token)
+    except Exception as error:
+        return _warning(
+            durability_warning,
+            f"post-rename ownership cleanup {type(error).__name__}: {error}",
+        )
+    return durability_warning
 
 
 def _publish_run(
     *,
     output_base: Path,
-    staging: Path,
+    staging: PrivateDirectoryLease,
     run_id: str,
     status: ConfirmationStatus,
     disposition: str,
     error: str | None,
     artifacts: Mapping[str, Path],
-) -> tuple[Path, Path, Mapping[str, Path]]:
+) -> tuple[Path, Path, Mapping[str, Path], str | None]:
     """Write the canonical result last, then atomically expose one run directory."""
 
     if disposition not in {"confirmed", "not_confirmed", "failed"}:
         raise ValueError("invalid publication disposition")
     artifact_records: dict[str, dict[str, str]] = {}
     relative_paths: dict[str, Path] = {}
-    tree = validated_private_tree(staging)
+    expected_paths: set[str] = set()
     for label, path in sorted(artifacts.items()):
         try:
-            relative = path.relative_to(staging)
+            relative = path.relative_to(staging.path)
         except ValueError as exc:
             raise SafeOutputError("artifact is outside private run staging") from exc
-        if ".." in relative.parts or relative.as_posix() not in tree:
+        if ".." in relative.parts:
             raise SafeOutputError("artifact is not a safe staged regular file")
+        expected_paths.add(relative.as_posix())
         relative_paths[label] = relative
+    tree = validated_private_tree(staging, expected_paths)
+    for label, relative in relative_paths.items():
         artifact_records[label] = {
             "path": relative.as_posix(),
             "sha256": tree[relative.as_posix()],
@@ -863,23 +946,31 @@ def _publish_run(
             for label, record in artifact_records.items()
         },
     )
-    safe_atomic_write(
-        staging / "result.json",
+    result_payload = (
         json.dumps(
             result.model_dump(mode="json"),
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
-        + "\n",
-        replace=False,
+        + "\n"
     )
-    publication = publish_private_directory(staging, output_base / "runs" / run_id)
+    staging.write_root_file("result.json", result_payload, replace=False)
+    committed_tree = {**tree, "result.json": _digest(result_payload)}
+    validated_private_tree(staging, committed_tree)
+    publication = publish_private_directory(
+        staging, output_base / "runs" / run_id, committed_tree
+    )
     destination = publication.destination
     published = MappingProxyType(
         {label: destination / relative for label, relative in relative_paths.items()}
     )
-    return destination, destination / "result.json", published
+    return (
+        destination,
+        destination / "result.json",
+        published,
+        publication.durability_warning,
+    )
 
 
 def _prove_violation_active(
@@ -901,7 +992,7 @@ def _prove_violation_active(
     manifest_file = manifest_path.resolve()
     output_base = output if output.is_absolute() else Path.cwd() / output
     publication_run_id = _new_run_id()
-    staging: Path | None = None
+    staging: PrivateDirectoryLease | None = None
     staging_token: int | None = None
     search_execution: SearchExecution | None = None
     events_path: Path | None = None
@@ -928,7 +1019,7 @@ def _prove_violation_active(
             evidence_events = monotonic_events_to_evidence(
                 run.events, search_execution.started_at
             )
-            events_path = write_events(evidence_events, staging / "events.jsonl")
+            events_path = write_events(evidence_events, staging.path / "events.jsonl")
             if search_execution.strategy_evidence is not None:
                 objective_provenance = thaw_json(
                     search_execution.prepared.objective_provenance
@@ -945,23 +1036,25 @@ def _prove_violation_active(
                     ),
                     "prepared_problem_sha256": search_execution.prepared.problem_sha256,
                 }
-                qubo_path = _atomic_json(qubo_evidence, staging / "qubo.json")
+                qubo_path = _atomic_json(qubo_evidence, staging.path / "qubo.json")
             if run.violation is None:
                 artifact_paths = {"events": events_path}
                 if qubo_path is not None:
                     artifact_paths["qubo"] = qubo_path
-                published_root, result_path, published = _publish_run(
-                    output_base=output_base,
-                    staging=staging,
-                    run_id=publication_run_id,
-                    status=ConfirmationStatus.NOT_CONFIRMED,
-                    disposition="not_confirmed",
-                    error=None,
-                    artifacts=artifact_paths,
+                published_root, result_path, published, durability_warning = (
+                    _publish_run(
+                        output_base=output_base,
+                        staging=staging,
+                        run_id=publication_run_id,
+                        status=ConfirmationStatus.NOT_CONFIRMED,
+                        disposition="not_confirmed",
+                        error=None,
+                        artifacts=artifact_paths,
+                    )
                 )
-                runtime = current_runtime()
-                if runtime is not None and staging_token is not None:
-                    runtime.unregister(staging_token)
+                durability_warning = _release_committed_staging(
+                    staging, staging_token, durability_warning
+                )
                 staging_token = None
                 staging = None
                 return ProofBundleResult(
@@ -973,6 +1066,7 @@ def _prove_violation_active(
                     qubo_path=published.get("qubo"),
                     result_path=result_path,
                     run_id=publication_run_id,
+                    durability_warning=durability_warning,
                 )
             evaluated = next(
                 item for item in run.evaluations if item.candidate == run.violation
@@ -1024,7 +1118,7 @@ def _prove_violation_active(
                     manifest=manifest,
                     manifest_path=manifest_file,
                     workspace_root=root,
-                    output_root=staging,
+                    output_root=staging.path,
                     bundle=bundle,
                     run=run,
                     generated_at=generated_at,
@@ -1040,7 +1134,7 @@ def _prove_violation_active(
                     manifest=manifest,
                     manifest_path=manifest_file,
                     workspace_root=root,
-                    output_root=staging,
+                    output_root=staging.path,
                     bundle=bundle,
                     run=run,
                     generated_at=generated_at,
@@ -1053,9 +1147,11 @@ def _prove_violation_active(
                 draft = create_certificate(**certificate_data)
 
             poc_path = generate_foundry_poc(
-                draft, manifest, staging, workspace_root=root
+                draft, manifest, staging.path, workspace_root=root
             )
-            certificate_path = write_certificate(draft, staging / "certificate.json")
+            certificate_path = write_certificate(
+                draft, staging.path / "certificate.json"
+            )
             proof_events = list(evidence_events)
 
             def record(kind: str, details: Mapping[str, object]) -> None:
@@ -1100,9 +1196,9 @@ def _prove_violation_active(
                 {"status": verification.confirmation_status.value},
             )
             evidence_events = tuple(proof_events)
-            events_path = write_events(evidence_events, staging / "events.jsonl")
+            events_path = write_events(evidence_events, staging.path / "events.jsonl")
             markdown_path = write_markdown(
-                verification.certificate, staging / "certificate.md"
+                verification.certificate, staging.path / "certificate.md"
             )
             artifact_paths = {
                 "certificate": certificate_path,
@@ -1112,7 +1208,7 @@ def _prove_violation_active(
             }
             if qubo_path is not None:
                 artifact_paths["qubo"] = qubo_path
-            published_root, result_path, published = _publish_run(
+            published_root, result_path, published, durability_warning = _publish_run(
                 output_base=output_base,
                 staging=staging,
                 run_id=publication_run_id,
@@ -1129,9 +1225,9 @@ def _prove_violation_active(
                 ),
                 artifacts=artifact_paths,
             )
-            runtime = current_runtime()
-            if runtime is not None and staging_token is not None:
-                runtime.unregister(staging_token)
+            durability_warning = _release_committed_staging(
+                staging, staging_token, durability_warning
+            )
             staging_token = None
             staging = None
             return ProofBundleResult(
@@ -1153,28 +1249,33 @@ def _prove_violation_active(
                     if verification.confirmation_status is ConfirmationStatus.CONFIRMED
                     else "cold replay did not satisfy confirmation gates"
                 ),
+                durability_warning=durability_warning,
             )
     except Exception as error:  # normalize a failed proof gate, never a safe verdict
-        normalized_error = f"{type(error).__name__}: {error}"
+        normalized_error = _sanitize_result_error(f"{type(error).__name__}: {error}")
         if staging is not None:
             try:
-                remove_private_directory(staging)
+                _release_staging(staging, staging_token)
             except Exception as cleanup_error:
-                normalized_error += (
-                    f"; cleanup {type(cleanup_error).__name__}: {cleanup_error}"
+                normalized_error = _sanitize_result_error(
+                    normalized_error
+                    + f"; cleanup {type(cleanup_error).__name__}: {cleanup_error}"
                 )
-            staging = None
-            runtime = current_runtime()
-            if runtime is not None and staging_token is not None:
-                runtime.unregister(staging_token)
-            staging_token = None
-        failure_staging: Path | None = None
+            else:
+                staging = None
+                staging_token = None
+        failure_staging: PrivateDirectoryLease | None = None
         failure_staging_token: int | None = None
         try:
             failure_staging, failure_staging_token = _new_staging_directory(
                 output_base, publication_run_id
             )
-            published_root, result_path, _ = _publish_run(
+            (
+                published_root,
+                result_path,
+                _,
+                durability_warning,
+            ) = _publish_run(
                 output_base=output_base,
                 staging=failure_staging,
                 run_id=publication_run_id,
@@ -1183,17 +1284,16 @@ def _prove_violation_active(
                 error=normalized_error,
                 artifacts={},
             )
-            runtime = current_runtime()
-            if runtime is not None and failure_staging_token is not None:
-                runtime.unregister(failure_staging_token)
+            durability_warning = _release_committed_staging(
+                failure_staging,
+                failure_staging_token,
+                durability_warning,
+            )
             failure_staging_token = None
         except Exception as publication_error:
             if failure_staging is not None:
                 with suppress(Exception):
-                    remove_private_directory(failure_staging)
-            runtime = current_runtime()
-            if runtime is not None and failure_staging_token is not None:
-                runtime.unregister(failure_staging_token)
+                    _release_staging(failure_staging, failure_staging_token)
             return ProofBundleResult(
                 status=ConfirmationStatus.NOT_CONFIRMED,
                 output_root=output_base,
@@ -1235,6 +1335,7 @@ def _prove_violation_active(
             result_path=result_path,
             run_id=publication_run_id,
             error=normalized_error,
+            durability_warning=durability_warning,
         )
 
 

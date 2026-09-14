@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -17,7 +19,7 @@ from typing import Any, Self
 
 from qprover.manifest import canonical_manifest_hash
 from qprover.models import TargetManifest
-from qprover.runtime import current_runtime
+from qprover.runtime import ExecutionRuntime, current_runtime
 
 BUILD_COMMAND = (
     "forge",
@@ -81,6 +83,8 @@ class ArtifactBundle:
     build_command: tuple[str, ...]
     artifacts: tuple[ContractArtifact, ...]
     _evidence_root: Path = field(repr=False, compare=False)
+    _runtime: ExecutionRuntime | None = field(repr=False, compare=False)
+    _cleanup_token: int | None = field(repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
     @property
@@ -98,11 +102,11 @@ class ArtifactBundle:
 
         if self._closed:
             return
-        if not self._evidence_root.exists():
-            object.__setattr__(self, "_closed", True)
-            return
         try:
-            shutil.rmtree(self._evidence_root)
+            if self._runtime is not None and self._cleanup_token is not None:
+                self._runtime.release(self._cleanup_token)
+            else:
+                _remove_evidence_root(self._evidence_root)
         except OSError as error:
             raise ArtifactError(
                 f"could not remove artifact evidence: {self._evidence_root}"
@@ -112,6 +116,7 @@ class ArtifactBundle:
                 f"could not remove artifact evidence: {self._evidence_root}"
             )
         object.__setattr__(self, "_closed", True)
+        object.__setattr__(self, "_cleanup_token", None)
 
     def __enter__(self) -> Self:
         if self._closed:
@@ -120,11 +125,26 @@ class ArtifactBundle:
 
     def __exit__(self, *exc_info: object) -> None:
         if exc_info and exc_info[0] is not None:
-            shutil.rmtree(self._evidence_root, ignore_errors=True)
-            if not self._evidence_root.exists():
-                object.__setattr__(self, "_closed", True)
+            with suppress(ArtifactError):
+                self.close()
             return
         self.close()
+
+
+def _remove_evidence_root(path: Path) -> None:
+    """Remove one exact build root and prove that it no longer exists."""
+
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    if path.exists():
+        raise OSError(f"artifact evidence remains after cleanup: {path}")
+
+
+def _create_evidence_root(path: Path) -> Path:
+    path.mkdir(mode=0o700)
+    return path
 
 
 def _inside(path: Path, root: Path, label: str) -> Path:
@@ -401,6 +421,8 @@ def _build_target_in_workspace(
     root: Path,
     parsed_requests: list[tuple[str, str]],
     build_root: Path,
+    runtime: ExecutionRuntime | None,
+    cleanup_token: int | None,
     *,
     offline: bool = False,
 ) -> ArtifactBundle:
@@ -475,6 +497,8 @@ def _build_target_in_workspace(
         build_command=build_command,
         artifacts=tuple(artifacts),
         _evidence_root=build_root,
+        _runtime=runtime,
+        _cleanup_token=cleanup_token,
     )
 
 
@@ -506,19 +530,35 @@ def build_target(manifest: TargetManifest, *, offline: bool = False) -> Artifact
         parsed_requests.append((source_name, contract_name))
 
     runtime = current_runtime()
+    cleanup_token: int | None = None
     if runtime is None:
         build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
     else:
-        build_root, _ = runtime.own_path(
-            lambda: Path(tempfile.mkdtemp(prefix="qprover-foundry-build-")),
-            lambda path: shutil.rmtree(path, ignore_errors=True),
+        build_root = Path(tempfile.gettempdir()) / (
+            f"qprover-foundry-build-{secrets.token_hex(16)}"
+        )
+        build_root, cleanup_token = runtime.own_path(
+            build_root,
+            _create_evidence_root,
+            _remove_evidence_root,
         )
     try:
         return _build_target_in_workspace(
-            manifest, root, parsed_requests, build_root, offline=offline
+            manifest,
+            root,
+            parsed_requests,
+            build_root,
+            runtime,
+            cleanup_token,
+            offline=offline,
         )
     except BaseException:
-        shutil.rmtree(build_root, ignore_errors=True)
+        if runtime is not None and cleanup_token is not None:
+            with suppress(BaseException):
+                runtime.release(cleanup_token)
+        else:
+            with suppress(BaseException):
+                _remove_evidence_root(build_root)
         raise
 
 

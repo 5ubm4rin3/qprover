@@ -1,1 +1,84 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["schema_version","run_id","confirmation_status","disposition","error","artifacts"],"properties":{"schema_version":{"const":"1.0"},"run_id":{"type":"string","minLength":1},"confirmation_status":{"enum":["NOT_CONFIRMED","CONFIRMED"]},"disposition":{"enum":["confirmed","not_confirmed","failed"]},"error":{"type":["string","null"]},"artifacts":{"type":"object","additionalProperties":{"type":"object","additionalProperties":false,"required":["path","sha256"],"properties":{"path":{"type":"string","minLength":1},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}}},"allOf":[{"if":{"properties":{"disposition":{"const":"confirmed"}}},"then":{"properties":{"confirmation_status":{"const":"CONFIRMED"},"error":{"type":"null"}},"required":["artifacts"]}},{"if":{"properties":{"disposition":{"const":"failed"}}},"then":{"properties":{"confirmation_status":{"const":"NOT_CONFIRMED"},"error":{"type":"string","minLength":1},"artifacts":{"maxProperties":0}}}}]}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "confirmation_status",
+    "disposition",
+    "error",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "confirmation_status": {"enum": ["NOT_CONFIRMED", "CONFIRMED"]},
+    "disposition": {"enum": ["confirmed", "not_confirmed", "failed"]},
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "propertyNames": {
+        "enum": ["certificate", "markdown", "poc", "events", "qubo"]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!\\.?\\.?$)(?!.*(?:^|/)\\.(?:/|$))(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*://)(?!.*\\\\)(?!.*//)(?!.*\\/$)[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "confirmation_status": {"const": "CONFIRMED"},
+        "disposition": {"const": "confirmed"},
+        "error": {"type": "null"},
+        "artifacts": {
+          "required": ["certificate", "markdown", "poc", "events"]
+        }
+      }
+    },
+    {
+      "properties": {
+        "confirmation_status": {"const": "NOT_CONFIRMED"},
+        "disposition": {"const": "not_confirmed"},
+        "error": {"type": "null"},
+        "artifacts": {
+          "propertyNames": {"enum": ["events", "qubo"]}
+        }
+      }
+    },
+    {
+      "properties": {
+        "confirmation_status": {"const": "NOT_CONFIRMED"},
+        "disposition": {"const": "failed"},
+        "error": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "artifacts": {"maxProperties": 0}
+      }
+    }
+  ]
+}

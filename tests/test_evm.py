@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from qprover.evm import EVMError, LocalAnvil, RPCError, TransactionRejected
+from qprover.runtime import ExecutionRuntime
 
 
 class _LiveProcess:
@@ -149,6 +150,37 @@ def test_anvil_process_group_is_cleaned_when_context_body_raises() -> None:
     assert instance is not None
     assert not _process_exists(pid)
     assert not instance.running
+
+
+def test_anvil_failed_runtime_cleanup_is_retried_at_runtime_exit() -> None:
+    class StoppedProcess:
+        pid = 123
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+    instance = LocalAnvil()
+    calls = 0
+
+    def cleanup() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("transient process cleanup")
+
+    with ExecutionRuntime.activate() as runtime:
+        token = runtime.register(cleanup)
+        instance._process = StoppedProcess()  # type: ignore[assignment]
+        instance._runtime_cleanup_token = token
+        instance._runtime_owner = runtime
+        with pytest.raises(OSError, match="transient process cleanup"):
+            instance.close()
+
+    assert calls == 2
 
 
 def test_anvil_start_failure_is_normalized_and_leaves_no_process() -> None:

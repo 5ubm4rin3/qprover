@@ -17,7 +17,7 @@ from contextlib import suppress
 from types import MappingProxyType
 from typing import Any, Self
 
-from qprover.runtime import current_runtime
+from qprover.runtime import ExecutionRuntime, current_runtime
 
 
 class EVMError(RuntimeError):
@@ -142,6 +142,7 @@ class LocalAnvil:
         self._baseline_snapshot_id: str | None = None
         self._metadata: Mapping[str, object] = MappingProxyType({})
         self._runtime_cleanup_token: int | None = None
+        self._runtime_owner: ExecutionRuntime | None = None
 
     @property
     def rpc_url(self) -> str:
@@ -227,6 +228,7 @@ class LocalAnvil:
                 )
                 self._process = process
                 self._runtime_cleanup_token = token
+                self._runtime_owner = runtime
             else:
                 self._process = subprocess.Popen(
                     command,
@@ -288,6 +290,10 @@ class LocalAnvil:
         if process is None:
             self._clear_runtime()
             return
+        if self._runtime_owner is not None and self._runtime_cleanup_token is not None:
+            self._runtime_owner.release(self._runtime_cleanup_token)
+            self._clear_runtime()
+            return
         try:
             if process.poll() is None:
                 with suppress(ProcessLookupError):
@@ -304,10 +310,8 @@ class LocalAnvil:
             self._clear_runtime()
 
     def _clear_runtime(self) -> None:
-        runtime = current_runtime()
-        if runtime is not None and self._runtime_cleanup_token is not None:
-            runtime.unregister(self._runtime_cleanup_token)
         self._runtime_cleanup_token = None
+        self._runtime_owner = None
         self._process = None
         self._port = None
         self._accounts = ()

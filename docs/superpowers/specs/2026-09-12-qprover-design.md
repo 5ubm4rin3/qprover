@@ -547,6 +547,14 @@ safe verdict or a successful search.
   persisting credentials.
 - Target paths and output paths are bounded; manifests cannot invoke arbitrary
   shell commands.
+- Proof publication pins the originally created staging directory by open
+  descriptors and device/inode identity, rejects links, special files,
+  hardlinks, unlisted entries, and content/inode drift, then revalidates the
+  exact tree immediately before an atomic rename. This protects against
+  accidental and cooperative-process races. A malicious process running as the
+  same UID can still mutate descriptors or filesystem objects and remains part
+  of the explicitly trusted local-host boundary; QProver does not claim
+  cryptographic protection from such a host.
 - Foundry FFI is disabled. Replay tests are scanned for disallowed state/code
   mutation cheatcodes beyond explicitly recorded initial funding.
 - Environment variables, private keys, auth tokens, and RPC credentials are

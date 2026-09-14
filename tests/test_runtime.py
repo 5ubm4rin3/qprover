@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -10,7 +12,75 @@ from pathlib import Path
 
 import pytest
 
-from qprover.runtime import ExecutionRuntime
+from qprover.runtime import ExecutionCancelled, ExecutionRuntime
+
+
+def test_pending_signal_during_activation_restores_process_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior = {
+        number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)
+    }
+    original_register = atexit.register
+    sent = False
+
+    def register_with_pending_signal(callback):
+        nonlocal sent
+        if not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return original_register(callback)
+
+    monkeypatch.setattr(atexit, "register", register_with_pending_signal)
+
+    with (
+        pytest.raises(ExecutionCancelled, match="execution cancelled"),
+        ExecutionRuntime.activate(),
+    ):
+        pytest.fail("a pending activation signal must cancel before user code")
+
+    assert {number: signal.getsignal(number) for number in prior} == prior
+
+
+def test_owned_path_rolls_back_when_creator_mutates_then_raises(tmp_path: Path) -> None:
+    target = tmp_path / "partially-created"
+
+    def create(path: Path) -> Path:
+        path.mkdir()
+        (path / "partial").write_text("partial")
+        raise OSError("creator failed after mutation")
+
+    with (
+        ExecutionRuntime.activate() as runtime,
+        pytest.raises(OSError, match="creator failed"),
+    ):
+        runtime.own_path(target, create, shutil.rmtree)
+
+    assert not target.exists()
+
+
+def test_failed_explicit_cleanup_remains_owned_for_runtime_retry(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "retry-cleanup"
+    target.mkdir()
+    calls = 0
+
+    def cleanup() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("transient cleanup failure")
+        target.rmdir()
+
+    with ExecutionRuntime.activate() as runtime:
+        token = runtime.register(cleanup)
+        with pytest.raises(OSError, match="transient cleanup failure"):
+            runtime.release(token)
+        assert target.is_dir()
+
+    assert calls == 2
+    assert not target.exists()
 
 
 @pytest.mark.parametrize("phase", ["build", "search", "minimization", "replay"])

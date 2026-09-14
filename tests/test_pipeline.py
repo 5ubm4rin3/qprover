@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import jsonschema
 import pytest
+from pydantic import ValidationError
 
 import qprover.pipeline as pipeline_module
 from qprover.artifacts import build_target
 from qprover.manifest import load_manifest
-from qprover.pipeline import monotonic_events_to_evidence, prepare_search
+from qprover.pipeline import (
+    ProofRunResult,
+    monotonic_events_to_evidence,
+    prepare_search,
+)
 from qprover.safeio import SafeOutputError
 from qprover.search.bqm import STOP, SearchFeedback, SequenceBQMBuilder
 from qprover.search.controller import SearchEvent
@@ -164,3 +172,128 @@ def test_qubo_json_writer_rejects_links_and_nonfinite_data(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="JSON"):
         pipeline_module._atomic_json({"bad": float("nan")}, tmp_path / "bad.json")
     assert victim.read_text() == "untouched"
+
+
+def _run_artifact(path: str = "certificate.json") -> dict[str, str]:
+    return {"path": path, "sha256": "a" * 64}
+
+
+def _valid_run_results() -> tuple[dict[str, object], ...]:
+    common: dict[str, object] = {
+        "schema_version": "1.0",
+        "run_id": "run-1",
+        "confirmation_status": "NOT_CONFIRMED",
+        "disposition": "not_confirmed",
+        "error": None,
+        "artifacts": {"events": _run_artifact("events.jsonl")},
+    }
+    confirmed = deepcopy(common)
+    confirmed.update(
+        {
+            "confirmation_status": "CONFIRMED",
+            "disposition": "confirmed",
+            "artifacts": {
+                "certificate": _run_artifact(),
+                "markdown": _run_artifact("certificate.md"),
+                "poc": _run_artifact("QProverReplay.t.sol"),
+                "events": _run_artifact("events.jsonl"),
+                "qubo": _run_artifact("qubo.json"),
+            },
+        }
+    )
+    failed = deepcopy(common)
+    failed.update(
+        {"disposition": "failed", "error": "OSError: denied", "artifacts": {}}
+    )
+    return common, confirmed, failed
+
+
+def _model_accepts(raw: dict[str, object]) -> bool:
+    try:
+        ProofRunResult.model_validate(raw)
+    except ValidationError:
+        return False
+    return True
+
+
+def _schema_accepts(raw: dict[str, object]) -> bool:
+    schema = json.loads((ROOT / "schemas/proof-run-result.schema.json").read_text())
+    return not tuple(jsonschema.Draft202012Validator(schema).iter_errors(raw))
+
+
+def test_proof_run_result_model_and_schema_accept_the_same_complete_variants() -> None:
+    for raw in _valid_run_results():
+        assert _model_accepts(raw)
+        assert _schema_accepts(raw)
+
+
+def test_proof_run_result_model_and_schema_reject_exhaustive_invalid_matrix() -> None:
+    not_confirmed, confirmed, failed = _valid_run_results()
+    invalid: list[dict[str, object]] = []
+
+    for field in (
+        "schema_version",
+        "run_id",
+        "confirmation_status",
+        "disposition",
+        "error",
+        "artifacts",
+    ):
+        case = deepcopy(not_confirmed)
+        case.pop(field)
+        invalid.append(case)
+    for value in ("", "1.1", None):
+        case = deepcopy(not_confirmed)
+        case["schema_version"] = value
+        invalid.append(case)
+
+    for template, updates in (
+        (confirmed, {"confirmation_status": "NOT_CONFIRMED"}),
+        (confirmed, {"error": "unexpected"}),
+        (not_confirmed, {"confirmation_status": "CONFIRMED"}),
+        (not_confirmed, {"error": "unexpected"}),
+        (failed, {"confirmation_status": "CONFIRMED"}),
+        (failed, {"error": None}),
+        (failed, {"error": ""}),
+        (failed, {"error": "line one\nline two"}),
+        (failed, {"artifacts": {"events": _run_artifact("events.jsonl")}}),
+    ):
+        case = deepcopy(template)
+        case.update(updates)
+        invalid.append(case)
+
+    for required in ("certificate", "markdown", "poc", "events"):
+        case = deepcopy(confirmed)
+        case["artifacts"].pop(required)  # type: ignore[union-attr]
+        invalid.append(case)
+    for label in ("unknown", "../events", "https://labels.invalid/x"):
+        case = deepcopy(not_confirmed)
+        case["artifacts"] = {label: _run_artifact("events.jsonl")}
+        invalid.append(case)
+    for path in (
+        "/tmp/evidence",
+        "../evidence",
+        "nested/../evidence",
+        "https://example.invalid/evidence",
+        "nested\\evidence",
+        "./evidence",
+        ".",
+        "nested/./evidence",
+        "evidence/",
+        "C:/evidence",
+        "file:evidence",
+        "mailto:proof@example.invalid",
+    ):
+        case = deepcopy(not_confirmed)
+        case["artifacts"] = {"events": _run_artifact(path)}
+        invalid.append(case)
+    case = deepcopy(not_confirmed)
+    case["artifacts"] = {"certificate": _run_artifact()}
+    invalid.append(case)
+    case = deepcopy(confirmed)
+    case["artifacts"]["unknown"] = _run_artifact("unknown")  # type: ignore[index]
+    invalid.append(case)
+
+    for index, raw in enumerate(invalid):
+        assert not _model_accepts(raw), f"model accepted invalid case {index}: {raw}"
+        assert not _schema_accepts(raw), f"schema accepted invalid case {index}: {raw}"
