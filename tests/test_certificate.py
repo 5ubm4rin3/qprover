@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from qprover.certificate import (
     REPLAY_ARGV_TEMPLATE,
-    REPLAY_COMMAND,
+    REPLAY_INVOCATION_TEMPLATE,
     REPLAY_MATERIALIZATION,
     ArtifactEvidence,
     AssumptionEvidence,
@@ -201,7 +201,7 @@ def _base(tmp_path: Path) -> dict[str, object]:
             artifact_sha256=H2,
             test_name="test_qprover_replay",
         ),
-        "replay_command": REPLAY_COMMAND,
+        "replay_invocation_template": REPLAY_INVOCATION_TEMPLATE,
         "assurance": AssuranceEvidence(
             replay_proven_scope=(
                 "manifest/source/build/artifact identities; local chain and actor "
@@ -214,6 +214,15 @@ def _base(tmp_path: Path) -> dict[str, object]:
             historical_search_metadata_scope=(
                 "revision label; assumptions; run identifier and timestamp; search and "
                 "minimization counters and attempted-operator history"
+            ),
+            invocation_template_scope=(
+                "replay_invocation_template contains unresolved placeholders and is "
+                "not executable until resolved by a conforming QProver CLI"
+            ),
+            trusted_local_execution_boundary=(
+                "Forge, Solc, and Anvil executables are trusted local tool boundaries; "
+                "the privileged local host is trusted; no cryptographic attestation "
+                "protects against a compromised executable or privileged host"
             ),
             cryptographic_attestation=False,
         ),
@@ -290,6 +299,29 @@ def test_complete_confirmed_certificate_validates_with_pydantic_and_schema(
     jsonschema.validate(data, schema)
 
 
+def test_certificate_labels_replay_invocation_as_an_unresolved_template(
+    tmp_path: Path,
+) -> None:
+    data = _base(tmp_path)
+    certificate = create_certificate(**data)
+
+    serialized = certificate.model_dump(mode="json")
+    assert serialized["replay_invocation_template"] == REPLAY_INVOCATION_TEMPLATE
+    assert "replay_command" not in serialized
+    assert "not executable" in certificate.assurance.invocation_template_scope
+    assert "trusted" in certificate.assurance.trusted_local_execution_boundary
+
+    legacy = dict(data)
+    legacy["replay_command"] = legacy.pop("replay_invocation_template")
+    with pytest.raises(ValidationError, match="replay_invocation_template"):
+        create_certificate(**legacy)
+
+    schema = json.loads(Path("schemas/certificate.schema.json").read_text())
+    serialized["replay_command"] = serialized.pop("replay_invocation_template")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(serialized, schema)
+
+
 def test_certificate_is_deeply_immutable_and_writes_atomically(tmp_path: Path) -> None:
     certificate = _confirmed(tmp_path)
     with pytest.raises(TypeError):
@@ -327,10 +359,10 @@ def test_public_creation_rejects_confirmation_and_replay_forgery(
             **base,
         )
 
-    wrong_command = dict(base)
-    wrong_command["replay_command"] = "forge test --offline"
-    with pytest.raises(ValidationError, match="replay_command"):
-        create_certificate(**wrong_command)
+    wrong_template = dict(base)
+    wrong_template["replay_invocation_template"] = "forge test --offline"
+    with pytest.raises(ValidationError, match="replay_invocation_template"):
+        create_certificate(**wrong_template)
 
     draft = create_certificate(
         confirmation_status=ConfirmationStatus.NOT_CONFIRMED,
@@ -442,11 +474,22 @@ def test_assurance_explicitly_separates_replay_proof_from_history() -> None:
             "revision label; assumptions; run identifier and timestamp; search and "
             "minimization counters and attempted-operator history"
         ),
+        invocation_template_scope=(
+            "replay_invocation_template contains unresolved placeholders and is not "
+            "executable until resolved by a conforming QProver CLI"
+        ),
+        trusted_local_execution_boundary=(
+            "Forge, Solc, and Anvil executables are trusted local tool boundaries; the "
+            "privileged local host is trusted; no cryptographic attestation protects "
+            "against a compromised executable or privileged host"
+        ),
         cryptographic_attestation=False,
     )
 
     assert "transaction execution" in assurance.replay_proven_scope
     assert "revision" in assurance.historical_search_metadata_scope
+    assert "not executable" in assurance.invocation_template_scope
+    assert "Forge, Solc, and Anvil" in assurance.trusted_local_execution_boundary
     assert assurance.cryptographic_attestation is False
 
 
@@ -468,7 +511,7 @@ def test_minimization_claim_cannot_overstate_replay_proof(claim: str) -> None:
         )
 
 
-def test_json_schema_rejects_structural_replay_command_forgery(
+def test_json_schema_rejects_structural_replay_invocation_forgery(
     tmp_path: Path,
 ) -> None:
     schema = json.loads(Path("schemas/certificate.schema.json").read_text())
@@ -660,7 +703,11 @@ def test_markdown_uses_only_validated_json_values(tmp_path: Path) -> None:
     assert "42,000" in markdown
     assert "CONFIRMED" in markdown
     assert "Unverified revision label" in markdown
+    assert (
+        "Replay invocation template (unresolved; not directly executable)" in markdown
+    )
     assert "Historical-only metadata" in markdown
+    assert "Trusted local execution boundary" in markdown
     assert "Cryptographic attestation: no" in markdown
     with pytest.raises(ValidationError):
         render_markdown({**certificate.model_dump(), "unknown": "injected"})

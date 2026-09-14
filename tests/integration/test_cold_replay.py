@@ -32,6 +32,34 @@ from qprover.replay import (
 )
 
 ROOT = Path(__file__).parents[2]
+DUPLICATE_SUITE_JSON = """{
+  "test/QProverReplay.t.sol:QProverReplayTest": {
+    "test_results": {
+      "test_qprover_replay()": {
+        "status": "Success", "reason": null, "counterexample": null
+      }
+    }
+  },
+  "test/QProverReplay.t.sol:QProverReplayTest": {
+    "test_results": {
+      "test_qprover_replay()": {
+        "status": "Success", "reason": null, "counterexample": null
+      }
+    }
+  }
+}"""
+DUPLICATE_TEST_JSON = """{
+  "test/QProverReplay.t.sol:QProverReplayTest": {
+    "test_results": {
+      "test_qprover_replay()": {
+        "status": "Success", "reason": null, "counterexample": null
+      },
+      "test_qprover_replay()": {
+        "status": "Success", "reason": null, "counterexample": null
+      }
+    }
+  }
+}"""
 
 
 def _candidate(manifest, family: str) -> Candidate:
@@ -258,6 +286,8 @@ def test_zero_exit_replays_with_distinct_output_remain_unconfirmed(
             }
         ),
         "not-json",
+        DUPLICATE_SUITE_JSON,
+        DUPLICATE_TEST_JSON,
     ),
 )
 def test_zero_exit_without_exact_structured_test_pass_is_unconfirmed(
@@ -280,6 +310,16 @@ def test_zero_exit_without_exact_structured_test_pass_is_unconfirmed(
     assert verification.confirmation_status is ConfirmationStatus.NOT_CONFIRMED
     assert all(not record.success for record in verification.records)
     assert set(temp_root.glob("qprover-cold-*")) == cold_directories_before
+
+
+@pytest.mark.parametrize("stdout", (DUPLICATE_SUITE_JSON, DUPLICATE_TEST_JSON))
+def test_structured_replay_parser_marks_duplicate_keys_malformed(stdout: str) -> None:
+    parsed = parse_structured_replay_output(stdout, 0)
+
+    assert parsed.success is False
+    assert parsed.malformed is True
+    assert parsed.suite_count == 0
+    assert parsed.test_count == 0
 
 
 def test_staged_poc_replacement_cannot_confirm_zero_tests(

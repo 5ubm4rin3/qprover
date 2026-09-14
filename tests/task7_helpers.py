@@ -9,7 +9,7 @@ from eth_utils.abi import collapse_if_tuple
 
 from qprover.artifacts import ArtifactBundle
 from qprover.certificate import (
-    REPLAY_COMMAND,
+    REPLAY_INVOCATION_TEMPLATE,
     ArtifactEvidence,
     AssumptionEvidence,
     AssuranceEvidence,
@@ -249,7 +249,7 @@ def make_executed_certificate(
             artifact_sha256=artifacts[0].artifact_sha256,
             test_name="test_qprover_replay",
         ),
-        replay_command=REPLAY_COMMAND,
+        replay_invocation_template=REPLAY_INVOCATION_TEMPLATE,
         replay=ReplayEvidence(
             local_only=True, required_repeats=3, recipe=None, records=()
         ),
@@ -265,6 +265,15 @@ def make_executed_certificate(
             historical_search_metadata_scope=(
                 "revision label; assumptions; run identifier and timestamp; search and "
                 "minimization counters and attempted-operator history"
+            ),
+            invocation_template_scope=(
+                "replay_invocation_template contains unresolved placeholders and is "
+                "not executable until resolved by a conforming QProver CLI"
+            ),
+            trusted_local_execution_boundary=(
+                "Forge, Solc, and Anvil executables are trusted local tool boundaries; "
+                "the privileged local host is trusted; no cryptographic attestation "
+                "protects against a compromised executable or privileged host"
             ),
             cryptographic_attestation=False,
         ),

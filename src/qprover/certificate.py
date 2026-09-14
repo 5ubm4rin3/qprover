@@ -32,7 +32,7 @@ NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(gt=0)]
 _ZERO_HASH = "0" * 64
 _SEAL_TOKEN = object()
-REPLAY_COMMAND = "qprover replay --workspace {workspace} {certificate}"
+REPLAY_INVOCATION_TEMPLATE = "qprover replay --workspace {workspace} {certificate}"
 REPLAY_MATERIALIZATION = (
     "copy hash-verified foundry.toml and certificate source closure into "
     "{private_project}; write and hash-check the certificate PoC only at "
@@ -421,6 +421,15 @@ class AssuranceEvidence(StrictModel):
         "revision label; assumptions; run identifier and timestamp; search and "
         "minimization counters and attempted-operator history"
     ]
+    invocation_template_scope: Literal[
+        "replay_invocation_template contains unresolved placeholders and is not "
+        "executable until resolved by a conforming QProver CLI"
+    ]
+    trusted_local_execution_boundary: Literal[
+        "Forge, Solc, and Anvil executables are trusted local tool boundaries; the "
+        "privileged local host is trusted; no cryptographic attestation protects "
+        "against a compromised executable or privileged host"
+    ]
     cryptographic_attestation: Literal[False]
 
 
@@ -477,7 +486,7 @@ class ProofCertificate(StrictModel):
     gas: GasEvidence
     minimization: MinimizationEvidence
     poc: PoCEvidence
-    replay_command: Literal[REPLAY_COMMAND]
+    replay_invocation_template: Literal[REPLAY_INVOCATION_TEMPLATE]
     replay: ReplayEvidence
     assurance: AssuranceEvidence
     certificate_identity_sha256: Sha256
@@ -768,9 +777,13 @@ def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str
         f"- Gas used: {validated.gas.total_gas_used:,}\n"
         f"- Minimized steps: {validated.minimization.minimized_steps:,}\n"
         f"- Cold replays: {len(validated.replay.records):,}\n"
+        "- Replay invocation template (unresolved; not directly executable): "
+        f"`{validated.replay_invocation_template}`\n"
         f"- Replay-proven scope: {validated.assurance.replay_proven_scope}\n"
         "- Historical-only metadata: "
         f"{validated.assurance.historical_search_metadata_scope}\n"
+        "- Trusted local execution boundary: "
+        f"{validated.assurance.trusted_local_execution_boundary}\n"
         "- Cryptographic attestation: no\n"
         f"- Certificate SHA-256: `{validated.certificate_sha256}`\n"
     )

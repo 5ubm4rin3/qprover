@@ -81,6 +81,7 @@ class StructuredReplayResult:
     executed_suite: str | None
     executed_test: str | None
     executed_status: str | None
+    malformed: bool
 
 
 def _digest(data: bytes | str) -> str:
@@ -809,14 +810,31 @@ def _normalize_structured_json(value: object) -> object:
     return value
 
 
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if not isinstance(key, str) or key in result:
+            raise ValueError("structured replay JSON contains an ambiguous object")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"structured replay JSON contains non-standard value {value}")
+
+
 def parse_structured_replay_output(
     stdout: str, exit_code: int
 ) -> StructuredReplayResult:
     """Require exactly one named suite/test with an explicit Success status."""
 
     try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
+        parsed = json.loads(
+            stdout,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (TypeError, ValueError):
         normalized = {"malformed_stdout_sha256": _digest(stdout)}
         return StructuredReplayResult(
             False,
@@ -826,13 +844,16 @@ def parse_structured_replay_output(
             None,
             None,
             None,
+            True,
         )
     normalized = _normalize_structured_json(parsed)
     normalized_hash = _digest(
         json.dumps(normalized, sort_keys=True, separators=(",", ":"))
     )
     if not isinstance(parsed, dict):
-        return StructuredReplayResult(False, normalized_hash, 0, 0, None, None, None)
+        return StructuredReplayResult(
+            False, normalized_hash, 0, 0, None, None, None, True
+        )
     suite_count = len(parsed)
     suite = next(iter(parsed)) if suite_count == 1 else None
     suite_record = parsed.get(suite) if suite is not None else None
@@ -859,6 +880,7 @@ def parse_structured_replay_output(
         suite,
         test,
         status if isinstance(status, str) else None,
+        False,
     )
 
 

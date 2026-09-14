@@ -439,13 +439,16 @@ hashes, source revision if available, compiler/EVM/chain configuration,
 assumptions and funding, initial observations, concrete attack transactions,
 violated invariant and rationale, before/after observations, attacker profit,
 protocol loss, gas, original/minimized size, minimization attempts, PoC hash and
-path, replay command, replay count, and verification status.
+path, a replay invocation template with unresolved placeholders, replay count,
+and verification status. The serialized template is evidence metadata, not an
+executable command; Task 8C supplies the conforming CLI that resolves it.
 
 The generated Foundry test deploys the same scenario, captures initial
 observations, executes the minimized calls through canonical ABI signatures, and
 asserts the supplied violation. It has no network access and uses only funding
-explicitly allowed by the manifest. `qprover replay` validates hashes, launches a
-fresh environment, and re-executes solely from the certificate and manifest.
+explicitly allowed by the manifest. The Task 8C `qprover replay` command will
+validate hashes, resolve the recorded invocation template, launch a fresh
+environment, and re-execute solely from the certificate and manifest.
 
 ## 11. Benchmark design
 
@@ -501,8 +504,8 @@ environmental blockers, not converted into claimed results.
 
 ## 12. CLI and user flow
 
-Commands are noninteractive and return nonzero on validation, execution, or
-replay failure:
+The planned Task 8C commands are noninteractive and return nonzero on validation,
+execution, or replay failure:
 
 ```text
 qprover doctor
@@ -612,7 +615,8 @@ planned:
 7. QUBO small-instance optima agree with independent exact feasible-sequence
    enumeration and coefficient tests.
 8. Every confirmed result includes a minimized sequence, proof certificate,
-   generated Foundry PoC, and replay command.
+   generated Foundry PoC, and replay invocation template; Task 8C makes the
+   template executable through its conforming CLI.
 9. Limitations and manual inputs are explicit; no quantum or universal-discovery
    claim exceeds evidence.
 10. Independent code and security review have no unresolved serious findings.
