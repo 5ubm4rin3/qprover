@@ -49,6 +49,8 @@ from qprover.models import (
     Outcome,
     TargetManifest,
 )
+from qprover.runtime import current_runtime
+from qprover.safeio import SafeOutputError, safe_atomic_write
 
 
 class ReplayError(RuntimeError):
@@ -270,20 +272,25 @@ def validate_semantic_binding(
         or certificate.invariant.foundry_assertion != declared.foundry_assertion
     ):
         raise ReplayError("certificate invariant semantics do not match manifest")
-    initial = tuple(
-        item for item in certificate.initial_invariants if item.id == declared.id
-    )
-    if (
-        len(initial) != 1
-        or initial[0].expression != declared.expression
-        or initial[0].description != declared.description
-        or initial[0].foundry_assertion != declared.foundry_assertion
-        or not initial[0].evaluated
-        or initial[0].value is not True
-    ):
+    if len(certificate.initial_invariants) != len(manifest.invariants):
         raise ReplayError(
             "certificate initial invariant semantics do not match manifest"
         )
+    for initial, supplied in zip(
+        certificate.initial_invariants, manifest.invariants, strict=True
+    ):
+        if (
+            initial.id != supplied.id
+            or initial.expression != supplied.expression
+            or initial.description != supplied.description
+            or initial.foundry_assertion != supplied.foundry_assertion
+            or not initial.evaluated
+            or initial.value is not True
+            or initial.reason is not None
+        ):
+            raise ReplayError(
+                "certificate initial invariant semantics do not match manifest"
+            )
     if certificate.confirmation_policy != manifest.confirmation.kind:
         raise ReplayError("certificate confirmation policy does not match manifest")
     if manifest.confirmation.kind == "invariant_and_economic_impact":
@@ -658,26 +665,15 @@ def generate_foundry_poc(
     source = foundry_poc_source(certificate, manifest, workspace_root=workspace_root)
     if _digest(source) != certificate.poc.sha256:
         raise ReplayError("generated PoC hash does not match certificate PoC hash")
-    root = output.resolve()
-    destination = (root / certificate.poc.path).resolve()
+    root = output if output.is_absolute() else Path.cwd() / output
+    relative = Path(certificate.poc.path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ReplayError("PoC output escapes the run directory")
+    destination = root / relative
     try:
-        destination.relative_to(root)
-    except ValueError as error:
-        raise ReplayError("PoC output escapes the run directory") from error
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(source)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+        return safe_atomic_write(destination, source)
+    except SafeOutputError as error:
+        raise ReplayError("unsafe PoC output path") from error
 
 
 def _safe_environment(overrides: dict[str, str]) -> dict[str, str]:
@@ -686,6 +682,22 @@ def _safe_environment(overrides: dict[str, str]) -> dict[str, str]:
     environment.update(overrides)
     environment["FOUNDRY_OFFLINE"] = "true"
     return environment
+
+
+def _run_owned(
+    command: Sequence[str], *, cwd: Path, env: Mapping[str, str]
+) -> subprocess.CompletedProcess[str]:
+    runtime = current_runtime()
+    if runtime is not None:
+        return runtime.run(command, cwd=cwd, env=env)
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _tree_digest(entries: Mapping[str, bytes]) -> str:
@@ -975,15 +987,12 @@ def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) 
         "--offline",
     )
     try:
-        result = subprocess.run(
+        result = _run_owned(
             command,
             cwd=manifest.target.project_root,
             env=_safe_environment(
                 {"FOUNDRY_OUT": str(out), "FOUNDRY_CACHE_PATH": str(cache)}
             ),
-            capture_output=True,
-            text=True,
-            check=False,
         )
         if result.returncode:
             raise ReplayError("offline compiler preflight failed")
@@ -1043,13 +1052,10 @@ def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) 
                 or _digest(bytecode) != expected.bytecode_sha256
             ):
                 raise ReplayError("artifact hash mismatch")
-        version = subprocess.run(
+        version = _run_owned(
             ("forge", "--version"),
             cwd=manifest.target.project_root,
             env=_safe_environment({}),
-            capture_output=True,
-            text=True,
-            check=False,
         )
         reported = version.stdout.strip().splitlines()
         if (
@@ -1222,16 +1228,24 @@ def _verify_execution_binding(
             ):
                 raise ReplayError("executed invariant evidence mismatch")
             baseline_invariants = metadata.get("baseline_invariants")
-            baseline_matches = tuple(
-                item
+            expected_baseline = tuple(
+                {
+                    "invariant_id": item.id,
+                    "expression": item.expression,
+                    "status": "evaluated",
+                    "value": True,
+                    "reason": None,
+                }
+                for item in manifest.invariants
+            )
+            actual_baseline = tuple(
+                dict(item)
                 for item in baseline_invariants or ()
                 if isinstance(item, Mapping)
-                and item.get("invariant_id") == certificate.invariant.id
             )
             qualification = metadata.get("qualification")
             if (
-                len(baseline_matches) != 1
-                or baseline_matches[0].get("value") is not True
+                actual_baseline != expected_baseline
                 or not isinstance(qualification, Mapping)
                 or qualification.get("qualified") is not True
                 or qualification.get("policy") != certificate.confirmation_policy
@@ -1390,13 +1404,10 @@ def cold_verify(
             _verify_private_staging(materialization, recipe)
             started = time.monotonic()
             try:
-                result = subprocess.run(
+                result = _run_owned(
                     materialization.argv,
                     cwd=materialization.project,
                     env=_safe_environment({}),
-                    capture_output=True,
-                    text=True,
-                    check=False,
                 )
                 exit_code = result.returncode
                 stdout = result.stdout

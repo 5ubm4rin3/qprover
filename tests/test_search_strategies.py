@@ -359,7 +359,12 @@ class SparseBackend:
         bits = bqm.encode((bqm.problem.actions[0],))
         return SampleSet(
             (sample_from_bits(bqm, bits),),
-            {"backend": "sparse", "details": {"reads": [1]}},
+            {
+                "backend": "sparse",
+                "logical_bits": len(bqm.variables),
+                "reads": 1,
+                "wall_seconds": 0.0,
+            },
         )
 
 

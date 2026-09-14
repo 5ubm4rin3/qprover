@@ -13,6 +13,7 @@ import qprover.replay as replay_module
 from qprover.artifacts import build_target
 from qprover.certificate import (
     GasEvidence,
+    InvariantEvidence,
     ProofCertificate,
     create_certificate,
     write_certificate,
@@ -29,7 +30,36 @@ from qprover.replay import (
     generate_foundry_poc,
     materialize_replay_recipe,
     parse_structured_replay_output,
+    validate_semantic_binding,
 )
+
+
+def test_semantic_binding_rejects_fabricated_extra_initial_invariant(
+    tmp_path: Path,
+) -> None:
+    certificate_path = _prepare(tmp_path, "access_control")
+    certificate = ProofCertificate.model_validate_json(certificate_path.read_text())
+    manifest = load_manifest(ROOT / "benchmarks/scenario_access_control_a.json")
+    extra = InvariantEvidence(
+        id="fabricated_baseline",
+        expression="true",
+        description="Not supplied by the target manifest.",
+        foundry_assertion="assert(true);",
+        evaluated=True,
+        value=True,
+        reason=None,
+    )
+    data = certificate.model_dump(mode="python")
+    data["initial_invariants"] = (*certificate.initial_invariants, extra)
+    data.pop("certificate_identity_sha256")
+    data.pop("certificate_sha256")
+    data.pop("confirmation_status")
+    data.pop("replay")
+    tampered = create_certificate(**data)
+
+    with pytest.raises(ReplayError, match="initial invariant semantics"):
+        validate_semantic_binding(tampered, manifest, workspace_root=ROOT)
+
 
 ROOT = Path(__file__).parents[2]
 DUPLICATE_SUITE_JSON = """{
@@ -166,6 +196,23 @@ def test_cold_verify_rejects_corruption_before_execution_and_cleans_paths(
         cold_verify(certificate_path)
 
     assert not tuple((ROOT / "benchmarks/foundry/test").glob(".qprover_replay_*.t.sol"))
+
+
+def test_poc_writer_rejects_symlink_target_without_touching_victim(
+    tmp_path: Path,
+) -> None:
+    certificate_path = _prepare(tmp_path, "access_control")
+    certificate = ProofCertificate.model_validate_json(certificate_path.read_text())
+    manifest = load_manifest(ROOT / "benchmarks/scenario_access_control_a.json")
+    poc = tmp_path / certificate.poc.path
+    poc.unlink()
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    poc.symlink_to(victim)
+
+    with pytest.raises(ReplayError, match="unsafe PoC"):
+        generate_foundry_poc(certificate, manifest, tmp_path, workspace_root=ROOT)
+    assert victim.read_text() == "untouched"
 
 
 def test_failed_replays_remain_unconfirmed_and_clean_every_temporary_path(

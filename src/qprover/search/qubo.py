@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import math
+import time
 from collections import Counter
+from collections.abc import Mapping
 from typing import Protocol
 
 from qprover.models import Candidate, Outcome
@@ -25,6 +29,97 @@ from qprover.search.bqm import (
 
 class BQMBackend(Protocol):
     def sample(self, bqm: BinaryQuadraticModel, **options: object) -> SampleSet: ...
+
+
+_BACKEND_METADATA_FIELDS = frozenset(
+    {
+        "backend",
+        "logical_bits",
+        "max_bits",
+        "optimality_proven",
+        "reads",
+        "reads_requested",
+        "seed",
+        "start_policy",
+        "states_evaluated",
+        "sweeps",
+        "temperature_end",
+        "temperature_schedule",
+        "temperature_start",
+        "update_order",
+        "wall_seconds",
+    }
+)
+
+
+def _exact_nonnegative_int(value: object, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"backend metadata {field} must be a nonnegative integer")
+    return value
+
+
+def _finite_nonnegative(value: object, field: str) -> float:
+    if type(value) not in (int, float):
+        raise ValueError(f"backend metadata {field} must be a nonnegative number")
+    converted = float(value)
+    if not math.isfinite(converted) or converted < 0:
+        raise ValueError(f"backend metadata {field} must be finite and nonnegative")
+    return converted
+
+
+def _validate_backend_metadata(
+    metadata: object,
+    *,
+    logical_bits: int,
+    requested_seed: int,
+    requested_reads: int,
+    seed_supported: bool,
+) -> dict[str, object]:
+    if not isinstance(metadata, Mapping):
+        raise ValueError("backend metadata must be a mapping")
+    unknown = set(metadata) - _BACKEND_METADATA_FIELDS
+    if unknown:
+        raise ValueError(f"backend metadata contains unknown field: {min(unknown)}")
+    backend = metadata.get("backend")
+    if type(backend) is not str or not backend:
+        raise ValueError("backend metadata backend must be a nonempty string")
+    recorded_bits = _exact_nonnegative_int(metadata.get("logical_bits"), "logical_bits")
+    if recorded_bits != logical_bits:
+        raise ValueError("backend metadata logical_bits does not match the model")
+    wall_seconds = _finite_nonnegative(metadata.get("wall_seconds"), "wall_seconds")
+    normalized = dict(metadata)
+    normalized["wall_seconds"] = wall_seconds
+    for field in ("reads", "reads_requested", "sweeps", "states_evaluated", "max_bits"):
+        if field in normalized:
+            normalized[field] = _exact_nonnegative_int(normalized[field], field)
+    read_fields = tuple(
+        field for field in ("reads", "reads_requested") if field in normalized
+    )
+    if len(read_fields) != 1 or normalized[read_fields[0]] != requested_reads:
+        raise ValueError(
+            "backend metadata must report exactly the requested number of reads"
+        )
+    for field in ("temperature_start", "temperature_end"):
+        if field in normalized:
+            normalized[field] = _finite_nonnegative(normalized[field], field)
+    if (
+        "optimality_proven" in normalized
+        and type(normalized["optimality_proven"]) is not bool
+    ):
+        raise ValueError("backend metadata optimality_proven must be boolean")
+    for field in ("start_policy", "temperature_schedule", "update_order"):
+        if field in normalized and (
+            type(normalized[field]) is not str or not normalized[field]
+        ):
+            raise ValueError(f"backend metadata {field} must be a nonempty string")
+    if seed_supported:
+        if type(normalized.get("seed")) is not int:
+            raise ValueError("backend metadata seed must be an exact integer")
+        if normalized["seed"] != requested_seed:
+            raise ValueError("backend metadata seed does not match the requested seed")
+    elif "seed" in normalized:
+        raise ValueError("backend metadata cannot claim an unsupported seed")
+    return normalized
 
 
 class QuboStrategy:
@@ -90,6 +185,9 @@ class QuboStrategy:
         self._solver_reads = 0
         self._solver_sweeps = 0
         self._solver_wall_seconds = 0.0
+        self._fallback_wall_seconds = 0.0
+        self._fallback_calls = 0
+        self._fallback_records: list[dict[str, object]] = []
         self._ranked: tuple[tuple[float, Candidate], ...] = ()
         self._ranked_is_exact = False
         self._last_bqm: BinaryQuadraticModel | None = None
@@ -160,7 +258,16 @@ class QuboStrategy:
             optimization,
             SearchFeedback(revert_penalties=penalties),
         )
+        requested_seed = self._seed + self._builds
+        seed_supported = isinstance(self._backend, SimulatedAnnealingBackend)
         samples = self._sample(bqm)
+        solver_metadata = _validate_backend_metadata(
+            samples.metadata,
+            logical_bits=len(bqm.variables),
+            requested_seed=requested_seed,
+            requested_reads=self._reads,
+            seed_supported=seed_supported,
+        )
         self._last_bqm = bqm
         ranked: dict[str, tuple[float, Candidate]] = {}
         feasible = 0
@@ -193,30 +300,26 @@ class QuboStrategy:
         self._ranked_is_exact = False
         self._decoded_feasible += feasible
         self._decoded_infeasible += infeasible
-        self._solver_metadata = dict(samples.metadata)
-        reads = samples.metadata.get(
-            "reads", samples.metadata.get("reads_requested", 0)
-        )
-        sweeps = samples.metadata.get("sweeps", 0)
-        wall_seconds = samples.metadata.get("wall_seconds", 0.0)
-        self._solver_reads += reads if type(reads) is int and reads >= 0 else 0
-        self._solver_sweeps += sweeps if type(sweeps) is int and sweeps >= 0 else 0
-        self._solver_wall_seconds += (
-            float(wall_seconds)
-            if type(wall_seconds) in (int, float) and wall_seconds >= 0
-            else 0.0
-        )
+        self._solver_metadata = solver_metadata
+        reads = solver_metadata.get("reads", solver_metadata.get("reads_requested", 0))
+        sweeps = solver_metadata.get("sweeps", 0)
+        wall_seconds = solver_metadata["wall_seconds"]
+        self._solver_reads += int(reads)
+        self._solver_sweeps += int(sweeps)
+        self._solver_wall_seconds += float(wall_seconds)
         self._build_evidence.append(
             {
                 "build_index": self._builds,
-                "seed": samples.metadata.get("seed", self._seed + self._builds),
+                "requested_seed": requested_seed,
+                "seed_supported": seed_supported,
+                "effective_seed": requested_seed if seed_supported else None,
                 "problem_sha256": optimization.sha256,
                 "model_sha256": bqm.sha256,
                 "logical_bits": len(bqm.variables),
                 "couplers": len(bqm.quadratic),
                 "decoded_feasible": feasible,
                 "decoded_infeasible": infeasible,
-                "solver": dict(samples.metadata),
+                "solver": solver_metadata,
                 "model": bqm.to_dict(),
                 "best_objective_components": (
                     samples.first.components.as_dict() if samples.samples else {}
@@ -239,6 +342,8 @@ class QuboStrategy:
         self,
         remaining_transactions: int,
     ) -> tuple[Candidate | None, bool]:
+        started = time.perf_counter()
+        self._fallback_calls += 1
         horizon = min(remaining_transactions, self._problem.max_sequence_length)
         sequences: list[tuple[str, ...]] = []
         action_counts: Counter[str] = Counter()
@@ -266,6 +371,17 @@ class QuboStrategy:
         self._feasible_count_exact = count_exact
         self._fallback_space_bound = len(sequences)
         if not count_exact:
+            elapsed = time.perf_counter() - started
+            self._fallback_wall_seconds += elapsed
+            self._fallback_records.append(
+                {
+                    "call_index": self._fallback_calls - 1,
+                    "enumerated_count": len(sequences),
+                    "scored_count": 0,
+                    "count_exact": False,
+                    "wall_seconds": elapsed,
+                }
+            )
             return None, False
         self._exact_fallbacks += 1
         if self._last_bqm is None:
@@ -290,6 +406,17 @@ class QuboStrategy:
         )
         self._ranked_is_exact = True
         candidate = self._next_unseen(remaining_transactions)
+        elapsed = time.perf_counter() - started
+        self._fallback_wall_seconds += elapsed
+        self._fallback_records.append(
+            {
+                "call_index": self._fallback_calls - 1,
+                "enumerated_count": len(sequences),
+                "scored_count": len(sequences),
+                "count_exact": True,
+                "wall_seconds": elapsed,
+            }
+        )
         return candidate, candidate is None
 
     def propose(self, remaining_transactions: int) -> Candidate | None:
@@ -364,7 +491,7 @@ class QuboStrategy:
 
         if not self._initialized:
             raise RuntimeError("strategy is not initialized")
-        return {
+        evidence = {
             "schema_version": "1.0",
             "strategy": self.name,
             "seed": self._seed,
@@ -377,10 +504,16 @@ class QuboStrategy:
                 "reads": self._solver_reads,
                 "sweeps": self._solver_sweeps,
                 "wall_seconds": self._solver_wall_seconds,
+                "compute_wall_seconds": (
+                    self._solver_wall_seconds + self._fallback_wall_seconds
+                ),
                 "decoded_feasible": self._decoded_feasible,
                 "decoded_infeasible": self._decoded_infeasible,
             },
             "fallback": {
+                "calls": self._fallback_calls,
+                "wall_seconds": self._fallback_wall_seconds,
+                "records": list(self._fallback_records),
                 "exact_fallbacks": self._exact_fallbacks,
                 "feasible_count_exact": self._feasible_count_exact,
                 "feasible_space_count": self._feasible_space_count,
@@ -388,3 +521,4 @@ class QuboStrategy:
             },
             "builds": list(self._build_evidence),
         }
+        return json.loads(json.dumps(evidence, allow_nan=False))

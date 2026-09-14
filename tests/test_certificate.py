@@ -40,8 +40,10 @@ from qprover.certificate import (
     render_markdown,
     write_certificate,
     write_events,
+    write_markdown,
 )
 from qprover.models import ConfirmationStatus, Outcome
+from qprover.safeio import SafeOutputError
 
 H0 = "0" * 64
 H1 = "1" * 64
@@ -354,6 +356,95 @@ def test_complete_confirmed_certificate_validates_with_pydantic_and_schema(
     schema = json.loads(Path("schemas/certificate.schema.json").read_text())
     jsonschema.Draft202012Validator.check_schema(schema)
     jsonschema.validate(data, schema)
+
+
+@pytest.mark.parametrize("field", ["schema_version", "confirmation_policy"])
+def test_raw_certificate_requires_explicit_version_and_confirmation_policy(
+    tmp_path: Path, field: str
+) -> None:
+    data = json.loads(_confirmed(tmp_path).canonical_json())
+    data.pop(field)
+    schema = json.loads(Path("schemas/certificate.schema.json").read_text())
+
+    with pytest.raises(ValidationError, match=field):
+        ProofCertificate.model_validate(data)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(data, schema)
+
+
+@pytest.mark.parametrize("kind", ["certificate", "markdown", "events"])
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_artifact_writers_reject_linked_targets(
+    tmp_path: Path, kind: str, link_kind: str
+) -> None:
+    certificate = create_certificate(**_base(tmp_path))
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    destination = tmp_path / f"{kind}.out"
+    if link_kind == "symlink":
+        destination.symlink_to(victim)
+    else:
+        destination.hardlink_to(victim)
+
+    with pytest.raises(SafeOutputError):
+        if kind == "certificate":
+            write_certificate(certificate, destination)
+        elif kind == "markdown":
+            write_markdown(certificate, destination)
+        else:
+            write_events(
+                (
+                    EvidenceEvent(
+                        run_id="run-7",
+                        sequence=1,
+                        timestamp=datetime(2026, 9, 14, tzinfo=UTC),
+                        kind="confirmation",
+                        details={"status": "NOT_CONFIRMED"},
+                    ),
+                ),
+                destination,
+            )
+    assert victim.read_text() == "untouched"
+
+
+def test_artifact_writer_rejects_parent_symlink_and_path_traversal(
+    tmp_path: Path,
+) -> None:
+    certificate = create_certificate(**_base(tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SafeOutputError):
+        write_certificate(certificate, linked / "certificate.json")
+    with pytest.raises(SafeOutputError, match="traversal"):
+        write_markdown(certificate, tmp_path / "safe" / ".." / "escaped.md")
+
+
+def test_artifact_writer_atomically_replaces_one_regular_unlinked_target(
+    tmp_path: Path,
+) -> None:
+    certificate = create_certificate(**_base(tmp_path))
+    destination = tmp_path / "certificate.json"
+    destination.write_text("old")
+
+    write_certificate(certificate, destination)
+
+    assert ProofCertificate.model_validate_json(destination.read_text()) == certificate
+
+
+def test_economic_impact_requires_executed_accounting_in_model_and_schema(
+    tmp_path: Path,
+) -> None:
+    data = json.loads(_confirmed(tmp_path).canonical_json())
+    data["impact"]["executed"] = False
+    schema = json.loads(Path("schemas/certificate.schema.json").read_text())
+
+    with pytest.raises(ValidationError, match="executed"):
+        ImpactEvidence.model_validate(data["impact"])
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(data, schema)
 
 
 @pytest.mark.parametrize(
@@ -678,17 +769,6 @@ def test_json_schema_rejects_claimed_confirmation_with_failed_replay(
     [
         {"source_kind": "static_lead"},
         {"final_evaluation_outcome": Outcome.PASS},
-        {
-            "impact": ImpactEvidence(
-                attacker_observation="attacker_assets",
-                protocol_observation="protocol_assets",
-                attacker_delta=10**19,
-                protocol_delta=-(10**19),
-                unit="wei",
-                admissible=True,
-                executed=False,
-            )
-        },
     ],
 )
 def test_confirmation_rejects_unexecuted_or_incomplete_evidence(

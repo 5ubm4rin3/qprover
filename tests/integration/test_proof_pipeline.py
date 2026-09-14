@@ -52,7 +52,7 @@ def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
         ROOT / "benchmarks/scenario_reentrancy_a.json",
         strategy=_strategy(),
         seed=7,
-        output=tmp_path / "a",
+        output=tmp_path / "shared",
         workspace_root=ROOT,
         limits=limits,
     )
@@ -60,12 +60,21 @@ def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
         ROOT / "benchmarks/scenario_reentrancy_b.json",
         strategy=_strategy(),
         seed=7,
-        output=tmp_path / "b",
+        output=tmp_path / "shared",
         workspace_root=ROOT,
         limits=limits,
     )
 
     assert vulnerable.status is ConfirmationStatus.CONFIRMED
+    assert vulnerable.output_root.parent == tmp_path / "shared" / "runs"
+    assert vulnerable.result_path == vulnerable.output_root / "result.json"
+    assert vulnerable.output_root.stat().st_mode & 0o777 == 0o700
+    published = json.loads(vulnerable.result_path.read_text())
+    assert published["disposition"] == "confirmed"
+    assert (
+        published["artifacts"]["certificate"]["sha256"]
+        == hashlib.sha256(vulnerable.certificate_path.read_bytes()).hexdigest()
+    )
     assert vulnerable.search_run is not None
     assert vulnerable.search_run.strategy_stats.name == "qubo"
     assert vulnerable.search_run.candidates_evaluated == 1
@@ -91,7 +100,11 @@ def test_same_qubo_configuration_confirms_only_vulnerable_reentrancy_twin(
     )
 
     assert sound.status is ConfirmationStatus.NOT_CONFIRMED
+    assert sound.output_root != vulnerable.output_root
+    assert sound.result_path == sound.output_root / "result.json"
+    assert json.loads(sound.result_path.read_text())["disposition"] == "not_confirmed"
     assert sound.certificate_path is None
+    assert not (sound.output_root / "certificate.json").exists()
     assert sound.search_run is not None
     assert sound.search_run.strategy_stats.name == "qubo"
     assert sound.search_run.candidates_evaluated == 1
@@ -162,3 +175,103 @@ def test_pipeline_normalizes_a_tampered_live_certificate_field_to_not_confirmed(
     assert result.certificate_path is None
     assert result.error is not None
     assert "delta does not match" in result.error
+
+
+def test_late_render_failure_publishes_only_a_failed_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qprover.pipeline as pipeline
+
+    def fail_render(*args, **kwargs):
+        del args, kwargs
+        raise OSError("late render failure")
+
+    monkeypatch.setattr(pipeline, "write_markdown", fail_render)
+    result = prove_violation(
+        ROOT / "benchmarks/scenario_reentrancy_a.json",
+        strategy=_strategy(),
+        seed=7,
+        output=tmp_path / "late",
+        workspace_root=ROOT,
+        limits=SearchLimits(
+            max_sequence_length=3,
+            transaction_budget=3,
+            candidate_budget=1,
+            wall_seconds=20,
+        ),
+    )
+
+    assert result.status is ConfirmationStatus.NOT_CONFIRMED
+    assert result.certificate_path is None
+    assert result.markdown_path is None
+    assert result.poc_path is None
+    assert result.result_path == result.output_root / "result.json"
+    assert tuple(path.name for path in result.output_root.iterdir()) == ("result.json",)
+    published = json.loads(result.result_path.read_text())
+    assert published["disposition"] == "failed"
+    assert published["artifacts"] == {}
+    assert "late render failure" in published["error"]
+
+
+def test_run_id_collision_never_reuses_or_overwrites_published_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qprover.pipeline as pipeline
+
+    run_id = "a" * 32
+    collision = tmp_path / "collision" / "runs" / run_id
+    collision.mkdir(parents=True)
+    marker = collision / "marker"
+    marker.write_text("immutable")
+    monkeypatch.setattr(pipeline, "_new_run_id", lambda: run_id)
+
+    result = prove_violation(
+        ROOT / "benchmarks/scenario_reentrancy_b.json",
+        strategy=_strategy(),
+        seed=7,
+        output=tmp_path / "collision",
+        workspace_root=ROOT,
+        limits=SearchLimits(
+            max_sequence_length=3,
+            transaction_budget=3,
+            candidate_budget=1,
+            wall_seconds=20,
+        ),
+    )
+
+    assert result.status is ConfirmationStatus.NOT_CONFIRMED
+    assert result.result_path is None
+    assert result.certificate_path is None
+    assert "already exists" in result.error
+    assert marker.read_text() == "immutable"
+    assert not tuple((tmp_path / "collision" / "runs").glob("*.staging"))
+
+
+def test_partial_publication_failure_removes_private_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qprover.pipeline as pipeline
+
+    def fail_publish(*args, **kwargs):
+        del args, kwargs
+        raise OSError("rename denied")
+
+    monkeypatch.setattr(pipeline, "publish_private_directory", fail_publish)
+    result = prove_violation(
+        ROOT / "benchmarks/scenario_reentrancy_b.json",
+        strategy=_strategy(),
+        seed=7,
+        output=tmp_path / "partial",
+        workspace_root=ROOT,
+        limits=SearchLimits(
+            max_sequence_length=3,
+            transaction_budget=3,
+            candidate_budget=1,
+            wall_seconds=20,
+        ),
+    )
+
+    assert result.status is ConfirmationStatus.NOT_CONFIRMED
+    assert result.result_path is None
+    assert "publication OSError" in result.error
+    assert not tuple((tmp_path / "partial" / "runs").iterdir())

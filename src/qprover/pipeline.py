@@ -6,10 +6,11 @@ import hashlib
 import importlib.metadata
 import json
 import math
-import os
+import secrets
 import subprocess
-import tempfile
+import uuid
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -64,6 +65,14 @@ from qprover.models import (
 )
 from qprover.parameters import expand_action_variants
 from qprover.replay import cold_verify, foundry_poc_source, generate_foundry_poc
+from qprover.runtime import ExecutionRuntime, current_runtime
+from qprover.safeio import (
+    SafeOutputError,
+    create_private_directory,
+    publish_private_directory,
+    remove_private_directory,
+    safe_atomic_write,
+)
 from qprover.search.base import SearchStrategy, candidate_is_valid, thaw_json
 from qprover.search.bqm import SearchProblem
 from qprover.search.controller import SearchController, SearchEvent, SearchRun
@@ -102,6 +111,8 @@ class ProofBundleResult:
     qubo_path: Path | None = None
     certificate_sha256: str | None = None
     minimized_steps: int | None = None
+    result_path: Path | None = None
+    run_id: str | None = None
     error: str | None = None
 
 
@@ -208,7 +219,9 @@ def prepare_search(
             for position in range(manifest.limits.max_sequence_length)
         ),
         variants=expand_action_variants(manifest, report),
-        hypothesis_sequences=tuple(hypothesis.action_ids for hypothesis in hypotheses),
+        hypothesis_sequences=tuple(
+            sorted({hypothesis.action_ids for hypothesis in hypotheses})
+        ),
     )
     provenance: Mapping[str, object] = MappingProxyType(
         {
@@ -220,6 +233,12 @@ def prepare_search(
                             hypothesis.evidence_hash
                             for hypothesis in hypotheses
                             if action_id in hypothesis.action_ids
+                        ),
+                        *tuple(
+                            item
+                            for hypothesis in hypotheses
+                            if action_id in hypothesis.action_ids
+                            for item in hypothesis.provenance
                         ),
                     )
                     for action_id in action_ids
@@ -252,6 +271,7 @@ def run_search(
     seed: int,
     limits: SearchLimits | None = None,
     anvil_factory: Callable[[], LocalAnvil] = LocalAnvil,
+    run_id: str | None = None,
 ) -> SearchExecution:
     """Prepare and execute one strategy entirely against an owned local Anvil."""
 
@@ -262,11 +282,20 @@ def run_search(
     started_at = datetime.now(UTC)
     with anvil_factory() as anvil:
         evaluator = ScenarioEvaluator(manifest, bundle, anvil)
-        controller = SearchController(
-            candidate_validator=lambda candidate: candidate_is_valid(
-                prepared.problem, candidate
+
+        def validator(candidate: Candidate) -> bool:
+            return candidate_is_valid(prepared.problem, candidate)
+
+        if run_id is not None:
+            if not run_id or any(
+                character not in "0123456789abcdef" for character in run_id
+            ):
+                raise ValueError("run_id must be nonempty lowercase hexadecimal")
+            controller = SearchController(
+                candidate_validator=validator, run_id_factory=lambda: run_id
             )
-        )
+        else:
+            controller = SearchController(candidate_validator=validator)
         run = controller.run(
             strategy,
             evaluator,
@@ -319,22 +348,16 @@ def _trace_hash(record: Mapping[str, object]) -> str:
 
 
 def _atomic_json(value: Mapping[str, object], output: Path) -> Path:
-    destination = output.resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    payload = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
     )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+    return safe_atomic_write(output, payload)
 
 
 def _revision(workspace_root: Path) -> str:
@@ -734,7 +757,66 @@ def _admissible_violation(
     )
 
 
-def prove_violation(
+def _new_run_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _new_staging_directory(output_base: Path, run_id: str) -> Path:
+    return create_private_directory(
+        output_base / "runs" / f".{run_id}.{secrets.token_hex(12)}.staging"
+    )
+
+
+def _publish_run(
+    *,
+    output_base: Path,
+    staging: Path,
+    run_id: str,
+    status: ConfirmationStatus,
+    disposition: str,
+    error: str | None,
+    artifacts: Mapping[str, Path],
+) -> tuple[Path, Path, Mapping[str, Path]]:
+    """Write the canonical result last, then atomically expose one run directory."""
+
+    if disposition not in {"confirmed", "not_confirmed", "failed"}:
+        raise ValueError("invalid publication disposition")
+    artifact_records: dict[str, dict[str, str]] = {}
+    relative_paths: dict[str, Path] = {}
+    for label, path in sorted(artifacts.items()):
+        try:
+            relative = path.relative_to(staging)
+        except ValueError as exc:
+            raise SafeOutputError("artifact is outside private run staging") from exc
+        if ".." in relative.parts or not path.is_file() or path.is_symlink():
+            raise SafeOutputError("artifact is not a safe staged regular file")
+        relative_paths[label] = relative
+        artifact_records[label] = {
+            "path": relative.as_posix(),
+            "sha256": _digest(path.read_bytes()),
+        }
+    result = {
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "confirmation_status": status.value,
+        "disposition": disposition,
+        "error": error,
+        "artifacts": artifact_records,
+    }
+    safe_atomic_write(
+        staging / "result.json",
+        json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n",
+        replace=False,
+    )
+    destination = publish_private_directory(staging, output_base / "runs" / run_id)
+    published = MappingProxyType(
+        {label: destination / relative for label, relative in relative_paths.items()}
+    )
+    return destination, destination / "result.json", published
+
+
+def _prove_violation_active(
     manifest_path: Path,
     *,
     strategy: SearchStrategy,
@@ -751,8 +833,9 @@ def prove_violation(
 
     root = workspace_root.resolve()
     manifest_file = manifest_path.resolve()
-    output_root = output.resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
+    output_base = output if output.is_absolute() else Path.cwd() / output
+    publication_run_id = _new_run_id()
+    staging: Path | None = None
     search_execution: SearchExecution | None = None
     events_path: Path | None = None
     qubo_path: Path | None = None
@@ -762,6 +845,12 @@ def prove_violation(
     minimization: MinimizationResult | None = None
     evidence_events: tuple[EvidenceEvent, ...] = ()
     try:
+        staging = _new_staging_directory(output_base, publication_run_id)
+        runtime = current_runtime()
+        if runtime is not None:
+            runtime.register(
+                lambda owned_staging=staging: remove_private_directory(owned_staging)
+            )
         manifest_file.relative_to(root)
         manifest = load_manifest(manifest_file)
         with build_target(manifest) as bundle:
@@ -771,12 +860,13 @@ def prove_violation(
                 strategy=strategy,
                 seed=seed,
                 limits=limits,
+                run_id=publication_run_id,
             )
             run = search_execution.search_run
             evidence_events = monotonic_events_to_evidence(
                 run.events, search_execution.started_at
             )
-            events_path = write_events(evidence_events, output_root / "events.jsonl")
+            events_path = write_events(evidence_events, staging / "events.jsonl")
             if search_execution.strategy_evidence is not None:
                 objective_provenance = thaw_json(
                     search_execution.prepared.objective_provenance
@@ -793,15 +883,30 @@ def prove_violation(
                     ),
                     "prepared_problem_sha256": search_execution.prepared.problem_sha256,
                 }
-                qubo_path = _atomic_json(qubo_evidence, output_root / "qubo.json")
+                qubo_path = _atomic_json(qubo_evidence, staging / "qubo.json")
             if run.violation is None:
+                artifact_paths = {"events": events_path}
+                if qubo_path is not None:
+                    artifact_paths["qubo"] = qubo_path
+                published_root, result_path, published = _publish_run(
+                    output_base=output_base,
+                    staging=staging,
+                    run_id=publication_run_id,
+                    status=ConfirmationStatus.NOT_CONFIRMED,
+                    disposition="not_confirmed",
+                    error=None,
+                    artifacts=artifact_paths,
+                )
+                staging = None
                 return ProofBundleResult(
                     status=ConfirmationStatus.NOT_CONFIRMED,
-                    output_root=output_root,
+                    output_root=published_root,
                     search_run=run,
                     problem_sha256=search_execution.prepared.problem_sha256,
-                    events_path=events_path,
-                    qubo_path=qubo_path,
+                    events_path=published["events"],
+                    qubo_path=published.get("qubo"),
+                    result_path=result_path,
+                    run_id=publication_run_id,
                 )
             evaluated = next(
                 item for item in run.evaluations if item.candidate == run.violation
@@ -853,7 +958,7 @@ def prove_violation(
                     manifest=manifest,
                     manifest_path=manifest_file,
                     workspace_root=root,
-                    output_root=output_root,
+                    output_root=staging,
                     bundle=bundle,
                     run=run,
                     generated_at=generated_at,
@@ -869,7 +974,7 @@ def prove_violation(
                     manifest=manifest,
                     manifest_path=manifest_file,
                     workspace_root=root,
-                    output_root=output_root,
+                    output_root=staging,
                     bundle=bundle,
                     run=run,
                     generated_at=generated_at,
@@ -882,11 +987,9 @@ def prove_violation(
                 draft = create_certificate(**certificate_data)
 
             poc_path = generate_foundry_poc(
-                draft, manifest, output_root, workspace_root=root
+                draft, manifest, staging, workspace_root=root
             )
-            certificate_path = write_certificate(
-                draft, output_root / "certificate.json"
-            )
+            certificate_path = write_certificate(draft, staging / "certificate.json")
             proof_events = list(evidence_events)
 
             def record(kind: str, details: Mapping[str, object]) -> None:
@@ -931,22 +1034,50 @@ def prove_violation(
                 {"status": verification.confirmation_status.value},
             )
             evidence_events = tuple(proof_events)
-            events_path = write_events(evidence_events, output_root / "events.jsonl")
+            events_path = write_events(evidence_events, staging / "events.jsonl")
             markdown_path = write_markdown(
-                verification.certificate, output_root / "certificate.md"
+                verification.certificate, staging / "certificate.md"
             )
+            artifact_paths = {
+                "certificate": certificate_path,
+                "markdown": markdown_path,
+                "poc": poc_path,
+                "events": events_path,
+            }
+            if qubo_path is not None:
+                artifact_paths["qubo"] = qubo_path
+            published_root, result_path, published = _publish_run(
+                output_base=output_base,
+                staging=staging,
+                run_id=publication_run_id,
+                status=verification.confirmation_status,
+                disposition=(
+                    "confirmed"
+                    if verification.confirmation_status is ConfirmationStatus.CONFIRMED
+                    else "not_confirmed"
+                ),
+                error=(
+                    None
+                    if verification.confirmation_status is ConfirmationStatus.CONFIRMED
+                    else "cold replay did not satisfy confirmation gates"
+                ),
+                artifacts=artifact_paths,
+            )
+            staging = None
             return ProofBundleResult(
                 status=verification.confirmation_status,
-                output_root=output_root,
+                output_root=published_root,
                 search_run=run,
                 problem_sha256=search_execution.prepared.problem_sha256,
-                certificate_path=certificate_path,
-                markdown_path=markdown_path,
-                poc_path=poc_path,
-                events_path=events_path,
-                qubo_path=qubo_path,
+                certificate_path=published["certificate"],
+                markdown_path=published["markdown"],
+                poc_path=published["poc"],
+                events_path=published["events"],
+                qubo_path=published.get("qubo"),
                 certificate_sha256=verification.certificate.certificate_sha256,
                 minimized_steps=minimization.minimized_step_count,
+                result_path=result_path,
+                run_id=publication_run_id,
                 error=(
                     None
                     if verification.confirmation_status is ConfirmationStatus.CONFIRMED
@@ -954,9 +1085,58 @@ def prove_violation(
                 ),
             )
     except Exception as error:  # normalize a failed proof gate, never a safe verdict
+        normalized_error = f"{type(error).__name__}: {error}"
+        if staging is not None:
+            try:
+                remove_private_directory(staging)
+            except Exception as cleanup_error:
+                normalized_error += (
+                    f"; cleanup {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            staging = None
+        failure_staging: Path | None = None
+        try:
+            failure_staging = _new_staging_directory(output_base, publication_run_id)
+            published_root, result_path, _ = _publish_run(
+                output_base=output_base,
+                staging=failure_staging,
+                run_id=publication_run_id,
+                status=ConfirmationStatus.NOT_CONFIRMED,
+                disposition="failed",
+                error=normalized_error,
+                artifacts={},
+            )
+        except Exception as publication_error:
+            if failure_staging is not None:
+                with suppress(Exception):
+                    remove_private_directory(failure_staging)
+            return ProofBundleResult(
+                status=ConfirmationStatus.NOT_CONFIRMED,
+                output_root=output_base,
+                search_run=(
+                    search_execution.search_run
+                    if search_execution is not None
+                    else None
+                ),
+                problem_sha256=(
+                    search_execution.prepared.problem_sha256
+                    if search_execution is not None
+                    else None
+                ),
+                minimized_steps=(
+                    minimization.minimized_step_count
+                    if minimization is not None
+                    else None
+                ),
+                run_id=publication_run_id,
+                error=(
+                    f"{normalized_error}; publication "
+                    f"{type(publication_error).__name__}: {publication_error}"
+                ),
+            )
         return ProofBundleResult(
             status=ConfirmationStatus.NOT_CONFIRMED,
-            output_root=output_root,
+            output_root=published_root,
             search_run=(
                 search_execution.search_run if search_execution is not None else None
             ),
@@ -965,15 +1145,34 @@ def prove_violation(
                 if search_execution is not None
                 else None
             ),
-            certificate_path=certificate_path,
-            markdown_path=markdown_path,
-            poc_path=poc_path,
-            events_path=events_path,
-            qubo_path=qubo_path,
             minimized_steps=(
                 minimization.minimized_step_count if minimization is not None else None
             ),
-            error=f"{type(error).__name__}: {error}",
+            result_path=result_path,
+            run_id=publication_run_id,
+            error=normalized_error,
+        )
+
+
+def prove_violation(
+    manifest_path: Path,
+    *,
+    strategy: SearchStrategy,
+    seed: int,
+    output: Path,
+    workspace_root: Path,
+    limits: SearchLimits | None = None,
+) -> ProofBundleResult:
+    """Execute one proof inside the process/temp cancellation boundary."""
+
+    with ExecutionRuntime.activate():
+        return _prove_violation_active(
+            manifest_path,
+            strategy=strategy,
+            seed=seed,
+            output=output,
+            workspace_root=workspace_root,
+            limits=limits,
         )
 
 

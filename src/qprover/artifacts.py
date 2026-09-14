@@ -17,6 +17,7 @@ from typing import Any, Self
 
 from qprover.manifest import canonical_manifest_hash
 from qprover.models import TargetManifest
+from qprover.runtime import current_runtime
 
 BUILD_COMMAND = (
     "forge",
@@ -149,14 +150,20 @@ def _run(
     overrides: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            command,
-            cwd=root,
-            env=_scrubbed_environment(overrides),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        runtime = current_runtime()
+        if runtime is not None:
+            result = runtime.run(
+                command, cwd=root, env=_scrubbed_environment(overrides)
+            )
+        else:
+            result = subprocess.run(
+                command,
+                cwd=root,
+                env=_scrubbed_environment(overrides),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
     except OSError as error:
         raise ArtifactError(f"cannot execute {command[0]}: {error}") from error
     if result.returncode:

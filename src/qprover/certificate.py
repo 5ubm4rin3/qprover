@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -25,6 +23,7 @@ from pydantic import (
 )
 
 from qprover.models import ConfirmationStatus, Outcome, StrictModel
+from qprover.safeio import safe_atomic_write
 from qprover.search.base import freeze_json_mapping, thaw_json
 
 Sha256 = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -271,6 +270,8 @@ class ImpactEvidence(StrictModel):
         )
         if self.applicability == "economic" and any(item is None for item in fields):
             raise ValueError("economic impact requires complete accounting fields")
+        if self.applicability == "economic" and not self.executed:
+            raise ValueError("economic impact requires executed accounting")
         if self.applicability == "not_applicable" and (
             any(item is not None for item in fields) or self.admissible or self.executed
         ):
@@ -483,7 +484,7 @@ class EvidenceEvent(StrictModel):
 
 
 class ProofCertificate(StrictModel):
-    schema_version: Literal["1.1"] = "1.1"
+    schema_version: Literal["1.1"]
     run_id: StrictStr = Field(min_length=1)
     generated_at: datetime
     confirmation_status: Literal[
@@ -491,9 +492,7 @@ class ProofCertificate(StrictModel):
     ]
     source_kind: Literal["executed", "static_lead"]
     final_evaluation_outcome: Outcome
-    confirmation_policy: Literal[
-        "invariant_and_economic_impact", "invariant_violation"
-    ] = "invariant_and_economic_impact"
+    confirmation_policy: Literal["invariant_and_economic_impact", "invariant_violation"]
     target: TargetEvidence
     artifacts: tuple[ArtifactEvidence, ...] = Field(min_length=1)
     build: BuildEvidence
@@ -600,7 +599,9 @@ class ProofCertificate(StrictModel):
             item for item in self.initial_invariants if item.id == self.invariant.id
         )
         if (
-            len(initial_matches) != 1
+            len({item.id for item in self.initial_invariants})
+            != len(self.initial_invariants)
+            or len(initial_matches) != 1
             or not initial_matches[0].evaluated
             or initial_matches[0].value is not True
             or initial_matches[0].expression != self.invariant.expression
@@ -751,6 +752,8 @@ def create_certificate(**data: object) -> ProofCertificate:
 
     return _finalize_certificate(
         {
+            "schema_version": "1.1",
+            "confirmation_policy": "invariant_and_economic_impact",
             **data,
             "confirmation_status": ConfirmationStatus.NOT_CONFIRMED,
             "replay": ReplayEvidence(
@@ -793,21 +796,7 @@ def write_certificate(certificate: ProofCertificate, output: Path) -> Path:
     """Atomically replace a certificate with canonical validated JSON."""
 
     validated = ProofCertificate.model_validate(certificate.model_dump(mode="json"))
-    destination = output.resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(validated.canonical_json())
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+    return safe_atomic_write(output, validated.canonical_json())
 
 
 def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str:
@@ -850,21 +839,7 @@ def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str
 
 
 def write_markdown(certificate: ProofCertificate, output: Path) -> Path:
-    destination = output.resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(render_markdown(certificate))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+    return safe_atomic_write(output, render_markdown(certificate))
 
 
 def write_events(events: tuple[EvidenceEvent, ...], output: Path) -> Path:
@@ -877,22 +852,10 @@ def write_events(events: tuple[EvidenceEvent, ...], output: Path) -> Path:
         range(1, len(validated) + 1)
     ):
         raise ValueError("event sequence numbers must be consecutive")
-    destination = output.resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    content = "".join(
+        _canonical(event.model_dump(mode="json")) + "\n" for event in validated
     )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            for event in validated:
-                handle.write(_canonical(event.model_dump(mode="json")) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
+    return safe_atomic_write(output, content)
 
 
 __all__ = [

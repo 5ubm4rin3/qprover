@@ -17,6 +17,8 @@ from contextlib import suppress
 from types import MappingProxyType
 from typing import Any, Self
 
+from qprover.runtime import current_runtime
+
 
 class EVMError(RuntimeError):
     """A local process, guarded RPC, snapshot, or transaction failure."""
@@ -139,6 +141,7 @@ class LocalAnvil:
         self._accounts: tuple[str, ...] = ()
         self._baseline_snapshot_id: str | None = None
         self._metadata: Mapping[str, object] = MappingProxyType({})
+        self._runtime_cleanup_token: int | None = None
 
     @property
     def rpc_url(self) -> str:
@@ -221,6 +224,9 @@ class LocalAnvil:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
+            runtime = current_runtime()
+            if runtime is not None:
+                self._runtime_cleanup_token = runtime.register(self.close)
         except OSError as error:
             self._process = None
             self._port = None
@@ -290,6 +296,10 @@ class LocalAnvil:
             self._clear_runtime()
 
     def _clear_runtime(self) -> None:
+        runtime = current_runtime()
+        if runtime is not None and self._runtime_cleanup_token is not None:
+            runtime.unregister(self._runtime_cleanup_token)
+        self._runtime_cleanup_token = None
         self._process = None
         self._port = None
         self._accounts = ()
