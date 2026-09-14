@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import qprover.safeio as safeio
 from qprover.certificate import ProofCertificate
 from qprover.models import ConfirmationStatus, SearchLimits
 from qprover.pipeline import prove_violation
@@ -297,3 +298,58 @@ def test_partial_publication_failure_removes_private_staging(
     assert result.result_path is None
     assert "publication OSError" in result.error
     assert not tuple((tmp_path / "partial" / "runs").iterdir())
+
+
+def test_post_rename_poison_never_returns_artifacts_and_publishes_failed_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_rename = safeio.os.rename
+    poisoned = False
+
+    def rename_then_poison(source, target, **kwargs):
+        nonlocal poisoned
+        original_rename(source, target, **kwargs)
+        if not poisoned and str(source).endswith(".staging"):
+            poisoned = True
+            parent_fd = kwargs["dst_dir_fd"]
+            file_fd = safeio.os.open(
+                f"{target}/result.json", safeio.os.O_WRONLY, dir_fd=parent_fd
+            )
+            try:
+                safeio.os.write(file_fd, b"poison")
+                safeio.os.ftruncate(file_fd, len(b"poison"))
+            finally:
+                safeio.os.close(file_fd)
+
+    monkeypatch.setattr(safeio.os, "rename", rename_then_poison)
+    output = tmp_path / "poison"
+    result = prove_violation(
+        ROOT / "benchmarks/scenario_reentrancy_b.json",
+        strategy=_strategy(),
+        seed=7,
+        output=output,
+        workspace_root=ROOT,
+        limits=SearchLimits(
+            max_sequence_length=3,
+            transaction_budget=3,
+            candidate_budget=1,
+            wall_seconds=20,
+        ),
+    )
+
+    assert poisoned is True
+    assert result.status is ConfirmationStatus.NOT_CONFIRMED
+    assert result.error is not None and "PublicationIntegrityError" in result.error
+    assert result.certificate_path is None
+    assert result.markdown_path is None
+    assert result.poc_path is None
+    assert result.events_path is None
+    assert result.qubo_path is None
+    assert result.durability_warning is None
+    assert result.result_path == result.output_root / "result.json"
+    persisted = json.loads(result.result_path.read_text())
+    assert persisted["disposition"] == "failed"
+    assert persisted["confirmation_status"] == "NOT_CONFIRMED"
+    assert persisted["artifacts"] == {}
+    assert tuple(path.name for path in result.output_root.iterdir()) == ("result.json",)
+    assert not tuple((output / "runs").glob(".*.integrity-failed"))

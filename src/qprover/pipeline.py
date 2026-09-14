@@ -122,7 +122,7 @@ class ProofBundleResult:
 
 class ProofRunArtifact(StrictModel):
     path: StrictStr = Field(min_length=1)
-    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: StrictStr = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("path")
     @classmethod
@@ -866,11 +866,7 @@ def _new_staging_directory(
     runtime = current_runtime()
     if runtime is None:
         return lease.create(), None
-    owned, token = runtime.own_path(
-        path,
-        lambda target: lease.create(),
-        lambda target: lease.cleanup(),
-    )
+    owned, token = runtime.own_resource(lease.create, lease.cleanup)
     return owned, token
 
 
@@ -882,24 +878,14 @@ def _release_staging(staging: PrivateDirectoryLease, cleanup_token: int | None) 
     staging.cleanup()
 
 
-def _warning(previous: str | None, message: str) -> str:
-    return f"{previous}; {message}" if previous else message
-
-
 def _release_committed_staging(
     staging: PrivateDirectoryLease,
     cleanup_token: int | None,
     durability_warning: str | None,
 ) -> str | None:
-    """Finalize ownership after rename without revoking the committed result."""
+    """Close ownership after the lease's final integrity handoff."""
 
-    try:
-        _release_staging(staging, cleanup_token)
-    except Exception as error:
-        return _warning(
-            durability_warning,
-            f"post-rename ownership cleanup {type(error).__name__}: {error}",
-        )
+    _release_staging(staging, cleanup_token)
     return durability_warning
 
 

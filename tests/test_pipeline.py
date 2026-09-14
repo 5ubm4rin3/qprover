@@ -174,8 +174,10 @@ def test_qubo_json_writer_rejects_links_and_nonfinite_data(tmp_path: Path) -> No
     assert victim.read_text() == "untouched"
 
 
-def _run_artifact(path: str = "certificate.json") -> dict[str, str]:
-    return {"path": path, "sha256": "a" * 64}
+def _run_artifact(
+    path: str = "certificate.json", sha256: str = "a" * 64
+) -> dict[str, str]:
+    return {"path": path, "sha256": sha256}
 
 
 def _valid_run_results() -> tuple[dict[str, object], ...]:
@@ -256,6 +258,8 @@ def test_proof_run_result_model_and_schema_reject_exhaustive_invalid_matrix() ->
         (failed, {"error": None}),
         (failed, {"error": ""}),
         (failed, {"error": "line one\nline two"}),
+        (failed, {"error": "terminal newline\n"}),
+        (failed, {"error": "embedded\tcontrol"}),
         (failed, {"artifacts": {"events": _run_artifact("events.jsonl")}}),
     ):
         case = deepcopy(template)
@@ -283,9 +287,16 @@ def test_proof_run_result_model_and_schema_reject_exhaustive_invalid_matrix() ->
         "C:/evidence",
         "file:evidence",
         "mailto:proof@example.invalid",
+        "events.jsonl\n",
+        "events\x00.jsonl",
+        "events\x7f.jsonl",
     ):
         case = deepcopy(not_confirmed)
         case["artifacts"] = {"events": _run_artifact(path)}
+        invalid.append(case)
+    for digest in ("a" * 63, "a" * 65, "a" * 64 + "\n"):
+        case = deepcopy(not_confirmed)
+        case["artifacts"] = {"events": _run_artifact("events.jsonl", digest)}
         invalid.append(case)
     case = deepcopy(not_confirmed)
     case["artifacts"] = {"certificate": _run_artifact()}

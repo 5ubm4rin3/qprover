@@ -127,9 +127,7 @@ def _evaluate(node: ast.AST, values: Mapping[str, int | bool]) -> int | bool:
         right = _evaluate(node.right, values)
         if isinstance(node.op, ast.Pow):
             if not isinstance(right, int) or not 0 <= right <= _MAX_EXPONENT:
-                raise ExpressionError(
-                    f"exponent must be between 0 and {_MAX_EXPONENT}"
-                )
+                raise ExpressionError(f"exponent must be between 0 and {_MAX_EXPONENT}")
             return operator.pow(left, right)
         if (
             isinstance(node.op, (ast.LShift, ast.RShift))

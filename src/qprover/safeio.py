@@ -7,9 +7,10 @@ import hashlib
 import os
 import secrets
 import shutil
+import signal
 import stat
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -19,12 +20,57 @@ class SafeOutputError(RuntimeError):
     """An output path violates the trusted local publication boundary."""
 
 
+class StaleOwnershipError(SafeOutputError):
+    """An owned pathname now names another object and must be left untouched."""
+
+    drop_cleanup_ownership = True
+
+
+class PublicationIntegrityError(SafeOutputError):
+    """A post-rename integrity check failed; no destination is usable."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        quarantined: bool,
+        ambiguous_visible_path: bool,
+        quarantine_path: Path | None,
+    ) -> None:
+        self.destination = None
+        self.quarantined = quarantined
+        self.ambiguous_visible_path = ambiguous_visible_path
+        self.quarantine_path = quarantine_path
+        super().__init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationOutcome:
     """The post-rename state; durability warnings cannot revoke a committed run."""
 
     destination: Path
     durability_warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TreeSnapshot:
+    hashes: Mapping[str, str]
+    identities: Mapping[str, tuple[int, ...]]
+
+
+@contextmanager
+def _blocked_termination_signals() -> Iterator[None]:
+    """Defer cooperative termination across the final namespace handoff."""
+
+    if not hasattr(signal, "pthread_sigmask"):
+        yield
+        return
+    blocked = {signal.SIGINT, signal.SIGTERM}
+    prior = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, prior)
 
 
 def _absolute_lexical(path: Path) -> Path:
@@ -178,6 +224,7 @@ def _expected_paths(
             or has_uri_scheme
             or "\\" in raw
             or "://" in raw
+            or any(ord(character) < 32 or ord(character) == 127 for character in raw)
             or any(part in {"", ".", ".."} for part in path.parts)
             or path.as_posix() != raw
         ):
@@ -203,7 +250,10 @@ class PrivateDirectoryLease:
         self._root_fd: int | None = None
         self._parent_identity: tuple[int, int] | None = None
         self._root_identity: tuple[int, int] | None = None
-        self._published_name: str | None = None
+        self._entry_name = self.path.name
+        self._committed = False
+        self._published_integrity_complete = False
+        self._quarantined = False
 
     def create(self) -> PrivateDirectoryLease:
         if self._parent_fd is not None or self._root_fd is not None:
@@ -228,12 +278,17 @@ class PrivateDirectoryLease:
             parent_record = os.fstat(parent_fd)
             self._parent_identity = (parent_record.st_dev, parent_record.st_ino)
             self._root_identity = (record.st_dev, record.st_ino)
+            self._entry_name = name
             os.fsync(parent_fd)
             return self
-        except BaseException:
+        except BaseException as creation_error:
             if self._parent_fd is not None:
-                with suppress(BaseException):
+                try:
                     self.cleanup()
+                except StaleOwnershipError as ownership_error:
+                    raise ownership_error from creation_error
+                except BaseException:
+                    pass
                 raise
             if root_fd is not None:
                 os.close(root_fd)
@@ -260,10 +315,10 @@ class PrivateDirectoryLease:
             self._root_identity,
         )
 
-    def _verify_path_identity(self, name: str | None = None) -> None:
+    def _verify_reachable_identity(self, lexical_path: Path, entry_name: str) -> None:
         parent_fd, root_fd, parent_identity, identity = self._descriptors()
         try:
-            fresh_parent_fd, fresh_name, _ = _open_parent(self.path, create=False)
+            fresh_parent_fd, fresh_name, _ = _open_parent(lexical_path, create=False)
         except SafeOutputError as error:
             raise SafeOutputError(
                 "staging parent identity changed while publishing"
@@ -274,6 +329,8 @@ class PrivateDirectoryLease:
                 raise SafeOutputError(
                     "staging parent identity changed while publishing"
                 )
+            if fresh_name != entry_name:
+                raise SafeOutputError("staging root identity changed while publishing")
             fresh_root = os.stat(
                 fresh_name, dir_fd=fresh_parent_fd, follow_symlinks=False
             )
@@ -290,7 +347,7 @@ class PrivateDirectoryLease:
             raise SafeOutputError("staging root identity changed while publishing")
         try:
             pathname = os.stat(
-                name or self.path.name,
+                entry_name,
                 dir_fd=parent_fd,
                 follow_symlinks=False,
             )
@@ -301,18 +358,18 @@ class PrivateDirectoryLease:
         if (pathname.st_dev, pathname.st_ino) != identity:
             raise SafeOutputError("staging root identity changed while publishing")
 
-    def validate(self, expected: Mapping[str, str] | set[str]) -> Mapping[str, str]:
-        """Hash the pinned tree and require exactly the declared file set."""
-
+    def _snapshot(self, expected: Mapping[str, str] | set[str]) -> _TreeSnapshot:
         _, root_fd, _, _ = self._descriptors()
-        self._verify_path_identity()
         expected_files, expected_directories = _expected_paths(expected)
         records: dict[str, str] = {}
+        identities: dict[str, tuple[int, ...]] = {}
         directories: set[str] = set()
         directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
 
         def visit(directory_fd: int, prefix: str) -> None:
-            for name in sorted(os.listdir(directory_fd)):
+            directory_before = _record_identity(os.fstat(directory_fd))
+            names_before = tuple(sorted(os.listdir(directory_fd)))
+            for name in names_before:
                 if name in {".", ".."}:
                     raise SafeOutputError("invalid staging entry")
                 entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -329,9 +386,18 @@ class PrivateDirectoryLease:
                                 "staging entry changed while publishing"
                             )
                         directories.add(relative)
+                        identities[relative] = _record_identity(entry)
                         visit(child, relative)
+                        child_after = os.fstat(child)
                     finally:
                         os.close(child)
+                    entry_after = os.stat(
+                        name, dir_fd=directory_fd, follow_symlinks=False
+                    )
+                    if _record_identity(child_after) != _record_identity(
+                        entry
+                    ) or _record_identity(entry_after) != _record_identity(entry):
+                        raise SafeOutputError("staging entry changed while publishing")
                     continue
                 if entry.st_nlink != 1:
                     raise SafeOutputError("staging contains a hard-linked file")
@@ -353,18 +419,30 @@ class PrivateDirectoryLease:
                     ):
                         raise SafeOutputError("staging entry changed while publishing")
                     records[relative] = digest
+                    identities[relative] = identity
                 finally:
                     os.close(file_fd)
+            if tuple(sorted(os.listdir(directory_fd))) != names_before:
+                raise SafeOutputError("staging entries changed while publishing")
+            if _record_identity(os.fstat(directory_fd)) != directory_before:
+                raise SafeOutputError("staging directory changed while publishing")
 
         visit(root_fd, "")
-        self._verify_path_identity()
         if set(records) != expected_files or directories != expected_directories:
             raise SafeOutputError("staging does not match exact expected file set")
         if isinstance(expected, Mapping) and any(
             records[path] != digest for path, digest in expected.items()
         ):
             raise SafeOutputError("staging entry changed while publishing")
-        return MappingProxyType(records)
+        return _TreeSnapshot(MappingProxyType(records), MappingProxyType(identities))
+
+    def validate(self, expected: Mapping[str, str] | set[str]) -> Mapping[str, str]:
+        """Hash the pinned tree and require exactly the declared file set."""
+
+        self._verify_reachable_identity(self.path, self._entry_name)
+        snapshot = self._snapshot(expected)
+        self._verify_reachable_identity(self.path, self._entry_name)
+        return snapshot.hashes
 
     def write_root_file(
         self, name: str, content: bytes | str, *, replace: bool = False
@@ -419,73 +497,227 @@ class PrivateDirectoryLease:
                 "staging and publication directories must be siblings"
             )
         parent_fd, _, _, identity = self._descriptors()
-        self.validate(expected)
-        self._verify_path_identity()
+        self._verify_reachable_identity(self.path, self._entry_name)
+        before = self._snapshot(expected)
+        self._verify_reachable_identity(self.path, self._entry_name)
         try:
             os.stat(destination_abs.name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
             raise SafeOutputError("published run already exists")
-        os.rename(
-            self.path.name,
-            destination_abs.name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
-        self._published_name = destination_abs.name
-        warning: str | None = None
+        with _blocked_termination_signals():
+            try:
+                os.rename(
+                    self._entry_name,
+                    destination_abs.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+            except BaseException as error:
+                try:
+                    renamed = os.stat(
+                        destination_abs.name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    raise error from None
+                if (renamed.st_dev, renamed.st_ino) != identity:
+                    raise error from None
+                self._entry_name = destination_abs.name
+                self._committed = True
+                integrity = self._quarantine_after_integrity_failure(
+                    destination_abs, error
+                )
+                raise integrity from error
+            self._entry_name = destination_abs.name
+            self._committed = True
+            try:
+                self._verify_reachable_identity(destination_abs, self._entry_name)
+                after = self._snapshot(expected)
+                self._verify_reachable_identity(destination_abs, self._entry_name)
+                if (
+                    after.hashes != before.hashes
+                    or after.identities != before.identities
+                ):
+                    raise SafeOutputError(
+                        "staging identity tree changed during final publication handoff"
+                    )
+                self._published_integrity_complete = True
+            except BaseException as error:
+                integrity = self._quarantine_after_integrity_failure(
+                    destination_abs, error
+                )
+                raise integrity from error
         try:
-            published = os.stat(
-                destination_abs.name, dir_fd=parent_fd, follow_symlinks=False
-            )
-            if (published.st_dev, published.st_ino) != identity:
-                warning = "post-rename destination identity could not be verified"
             os.fsync(parent_fd)
         except OSError as error:
-            warning = f"post-rename fsync: {error}"
-        return PublicationOutcome(destination_abs, warning)
+            return PublicationOutcome(destination_abs, f"post-rename fsync: {error}")
+        return PublicationOutcome(destination_abs)
+
+    def _quarantine_after_integrity_failure(
+        self, destination: Path, cause: BaseException
+    ) -> PublicationIntegrityError:
+        parent_fd, _, parent_identity, identity = self._descriptors()
+        quarantine_name = (
+            f".{destination.name}.{secrets.token_hex(16)}.integrity-failed"
+        )
+        quarantine_path: Path | None = None
+        lexical_parent_matches = False
+        try:
+            published = os.stat(
+                self._entry_name, dir_fd=parent_fd, follow_symlinks=False
+            )
+            if (published.st_dev, published.st_ino) != identity:
+                raise SafeOutputError("visible destination no longer names pinned root")
+            os.rename(
+                self._entry_name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            quarantined = os.stat(
+                quarantine_name, dir_fd=parent_fd, follow_symlinks=False
+            )
+            if (quarantined.st_dev, quarantined.st_ino) != identity:
+                raise SafeOutputError("quarantine identity verification failed")
+            try:
+                os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise SafeOutputError("visible destination remains after quarantine")
+            self._entry_name = quarantine_name
+            self._committed = False
+            self._quarantined = True
+            try:
+                fresh_parent_fd, _, _ = _open_parent(destination, create=False)
+            except SafeOutputError:
+                fresh_parent_fd = None
+            if fresh_parent_fd is not None:
+                try:
+                    fresh_parent = os.fstat(fresh_parent_fd)
+                    if (fresh_parent.st_dev, fresh_parent.st_ino) == parent_identity:
+                        lexical_parent_matches = True
+                        quarantine_path = destination.parent / quarantine_name
+                finally:
+                    os.close(fresh_parent_fd)
+            return PublicationIntegrityError(
+                f"post-rename publication integrity failure: {cause}",
+                quarantined=True,
+                ambiguous_visible_path=not lexical_parent_matches,
+                quarantine_path=quarantine_path,
+            )
+        except BaseException as quarantine_error:
+            return PublicationIntegrityError(
+                "post-rename publication integrity failure; visible path is "
+                f"ambiguous and unusable: {cause}; quarantine: {quarantine_error}",
+                quarantined=False,
+                ambiguous_visible_path=True,
+                quarantine_path=None,
+            )
 
     def cleanup(self) -> None:
         """Remove only the original uncommitted root and prove its absence."""
 
         if self._parent_fd is None:
             return
-        if self._published_name is not None:
+        parent_fd, _, _, identity = self._descriptors()
+        if self._committed and self._published_integrity_complete:
+            self._close_descriptors()
+            return
+        if self._committed:
             try:
-                os.stat(
-                    self.path.name,
-                    dir_fd=self._parent_fd,
-                    follow_symlinks=False,
+                current = os.stat(
+                    self._entry_name, dir_fd=parent_fd, follow_symlinks=False
                 )
-            except FileNotFoundError:
+            except FileNotFoundError as error:
                 self._close_descriptors()
-                return
-            raise SafeOutputError("published staging source unexpectedly remains")
+                raise StaleOwnershipError(
+                    "published root is missing; detached original is not proven cleaned"
+                ) from error
+            if (current.st_dev, current.st_ino) != identity:
+                self._close_descriptors()
+                raise StaleOwnershipError(
+                    "published root identity changed; detached original is not proven "
+                    "cleaned and the later-owner path was left untouched"
+                )
+            self._committed = False
         try:
-            self._verify_path_identity()
-        except SafeOutputError:
-            try:
-                os.stat(
-                    self.path.name,
-                    dir_fd=self._parent_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                self._close_descriptors()
-                return
+            current = os.stat(self._entry_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError as error:
+            self._close_descriptors()
+            raise StaleOwnershipError(
+                "owned root is missing; detached original is not proven cleaned"
+            ) from error
+        if (current.st_dev, current.st_ino) != identity:
+            self._close_descriptors()
+            raise StaleOwnershipError(
+                "owned root identity changed; detached original is not proven cleaned "
+                "and the later-owner path was left untouched"
+            )
+        try:
+            self._make_owned_directories_writable()
+        except StaleOwnershipError:
+            self._close_descriptors()
             raise
-        shutil.rmtree(self.path)
+        final = os.stat(self._entry_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (final.st_dev, final.st_ino) != identity:
+            self._close_descriptors()
+            raise StaleOwnershipError(
+                "owned root identity changed immediately before cleanup; the "
+                "later-owner path was left untouched"
+            )
+        shutil.rmtree(self._entry_name, dir_fd=parent_fd)
         try:
             os.stat(
-                self.path.name,
-                dir_fd=self._parent_fd,
+                self._entry_name,
+                dir_fd=parent_fd,
                 follow_symlinks=False,
             )
         except FileNotFoundError:
             self._close_descriptors()
             return
         raise SafeOutputError("owned staging directory remains after cleanup")
+
+    def _make_owned_directories_writable(self) -> None:
+        """Restore owner access through pinned fds without following links."""
+
+        _, root_fd, _, _ = self._descriptors()
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+
+        def visit(directory_fd: int) -> None:
+            os.fchmod(directory_fd, stat.S_IRWXU)
+            for name in os.listdir(directory_fd):
+                entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if not stat.S_ISDIR(entry.st_mode):
+                    continue
+                os.chmod(
+                    name,
+                    stat.S_IRWXU,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                writable = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (writable.st_dev, writable.st_ino) != (entry.st_dev, entry.st_ino):
+                    raise StaleOwnershipError(
+                        "owned child identity changed during cleanup; cleanup "
+                        "ownership was dropped"
+                    )
+                child = os.open(name, directory_flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
+                        raise StaleOwnershipError(
+                            "owned child identity changed during cleanup; cleanup "
+                            "ownership was dropped"
+                        )
+                    visit(child)
+                finally:
+                    os.close(child)
+
+        visit(root_fd)
 
     def _close_descriptors(self) -> None:
         if self._root_fd is not None:
@@ -529,8 +761,10 @@ def remove_private_directory(path: Path) -> None:
 
 __all__ = [
     "SafeOutputError",
+    "PublicationIntegrityError",
     "PrivateDirectoryLease",
     "PublicationOutcome",
+    "StaleOwnershipError",
     "create_private_directory",
     "validated_private_tree",
     "publish_private_directory",

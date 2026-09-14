@@ -159,7 +159,9 @@ class Candidate:
 
     @property
     def canonical_id(self) -> str:
-        payload = json.dumps(dataclasses.asdict(self), sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            dataclasses.asdict(self), sort_keys=True, separators=(",", ":")
+        )
         return hashlib.sha256(payload.encode()).hexdigest()
 ```
 
@@ -512,8 +514,12 @@ def test_controller_enforces_transaction_budget(fake_problem: SearchProblem) -> 
     run = SearchController().run(
         strategy=LongCandidateStrategy(),
         evaluator=FakeEvaluator(),
-        limits=SearchLimits(max_sequence_length=3, transaction_budget=5,
-                            candidate_budget=10, wall_seconds=30),
+        limits=SearchLimits(
+            max_sequence_length=3,
+            transaction_budget=5,
+            candidate_budget=10,
+            wall_seconds=30,
+        ),
     )
     assert run.evm_transactions <= 5
     assert run.stop_reason == "transaction_budget"

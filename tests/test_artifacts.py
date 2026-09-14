@@ -9,6 +9,7 @@ import pytest
 from qprover.artifacts import ArtifactError, build_target
 from qprover.manifest import load_manifest
 from qprover.runtime import ExecutionRuntime
+from qprover.safeio import PrivateDirectoryLease
 
 
 def _argument(name: str, abi_type: str) -> dict[str, Any]:
@@ -187,6 +188,15 @@ def _write_project_manifest(
 def _reuse_existing_build(bundle: object, monkeypatch: pytest.MonkeyPatch) -> None:
     """Make a second loader pass inspect deliberately modified fresh outputs."""
 
+    class BorrowedTestLease:
+        path = bundle.evidence_root
+
+        def create(self) -> "BorrowedTestLease":
+            return self
+
+        def cleanup(self) -> None:
+            pass
+
     def preserve_existing_output(*args: object, **kwargs: object) -> object:
         del kwargs
         command = args[0]
@@ -196,10 +206,7 @@ def _reuse_existing_build(bundle: object, monkeypatch: pytest.MonkeyPatch) -> No
         )()
 
     monkeypatch.setattr("qprover.artifacts.subprocess.run", preserve_existing_output)
-    monkeypatch.setattr(
-        "qprover.artifacts.tempfile.mkdtemp",
-        lambda **kwargs: str(bundle.evidence_root),
-    )
+    monkeypatch.setattr("qprover.artifacts._new_build_lease", BorrowedTestLease)
 
 
 @pytest.fixture
@@ -269,23 +276,11 @@ def test_build_target_rejects_artifact_missing_required_evidence(
     manifest = load_manifest(analysis_manifest)
     bundle = build_target(manifest)
     artifact_path = bundle.artifacts[0].artifact_path
-    build_root = bundle.evidence_root
     raw = json.loads(artifact_path.read_text(encoding="utf-8"))
     raw.pop("abi")
     artifact_path.write_text(json.dumps(raw), encoding="utf-8")
 
-    def preserve_modified_artifact(*args: object, **kwargs: object) -> object:
-        del kwargs
-        command = args[0]
-        stdout = "forge Version: test\n" if command == ("forge", "--version") else ""
-        return type(
-            "Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""}
-        )()
-
-    monkeypatch.setattr("qprover.artifacts.subprocess.run", preserve_modified_artifact)
-    monkeypatch.setattr(
-        "qprover.artifacts.tempfile.mkdtemp", lambda **kwargs: str(build_root)
-    )
+    _reuse_existing_build(bundle, monkeypatch)
 
     try:
         with pytest.raises(ArtifactError, match="missing ABI"):
@@ -601,19 +596,7 @@ def test_build_target_rejects_artifact_symlink_outside_isolated_output(
     artifact_path.unlink()
     artifact_path.symlink_to(external_artifact)
 
-    def preserve_existing_output(*args: object, **kwargs: object) -> object:
-        del kwargs
-        command = args[0]
-        stdout = "forge Version: test\n" if command == ("forge", "--version") else ""
-        return type(
-            "Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""}
-        )()
-
-    monkeypatch.setattr("qprover.artifacts.subprocess.run", preserve_existing_output)
-    monkeypatch.setattr(
-        "qprover.artifacts.tempfile.mkdtemp",
-        lambda **kwargs: str(bundle.evidence_root),
-    )
+    _reuse_existing_build(bundle, monkeypatch)
 
     try:
         with pytest.raises(ArtifactError, match="artifact is outside project root"):
@@ -645,10 +628,8 @@ def test_artifact_bundle_close_does_not_claim_failed_removal(
     evidence_root = bundle.evidence_root
 
     with monkeypatch.context() as filesystem:
-        filesystem.setattr(
-            "qprover.artifacts.shutil.rmtree", lambda *args, **kwargs: None
-        )
-        with pytest.raises(ArtifactError, match="could not remove artifact evidence"):
+        filesystem.setattr("qprover.safeio.shutil.rmtree", lambda *args, **kwargs: None)
+        with pytest.raises(ArtifactError, match="not proven cleaned"):
             bundle.close()
 
     assert bundle.closed is False
@@ -673,6 +654,35 @@ def test_successful_bundle_close_releases_runtime_path_ownership(
     shutil.rmtree(evidence_root)
 
 
+def test_bundle_cleanup_never_deletes_recreated_later_owner_path(
+    analysis_manifest: Path,
+) -> None:
+    detached: Path | None = None
+    evidence_root: Path | None = None
+    marker: Path | None = None
+    with ExecutionRuntime.activate() as runtime:
+        bundle = build_target(load_manifest(analysis_manifest))
+        evidence_root = bundle.evidence_root
+        detached = evidence_root.with_name(f"{evidence_root.name}-detached")
+        evidence_root.rename(detached)
+        evidence_root.mkdir()
+        marker = evidence_root / "later-owner"
+        marker.write_text("survives")
+
+        with pytest.raises(ArtifactError, match="not proven cleaned"):
+            bundle.close()
+
+        assert bundle.closed is False
+        assert runtime.has_pending_cleanup is False
+        assert runtime.cleanup_warnings
+
+    assert marker is not None and marker.read_text() == "survives"
+    assert detached is not None and detached.is_dir()
+    assert evidence_root is not None
+    shutil.rmtree(evidence_root)
+    shutil.rmtree(detached)
+
+
 def test_build_failure_cleans_evidence_workspace(
     analysis_manifest: Path,
     tmp_path: Path,
@@ -680,12 +690,10 @@ def test_build_failure_cleans_evidence_workspace(
 ) -> None:
     evidence_root = tmp_path / "forced-evidence"
 
-    def make_evidence(**kwargs: object) -> str:
-        del kwargs
-        evidence_root.mkdir()
-        return str(evidence_root)
-
-    monkeypatch.setattr("qprover.artifacts.tempfile.mkdtemp", make_evidence)
+    monkeypatch.setattr(
+        "qprover.artifacts._new_build_lease",
+        lambda: PrivateDirectoryLease(evidence_root),
+    )
     monkeypatch.setattr(
         "qprover.artifacts._load_build_info",
         lambda *args: (_ for _ in ()).throw(ArtifactError("forced load failure")),

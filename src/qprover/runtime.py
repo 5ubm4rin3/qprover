@@ -21,7 +21,17 @@ class ExecutionCancelled(BaseException):
 _ACTIVE: contextvars.ContextVar[ExecutionRuntime | None] = contextvars.ContextVar(
     "qprover_execution_runtime", default=None
 )
-_OwnedPath = TypeVar("_OwnedPath")
+_OwnedResource = TypeVar("_OwnedResource")
+
+
+def _cleanup_warning(error: BaseException) -> str:
+    """Return one log-safe warning for deliberately abandoned ownership."""
+
+    detail = "".join(
+        character if character >= " " and character != "\x7f" else "?"
+        for character in str(error)
+    )
+    return f"{type(error).__name__}: {detail or 'cleanup ownership was dropped'}"
 
 
 class ExecutionRuntime:
@@ -34,6 +44,7 @@ class ExecutionRuntime:
         self._next_token = 0
         self._lock = threading.RLock()
         self._cleaned = False
+        self._cleanup_warnings: list[str] = []
 
     @classmethod
     @contextmanager
@@ -129,29 +140,52 @@ class ExecutionRuntime:
                 callback = self._callbacks.get(token)
             if callback is None:
                 return
-            callback()
+            try:
+                callback()
+            except BaseException as error:
+                if getattr(error, "drop_cleanup_ownership", False) is True:
+                    self._drop_cleanup_ownership(token, callback, error)
+                raise
             with self._lock:
                 if self._callbacks.get(token) is callback:
                     self._callbacks.pop(token)
 
-    def own_path(
+    def own_resource(
         self,
-        target: Path,
-        create: Callable[[Path], _OwnedPath],
-        cleanup: Callable[[Path], None],
-    ) -> tuple[_OwnedPath, int]:
-        """Pre-register an exact target before its creator can mutate it."""
+        create: Callable[[], _OwnedResource],
+        cleanup: Callable[[], None],
+    ) -> tuple[_OwnedResource, int]:
+        """Pre-register cleanup before a resource creator can mutate state."""
 
         with self._blocked_signals():
             self.checkpoint()
-            token = self.register(lambda owned=target: cleanup(owned))
+            token = self.register(cleanup)
             try:
-                owned = create(target)
-            except BaseException:
-                with suppress(BaseException):
-                    self.release(token)
+                owned = create()
+            except BaseException as error:
+                if getattr(error, "drop_cleanup_ownership", False) is True:
+                    with self._lock:
+                        callback = self._callbacks.get(token)
+                    if callback is not None:
+                        self._drop_cleanup_ownership(token, callback, error)
+                else:
+                    with suppress(BaseException):
+                        self.release(token)
                 raise
         return owned, token
+
+    def _drop_cleanup_ownership(
+        self,
+        token: int,
+        callback: Callable[[], None],
+        error: BaseException,
+    ) -> None:
+        """Forget a stale callback without ever applying it to a later owner."""
+
+        with self._lock:
+            if self._callbacks.get(token) is callback:
+                self._callbacks.pop(token)
+                self._cleanup_warnings.append(_cleanup_warning(error))
 
     def cleanup(self) -> None:
         with self._blocked_signals(), self._lock:
@@ -168,6 +202,13 @@ class ExecutionRuntime:
     def has_pending_cleanup(self) -> bool:
         with self._lock:
             return bool(self._callbacks)
+
+    @property
+    def cleanup_warnings(self) -> tuple[str, ...]:
+        """Warnings for paths whose ownership became stale and was dropped."""
+
+        with self._lock:
+            return tuple(self._cleanup_warnings)
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str]) -> None:

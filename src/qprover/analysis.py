@@ -342,8 +342,7 @@ def _call_fact(
     if member_name in {"require", "assert"}:
         kind = "builtin"
     elif (
-        member_name in {"call", "delegatecall", "send", "transfer"}
-        and native_receiver
+        member_name in {"call", "delegatecall", "send", "transfer"} and native_receiver
     ) or member_name == "selfdestruct":
         kind = "low_level"
     elif expression.get("nodeType") == "MemberAccess":

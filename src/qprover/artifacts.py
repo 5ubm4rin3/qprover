@@ -7,7 +7,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -20,6 +19,7 @@ from typing import Any, Self
 from qprover.manifest import canonical_manifest_hash
 from qprover.models import TargetManifest
 from qprover.runtime import ExecutionRuntime, current_runtime
+from qprover.safeio import PrivateDirectoryLease, SafeOutputError
 
 BUILD_COMMAND = (
     "forge",
@@ -82,16 +82,19 @@ class ArtifactBundle:
     tool_version: str
     build_command: tuple[str, ...]
     artifacts: tuple[ContractArtifact, ...]
-    _evidence_root: Path = field(repr=False, compare=False)
+    _evidence_lease: PrivateDirectoryLease = field(repr=False, compare=False)
     _runtime: ExecutionRuntime | None = field(repr=False, compare=False)
     _cleanup_token: int | None = field(repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _cleanup_failure: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def evidence_root(self) -> Path:
         """Directory retaining fresh build evidence for this live bundle."""
 
-        return self._evidence_root
+        return self._evidence_lease.path
 
     @property
     def closed(self) -> bool:
@@ -102,19 +105,22 @@ class ArtifactBundle:
 
         if self._closed:
             return
+        if self._cleanup_failure is not None:
+            raise ArtifactError(self._cleanup_failure)
         try:
             if self._runtime is not None and self._cleanup_token is not None:
                 self._runtime.release(self._cleanup_token)
             else:
-                _remove_evidence_root(self._evidence_root)
-        except OSError as error:
-            raise ArtifactError(
-                f"could not remove artifact evidence: {self._evidence_root}"
-            ) from error
-        if self._evidence_root.exists():
-            raise ArtifactError(
-                f"could not remove artifact evidence: {self._evidence_root}"
+                self._evidence_lease.cleanup()
+        except (OSError, SafeOutputError) as error:
+            message = (
+                "artifact evidence is not proven cleaned: "
+                f"{self.evidence_root}: {error}"
             )
+            if getattr(error, "drop_cleanup_ownership", False) is True:
+                object.__setattr__(self, "_cleanup_token", None)
+                object.__setattr__(self, "_cleanup_failure", message)
+            raise ArtifactError(message) from error
         object.__setattr__(self, "_closed", True)
         object.__setattr__(self, "_cleanup_token", None)
 
@@ -129,22 +135,6 @@ class ArtifactBundle:
                 self.close()
             return
         self.close()
-
-
-def _remove_evidence_root(path: Path) -> None:
-    """Remove one exact build root and prove that it no longer exists."""
-
-    try:
-        shutil.rmtree(path)
-    except FileNotFoundError:
-        return
-    if path.exists():
-        raise OSError(f"artifact evidence remains after cleanup: {path}")
-
-
-def _create_evidence_root(path: Path) -> Path:
-    path.mkdir(mode=0o700)
-    return path
 
 
 def _inside(path: Path, root: Path, label: str) -> Path:
@@ -420,12 +410,13 @@ def _build_target_in_workspace(
     manifest: TargetManifest,
     root: Path,
     parsed_requests: list[tuple[str, str]],
-    build_root: Path,
+    evidence_lease: PrivateDirectoryLease,
     runtime: ExecutionRuntime | None,
     cleanup_token: int | None,
     *,
     offline: bool = False,
 ) -> ArtifactBundle:
+    build_root = evidence_lease.path
     output_root = build_root / "out"
     overrides = {
         "FOUNDRY_OUT": str(output_root),
@@ -496,9 +487,18 @@ def _build_target_in_workspace(
         tool_version=tool_version,
         build_command=build_command,
         artifacts=tuple(artifacts),
-        _evidence_root=build_root,
+        _evidence_lease=evidence_lease,
         _runtime=runtime,
         _cleanup_token=cleanup_token,
+    )
+
+
+def _new_build_lease() -> PrivateDirectoryLease:
+    """Allocate an uncreated, unpredictable build root for atomic ownership."""
+
+    return PrivateDirectoryLease(
+        Path(tempfile.gettempdir()).resolve()
+        / f"qprover-foundry-build-{secrets.token_hex(16)}"
     )
 
 
@@ -531,23 +531,19 @@ def build_target(manifest: TargetManifest, *, offline: bool = False) -> Artifact
 
     runtime = current_runtime()
     cleanup_token: int | None = None
+    evidence_lease = _new_build_lease()
     if runtime is None:
-        build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
+        evidence_lease.create()
     else:
-        build_root = Path(tempfile.gettempdir()) / (
-            f"qprover-foundry-build-{secrets.token_hex(16)}"
-        )
-        build_root, cleanup_token = runtime.own_path(
-            build_root,
-            _create_evidence_root,
-            _remove_evidence_root,
+        evidence_lease, cleanup_token = runtime.own_resource(
+            evidence_lease.create, evidence_lease.cleanup
         )
     try:
         return _build_target_in_workspace(
             manifest,
             root,
             parsed_requests,
-            build_root,
+            evidence_lease,
             runtime,
             cleanup_token,
             offline=offline,
@@ -558,7 +554,7 @@ def build_target(manifest: TargetManifest, *, offline: bool = False) -> Artifact
                 runtime.release(cleanup_token)
         else:
             with suppress(BaseException):
-                _remove_evidence_root(build_root)
+                evidence_lease.cleanup()
         raise
 
 

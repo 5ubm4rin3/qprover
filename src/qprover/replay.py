@@ -50,8 +50,8 @@ from qprover.models import (
     Outcome,
     TargetManifest,
 )
-from qprover.runtime import current_runtime
-from qprover.safeio import SafeOutputError, safe_atomic_write
+from qprover.runtime import ExecutionRuntime, current_runtime
+from qprover.safeio import PrivateDirectoryLease, SafeOutputError, safe_atomic_write
 
 
 class ReplayError(RuntimeError):
@@ -812,34 +812,28 @@ def materialize_replay_recipe(
     root.chmod(stat.S_IRWXU)
     project = root / "project"
     project.mkdir(mode=0o700)
-    try:
-        for relative, content in _staging_entries(
-            certificate, manifest, poc_bytes
-        ).items():
-            target = project / relative
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with target.open("xb") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-        staging_hash = _tree_digest(_staged_file_entries(project))
-        if staging_hash != recipe.staging_tree_sha256:
-            raise ReplayError("private replay materialization hash mismatch")
-        argv = tuple(
-            item.format(
-                private_project=str(project),
-                private_out=str(root / "out"),
-                private_cache=str(root / "cache"),
-            )
-            for item in recipe.argv_template
+    for relative, content in _staging_entries(certificate, manifest, poc_bytes).items():
+        target = project / relative
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with target.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    staging_hash = _tree_digest(_staged_file_entries(project))
+    if staging_hash != recipe.staging_tree_sha256:
+        raise ReplayError("private replay materialization hash mismatch")
+    argv = tuple(
+        item.format(
+            private_project=str(project),
+            private_out=str(root / "out"),
+            private_cache=str(root / "cache"),
         )
-        materialization = ReplayMaterialization(root, project, argv, staging_hash)
-        _freeze_private_staging(project)
-        _verify_private_staging(materialization, recipe)
-        return materialization
-    except BaseException:
-        _clean_directory(root)
-        raise
+        for item in recipe.argv_template
+    )
+    materialization = ReplayMaterialization(root, project, argv, staging_hash)
+    _freeze_private_staging(project)
+    _verify_private_staging(materialization, recipe)
+    return materialization
 
 
 def _normalize_structured_json(value: object) -> object:
@@ -931,6 +925,8 @@ def parse_structured_replay_output(
 
 
 def _clean_directory(path: Path) -> None:
+    """Clean an explicit caller-owned test root, never a production temp lease."""
+
     if path.exists():
         for item in sorted(path.rglob("*"), reverse=True):
             with suppress(OSError):
@@ -952,24 +948,45 @@ def _clean_directory(path: Path) -> None:
         raise ReplayError(f"replay directory remains after cleanup: {path}")
 
 
-def _owned_temporary_directory(prefix: str) -> tuple[Path, int | None]:
+@dataclass(slots=True)
+class _OwnedTemporaryDirectory:
+    """One temporary root whose original directory identity remains pinned."""
+
+    lease: PrivateDirectoryLease
+    runtime: ExecutionRuntime | None
+    cleanup_token: int | None
+    closed: bool = False
+
+    @property
+    def path(self) -> Path:
+        return self.lease.path
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            if self.runtime is not None and self.cleanup_token is not None:
+                self.runtime.release(self.cleanup_token)
+            else:
+                self.lease.cleanup()
+        except BaseException as error:
+            if getattr(error, "drop_cleanup_ownership", False) is True:
+                self.closed = True
+                self.cleanup_token = None
+            raise
+        self.closed = True
+        self.cleanup_token = None
+
+
+def _owned_temporary_directory(prefix: str) -> _OwnedTemporaryDirectory:
+    target = Path(tempfile.gettempdir()).resolve() / f"{prefix}{secrets.token_hex(16)}"
+    lease = PrivateDirectoryLease(target)
     runtime = current_runtime()
     if runtime is None:
-        return Path(tempfile.mkdtemp(prefix=prefix)), None
-    target = Path(tempfile.gettempdir()) / f"{prefix}{secrets.token_hex(16)}"
-    return runtime.own_path(
-        target,
-        lambda path: (path.mkdir(mode=0o700), path)[1],
-        _clean_directory,
-    )
-
-
-def _release_temporary_directory(path: Path, cleanup_token: int | None) -> None:
-    runtime = current_runtime()
-    if runtime is not None and cleanup_token is not None:
-        runtime.release(cleanup_token)
-        return
-    _clean_directory(path)
+        lease.create()
+        return _OwnedTemporaryDirectory(lease, None, None)
+    lease, cleanup_token = runtime.own_resource(lease.create, lease.cleanup)
+    return _OwnedTemporaryDirectory(lease, runtime, cleanup_token)
 
 
 def _hash_compiler_sources(sources: dict[str, Any]) -> str:
@@ -987,7 +1004,8 @@ def _hash_compiler_sources(sources: dict[str, Any]) -> str:
 
 
 def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) -> None:
-    temporary, cleanup_token = _owned_temporary_directory("qprover-replay-preflight-")
+    owned = _owned_temporary_directory("qprover-replay-preflight-")
+    temporary = owned.path
     out = temporary / "out"
     cache = temporary / "cache"
     sources = tuple(
@@ -1088,7 +1106,7 @@ def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) 
     except (OSError, json.JSONDecodeError) as error:
         raise ReplayError("offline compiler preflight could not run") from error
     finally:
-        _release_temporary_directory(temporary, cleanup_token)
+        owned.close()
 
 
 def _load_validated_certificate(path: Path) -> ProofCertificate:
@@ -1417,7 +1435,8 @@ def cold_verify(
     recipe = build_replay_recipe(certificate, manifest, poc_bytes)
     records: list[ReplayRecord] = []
     for index in range(1, 4):
-        run_root, cleanup_token = _owned_temporary_directory(f"qprover-cold-{index}-")
+        owned = _owned_temporary_directory(f"qprover-cold-{index}-")
+        run_root = owned.path
         try:
             materialization = materialize_replay_recipe(
                 certificate, manifest, recipe, poc_bytes, run_root
@@ -1475,7 +1494,7 @@ def cold_verify(
                 )
             )
         finally:
-            _release_temporary_directory(run_root, cleanup_token)
+            owned.close()
 
     updated = _seal_certificate(certificate, recipe, tuple(records))
     write_certificate(updated, path)

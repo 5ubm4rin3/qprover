@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 from task7_helpers import ZERO_HASH, digest, make_executed_certificate
 
+import qprover.replay as replay_module
 from qprover.artifacts import build_target
 from qprover.evaluator import ScenarioEvaluator
 from qprover.evm import LocalAnvil
@@ -12,8 +14,31 @@ from qprover.manifest import load_manifest
 from qprover.minimizer import minimize
 from qprover.models import ActionStep, Candidate
 from qprover.replay import ReplayError, foundry_poc_source, generate_foundry_poc
+from qprover.runtime import ExecutionRuntime
+from qprover.safeio import StaleOwnershipError
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_replay_temp_cleanup_never_deletes_recreated_later_owner_path() -> None:
+    with ExecutionRuntime.activate() as runtime:
+        owned = replay_module._owned_temporary_directory("qprover-reuse-test-")
+        detached = owned.path.with_name(f"{owned.path.name}-detached")
+        owned.path.rename(detached)
+        owned.path.mkdir()
+        marker = owned.path / "later-owner"
+        marker.write_text("survives")
+
+        with pytest.raises(StaleOwnershipError, match="not proven cleaned"):
+            owned.close()
+
+        assert runtime.has_pending_cleanup is False
+        assert runtime.cleanup_warnings
+
+    assert marker.read_text() == "survives"
+    assert detached.is_dir()
+    shutil.rmtree(owned.path)
+    shutil.rmtree(detached)
 
 
 def _candidate(manifest, family: str) -> Candidate:

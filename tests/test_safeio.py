@@ -8,7 +8,12 @@ import pytest
 
 import qprover.safeio as safeio
 from qprover.runtime import ExecutionRuntime
-from qprover.safeio import PrivateDirectoryLease, SafeOutputError
+from qprover.safeio import (
+    PrivateDirectoryLease,
+    PublicationIntegrityError,
+    SafeOutputError,
+    StaleOwnershipError,
+)
 
 
 def _created_lease(path: Path) -> PrivateDirectoryLease:
@@ -84,14 +89,39 @@ def test_create_fsync_and_first_rollback_failure_remains_owned_for_retry(
         ExecutionRuntime.activate() as runtime,
         pytest.raises(OSError, match="fsync failed"),
     ):
-        runtime.own_path(
-            lease.path,
-            lambda target: lease.create(),
-            lambda target: lease.cleanup(),
-        )
+        runtime.own_resource(lease.create, lease.cleanup)
 
     assert cleanup_calls == 2
     assert not lease.path.exists()
+
+
+def test_create_root_reuse_reports_stale_ownership_and_never_deletes_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = PrivateDirectoryLease(tmp_path / "stage")
+    detached = tmp_path / "detached"
+    marker = lease.path / "later-owner"
+
+    def swap_then_fail(descriptor: int) -> None:
+        del descriptor
+        lease.path.rename(detached)
+        lease.path.mkdir()
+        marker.write_text("survives")
+        raise OSError("fsync failed after root swap")
+
+    monkeypatch.setattr(safeio.os, "fsync", swap_then_fail)
+    with (
+        ExecutionRuntime.activate() as runtime,
+        pytest.raises(StaleOwnershipError, match="not proven cleaned"),
+    ):
+        runtime.own_resource(lease.create, lease.cleanup)
+
+    assert runtime.has_pending_cleanup is False
+    assert runtime.cleanup_warnings
+    assert marker.read_text() == "survives"
+    assert detached.is_dir()
+    shutil.rmtree(lease.path)
+    shutil.rmtree(detached)
 
 
 def test_publication_rejects_replaced_staging_root(tmp_path: Path) -> None:
@@ -165,3 +195,272 @@ def test_postcommit_fsync_failure_returns_warning_and_keeps_disk_commit(
     assert (outcome.destination / "proof.json").read_text() == "evidence"
     assert not lease.path.exists()
     lease.cleanup()
+
+
+def _publish_with_final_mutation(
+    lease: PrivateDirectoryLease,
+    destination: Path,
+    expected: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    mutate,
+) -> PublicationIntegrityError:
+    original_rename = safeio.os.rename
+
+    def rename_then_mutate(source, target, **kwargs):
+        original_rename(source, target, **kwargs)
+        if source == lease.path.name and target == destination.name:
+            mutate(destination)
+
+    monkeypatch.setattr(safeio.os, "rename", rename_then_mutate)
+    with pytest.raises(PublicationIntegrityError) as captured:
+        lease.publish(destination, expected)
+    return captured.value
+
+
+class HandoffInterrupted(BaseException):
+    """Synchronous stand-in for cancellation at a publication boundary."""
+
+
+def test_final_rename_then_baseexception_is_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _created_lease(tmp_path / "stage")
+    (lease.path / "proof.json").write_text("evidence")
+    expected = dict(lease.validate({"proof.json"}))
+    original_rename = safeio.os.rename
+    interrupted = False
+
+    def rename_then_interrupt(source, target, **kwargs):
+        nonlocal interrupted
+        original_rename(source, target, **kwargs)
+        if not interrupted:
+            interrupted = True
+            raise HandoffInterrupted("after rename syscall")
+
+    monkeypatch.setattr(safeio.os, "rename", rename_then_interrupt)
+    with pytest.raises(PublicationIntegrityError) as captured:
+        lease.publish(tmp_path / "published", expected)
+
+    assert captured.value.quarantined is True
+    assert captured.value.destination is None
+    assert not (tmp_path / "published").exists()
+    lease.cleanup()
+
+
+def test_baseexception_during_final_scan_is_quarantined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _created_lease(tmp_path / "stage")
+    (lease.path / "proof.json").write_text("evidence")
+    expected = dict(lease.validate({"proof.json"}))
+    original_rename = safeio.os.rename
+    original_listdir = safeio.os.listdir
+    armed = False
+    interrupted = False
+
+    def arm_after_rename(source, target, **kwargs):
+        nonlocal armed
+        original_rename(source, target, **kwargs)
+        armed = True
+
+    def interrupt_final_scan(directory):
+        nonlocal interrupted
+        if armed and not interrupted:
+            interrupted = True
+            raise HandoffInterrupted("during final scan")
+        return original_listdir(directory)
+
+    monkeypatch.setattr(safeio.os, "rename", arm_after_rename)
+    monkeypatch.setattr(safeio.os, "listdir", interrupt_final_scan)
+    with pytest.raises(PublicationIntegrityError) as captured:
+        lease.publish(tmp_path / "published", expected)
+
+    assert captured.value.quarantined is True
+    assert captured.value.destination is None
+    assert not (tmp_path / "published").exists()
+    lease.cleanup()
+
+
+def test_final_file_poison_is_quarantined_and_never_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _created_lease(tmp_path / "stage")
+    (lease.path / "proof.json").write_text("evidence")
+    expected = dict(lease.validate({"proof.json"}))
+
+    error = _publish_with_final_mutation(
+        lease,
+        tmp_path / "published",
+        expected,
+        monkeypatch,
+        lambda destination: (destination / "proof.json").write_text("poisoned"),
+    )
+
+    assert error.quarantined is True
+    assert error.ambiguous_visible_path is False
+    assert error.destination is None
+    assert not (tmp_path / "published").exists()
+    assert error.quarantine_path is not None and error.quarantine_path.exists()
+    lease.cleanup()
+    assert not error.quarantine_path.exists()
+
+
+def test_final_nested_directory_addition_after_listing_is_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _created_lease(tmp_path / "stage")
+    nested = lease.path / "nested"
+    nested.mkdir()
+    (nested / "proof.json").write_text("evidence")
+    nested_inode = nested.stat().st_ino
+    expected = dict(lease.validate({"nested/proof.json"}))
+    original_rename = safeio.os.rename
+    original_listdir = safeio.os.listdir
+    armed = False
+    added = False
+
+    def arm_after_rename(source, target, **kwargs):
+        nonlocal armed
+        original_rename(source, target, **kwargs)
+        if source == lease.path.name and target == "published":
+            armed = True
+
+    def listdir_then_add(directory):
+        nonlocal added
+        names = original_listdir(directory)
+        if armed and not added and os.fstat(directory).st_ino == nested_inode:
+            added = True
+            (tmp_path / "published" / "nested" / "late.txt").write_text("late")
+        return names
+
+    monkeypatch.setattr(safeio.os, "rename", arm_after_rename)
+    monkeypatch.setattr(safeio.os, "listdir", listdir_then_add)
+
+    with pytest.raises(PublicationIntegrityError) as captured:
+        lease.publish(tmp_path / "published", expected)
+
+    assert added is True
+    assert captured.value.quarantined is True
+    assert not (tmp_path / "published").exists()
+    lease.cleanup()
+
+
+def test_final_nested_directory_swap_is_detected_even_with_identical_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _created_lease(tmp_path / "stage")
+    nested = lease.path / "nested"
+    nested.mkdir()
+    (nested / "proof.json").write_text("evidence")
+    expected = dict(lease.validate({"nested/proof.json"}))
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "proof.json").write_text("evidence")
+    detached = tmp_path / "detached-nested"
+
+    def swap(destination: Path) -> None:
+        (destination / "nested").rename(detached)
+        replacement.rename(destination / "nested")
+
+    error = _publish_with_final_mutation(
+        lease, tmp_path / "published", expected, monkeypatch, swap
+    )
+
+    assert error.quarantined is True
+    assert not (tmp_path / "published").exists()
+    lease.cleanup()
+    shutil.rmtree(detached)
+
+
+def test_final_root_swap_is_ambiguous_and_returns_no_usable_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease = _created_lease(tmp_path / "stage")
+    (lease.path / "proof.json").write_text("evidence")
+    expected = dict(lease.validate({"proof.json"}))
+    detached = tmp_path / "detached-root"
+
+    def swap(destination: Path) -> None:
+        destination.rename(detached)
+        destination.mkdir()
+        (destination / "proof.json").write_text("foreign")
+
+    error = _publish_with_final_mutation(
+        lease, tmp_path / "published", expected, monkeypatch, swap
+    )
+
+    assert error.quarantined is False
+    assert error.ambiguous_visible_path is True
+    assert error.destination is None
+    assert (tmp_path / "published" / "proof.json").read_text() == "foreign"
+    with pytest.raises(StaleOwnershipError, match="not proven cleaned"):
+        lease.cleanup()
+    shutil.rmtree(tmp_path / "published")
+    shutil.rmtree(detached)
+
+
+def test_final_lexical_parent_swap_quarantines_only_pinned_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "runs"
+    lease = _created_lease(parent / "stage")
+    (lease.path / "proof.json").write_text("evidence")
+    expected = dict(lease.validate({"proof.json"}))
+    moved_parent = tmp_path / "moved-runs"
+
+    def swap_parent(destination: Path) -> None:
+        destination.parent.rename(moved_parent)
+        destination.parent.mkdir()
+        (destination.parent / destination.name).mkdir()
+        (destination.parent / destination.name / "foreign").write_text("foreign")
+
+    error = _publish_with_final_mutation(
+        lease, parent / "published", expected, monkeypatch, swap_parent
+    )
+
+    assert error.quarantined is True
+    assert error.ambiguous_visible_path is True
+    assert error.destination is None
+    assert error.quarantine_path is None
+    assert (parent / "published" / "foreign").read_text() == "foreign"
+    assert not (moved_parent / "published").exists()
+    lease.cleanup()
+    shutil.rmtree(parent)
+    shutil.rmtree(moved_parent)
+
+
+def test_reused_owned_path_is_never_deleted_and_records_cleanup_warning(
+    tmp_path: Path,
+) -> None:
+    lease = PrivateDirectoryLease(tmp_path / "owned")
+    detached = tmp_path / "detached"
+
+    with ExecutionRuntime.activate() as runtime:
+        owned, token = runtime.own_resource(lease.create, lease.cleanup)
+        owned.path.rename(detached)
+        owned.path.mkdir()
+        marker = owned.path / "later-owner"
+        marker.write_text("survives")
+        with pytest.raises(StaleOwnershipError, match="not proven cleaned"):
+            runtime.release(token)
+        assert runtime.has_pending_cleanup is False
+        assert runtime.cleanup_warnings
+
+    assert marker.read_text() == "survives"
+    assert detached.is_dir()
+    shutil.rmtree(owned.path)
+    shutil.rmtree(detached)
+
+
+def test_cleanup_restores_access_to_exact_owned_locked_nested_directory(
+    tmp_path: Path,
+) -> None:
+    lease = _created_lease(tmp_path / "owned")
+    nested = lease.path / "locked"
+    nested.mkdir()
+    (nested / "evidence").write_text("owned")
+    nested.chmod(0)
+
+    lease.cleanup()
+
+    assert not lease.path.exists()

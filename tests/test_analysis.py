@@ -374,12 +374,8 @@ def build_multi_source_target(
         _zero_arg_action("b_read", "b", "read()"),
         _zero_arg_action("deposit", "derived", "deposit()"),
         _zero_arg_action("withdraw", "derived", "withdraw()"),
-        _address_action(
-            "inherited_sink", "derived", "inheritedSink(address)"
-        ),
-        _address_action(
-            "overridden_sink", "derived", "overriddenSink(address)"
-        ),
+        _address_action("inherited_sink", "derived", "inheritedSink(address)"),
+        _address_action("overridden_sink", "derived", "overriddenSink(address)"),
     ]
     manifest_path = tmp_path / "target.json"
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")

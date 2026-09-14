@@ -54,7 +54,7 @@ def test_owned_path_rolls_back_when_creator_mutates_then_raises(tmp_path: Path) 
         ExecutionRuntime.activate() as runtime,
         pytest.raises(OSError, match="creator failed"),
     ):
-        runtime.own_path(target, create, shutil.rmtree)
+        runtime.own_resource(lambda: create(target), lambda: shutil.rmtree(target))
 
     assert not target.exists()
 

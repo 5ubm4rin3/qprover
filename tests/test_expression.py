@@ -18,9 +18,7 @@ from qprover.expression import ExpressionError, evaluate_expression
         ("-assets + +shares", -1),
     ],
 )
-def test_expression_evaluates_integer_arithmetic(
-    source: str, expected: int
-) -> None:
+def test_expression_evaluates_integer_arithmetic(source: str, expected: int) -> None:
     result = evaluate_expression(source, {"assets": 5, "shares": 4})
 
     assert result.status == "evaluated"
@@ -52,9 +50,7 @@ def test_invariant_violation_is_a_value_not_an_exception() -> None:
         ("not healthy or assets == 0", False),
     ],
 )
-def test_expression_evaluates_boolean_operators(
-    source: str, expected: bool
-) -> None:
+def test_expression_evaluates_boolean_operators(source: str, expected: bool) -> None:
     result = evaluate_expression(source, {"healthy": True, "assets": 2})
 
     assert result.status == "evaluated"

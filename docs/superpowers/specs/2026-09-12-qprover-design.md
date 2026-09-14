@@ -550,11 +550,20 @@ safe verdict or a successful search.
 - Proof publication pins the originally created staging directory by open
   descriptors and device/inode identity, rejects links, special files,
   hardlinks, unlisted entries, and content/inode drift, then revalidates the
-  exact tree immediately before an atomic rename. This protects against
-  accidental and cooperative-process races. A malicious process running as the
-  same UID can still mutate descriptors or filesystem objects and remains part
-  of the explicitly trusted local-host boundary; QProver does not claim
-  cryptographic protection from such a host.
+  exact tree both immediately before and immediately after atomic rename. The
+  final handoff also reopens the lexical parent, checks parent/root identity,
+  and compares every entry's identity and hash. Any detected mismatch is a
+  proof failure, never a durability warning; the pinned tree is quarantined
+  through its original parent descriptor when safe, and no artifact path is
+  returned when the visible destination is ambiguous. Only failure to fsync the
+  already validated parent is a non-revoking durability warning. Build and
+  replay temporary roots use the same identity-pinned cleanup leases, so a
+  reused pathname belonging to a later owner is left untouched and explicitly
+  reported as not proven cleaned. This detects accidental and
+  cooperative-process races. Preventing a malicious process running as the same
+  UID from mutating filesystem objects remains part of the explicitly trusted
+  local-host boundary; detected interference still fails closed, but QProver
+  does not claim cryptographic protection from such a host.
 - Foundry FFI is disabled. Replay tests are scanned for disallowed state/code
   mutation cheatcodes beyond explicitly recorded initial funding.
 - Environment variables, private keys, auth tokens, and RPC credentials are
