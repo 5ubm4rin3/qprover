@@ -865,6 +865,13 @@ adding CLI glue.
 - Modify: `src/qprover/search/qubo.py`
 - Modify: `src/qprover/search/controller.py`
 - Modify: `src/qprover/evaluator.py`
+- Modify: `src/qprover/models.py`
+- Modify: `src/qprover/manifest.py`
+- Modify: `src/qprover/minimizer.py`
+- Modify: `src/qprover/certificate.py`
+- Modify: `src/qprover/replay.py`
+- Modify: `schemas/target-manifest.schema.json`
+- Modify: `schemas/certificate.schema.json`
 - Create: `tests/test_pipeline.py`
 - Modify: `tests/test_hypotheses.py`
 - Modify: `tests/test_bqm.py`
@@ -926,6 +933,17 @@ proposal/solver, EVM execution, and proof work separately. Time-to-first
 violation excludes minimization/replay but includes initialization and prior
 candidate execution. Never interpret negative exhaustion as proof of safety.
 
+Define the manifest-bound policy as either `invariant_violation` or
+`invariant_and_economic_impact`. Existing economic manifests retain the stricter
+policy; invariant-only manifests omit impact rather than inventing zero
+economics. Every accepted result must transition the same supplied invariant
+from evaluated true at baseline to evaluated false after an executed prefix.
+Pin that manifest-ordered invariant ID through search, minimization, proof
+generation, fresh re-execution, and single-delete replay. Economics without a
+false invariant never qualifies, and a false invariant that lacks required
+economics remains unqualified. Bump the pre-release certificate schema rather
+than silently rehashing old confirmed evidence.
+
 - [ ] **Step 6: Write production proof-pipeline RED tests**
 
 The pipeline must select the controller's executed violation, truncate to its
@@ -935,6 +953,14 @@ rather than constants, render/hash/write the PoC and draft certificate, perform
 three cold replays, then expose `CONFIRMED`. Add repaired-suffix, tampered field,
 cleanup, and failure-path tests. Convert monotonic search events to UTC evidence
 events without changing their order.
+
+Use a strict impact-evidence union: economic proofs contain exact executed
+observations/deltas/unit, while invariant-only proofs contain an explicit
+not-applicable shape with no fabricated zeros. The generated PoC asserts the
+exact initial state, selected invariant true at baseline, exact transactions,
+exact final state, and the same invariant false at final; it adds economic
+assertions only for the stricter policy. Treat free-form manifest assertion text
+as descriptive metadata, never executable proof logic.
 
 - [ ] **Step 7: Implement the production proof pipeline**
 
