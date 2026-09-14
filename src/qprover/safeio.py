@@ -147,12 +147,19 @@ def create_private_directory(path: Path) -> Path:
     """Create one collision-free 0700 directory below verified parents."""
 
     parent_fd, name, absolute = _open_parent(path, create=True)
+    created = False
     try:
         try:
             os.mkdir(name, 0o700, dir_fd=parent_fd)
+            created = True
         except FileExistsError as error:
             raise SafeOutputError("output directory already exists") from error
         os.fsync(parent_fd)
+    except BaseException:
+        if created:
+            with suppress(OSError):
+                os.rmdir(name, dir_fd=parent_fd)
+        raise
     finally:
         os.close(parent_fd)
     return absolute

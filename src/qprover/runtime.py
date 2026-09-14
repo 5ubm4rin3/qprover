@@ -44,12 +44,24 @@ class ExecutionRuntime:
             raise RuntimeError("top-level execution runtime requires the main thread")
         runtime = cls()
         prior_handlers: dict[int, object] = {}
-        with runtime._blocked_signals():
-            token = _ACTIVE.set(runtime)
-            for number in (signal.SIGINT, signal.SIGTERM):
-                prior_handlers[number] = signal.getsignal(number)
-                signal.signal(number, runtime._handle_signal)
-            atexit.register(runtime.cleanup)
+        token: contextvars.Token[ExecutionRuntime | None] | None = None
+        try:
+            with runtime._blocked_signals():
+                token = _ACTIVE.set(runtime)
+                for number in (signal.SIGINT, signal.SIGTERM):
+                    prior_handlers[number] = signal.getsignal(number)
+                    signal.signal(number, runtime._handle_signal)
+                atexit.register(runtime.cleanup)
+        except BaseException:
+            with runtime._blocked_signals():
+                runtime.cleanup()
+                with suppress(Exception):
+                    atexit.unregister(runtime.cleanup)
+                for number, handler in prior_handlers.items():
+                    signal.signal(number, handler)
+                if token is not None:
+                    _ACTIVE.reset(token)
+            raise
         try:
             yield runtime
             runtime.checkpoint()
@@ -60,6 +72,7 @@ class ExecutionRuntime:
                     atexit.unregister(runtime.cleanup)
                 for number, handler in prior_handlers.items():
                     signal.signal(number, handler)
+                assert token is not None
                 _ACTIVE.reset(token)
 
     @contextmanager

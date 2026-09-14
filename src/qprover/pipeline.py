@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 from eth_utils.abi import collapse_if_tuple
 from pydantic import Field, StrictStr, model_validator
@@ -117,6 +118,7 @@ class ProofBundleResult:
     result_path: Path | None = None
     run_id: str | None = None
     error: str | None = None
+    durability_warning: str | None = None
 
 
 class ProofRunArtifact(StrictModel):
@@ -125,10 +127,10 @@ class ProofRunArtifact(StrictModel):
 
 
 class ProofRunResult(StrictModel):
-    schema_version: StrictStr = "1.0"
+    schema_version: Literal["1.0"]
     run_id: StrictStr = Field(min_length=1)
     confirmation_status: ConfirmationStatus
-    disposition: StrictStr
+    disposition: Literal["confirmed", "not_confirmed", "failed"]
     error: StrictStr | None
     artifacts: Mapping[StrictStr, ProofRunArtifact]
 
@@ -142,12 +144,14 @@ class ProofRunResult(StrictModel):
                 or self.error
             ):
                 raise ValueError("confirmed result must be confirmed without error")
-            if not proof <= names:
+            allowed = {"certificate", "markdown", "poc", "events", "qubo"}
+            if not proof <= names or "events" not in names or not names <= allowed:
                 raise ValueError("confirmed result is missing required proof artifacts")
         elif self.disposition == "not_confirmed":
             if (
                 self.confirmation_status is not ConfirmationStatus.NOT_CONFIRMED
                 or names & proof
+                or self.error is not None
             ):
                 raise ValueError("not-confirmed result cannot carry proof artifacts")
         elif self.disposition == "failed":
