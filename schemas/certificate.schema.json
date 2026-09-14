@@ -14,20 +14,28 @@
           "final_evaluation_outcome": {"const": "VIOLATION"},
           "chain": {"properties": {"external_rpc": {"const": false}}},
           "invariant": {"properties": {"evaluated": {"const": true}, "value": {"const": false}}},
-          "impact": {"properties": {"admissible": {"const": true}, "executed": {"const": true}}},
           "replay": {"properties": {"local_only": {"const": true}, "recipe": {"$ref": "#/$defs/replayRecipe"}, "records": {"minItems": 3, "maxItems": 3, "items": {"properties": {"success": {"const": true}, "exit_code": {"const": 0}, "staging_unchanged": {"const": true}, "suite_count": {"const": 1}, "test_count": {"const": 1}, "executed_suite": {"const": "test/QProverReplay.t.sol:QProverReplayTest"}, "executed_test": {"const": "test_qprover_replay()"}, "executed_status": {"const": "Success"}}}}}}
         }
       }
+    },
+    {
+      "if": {"properties": {"confirmation_status": {"const": "CONFIRMED"}, "confirmation_policy": {"const": "invariant_and_economic_impact"}}, "required": ["confirmation_status", "confirmation_policy"]},
+      "then": {"properties": {"impact": {"properties": {"applicability": {"const": "economic"}, "admissible": {"const": true}, "executed": {"const": true}, "attacker_delta": {"type": "integer", "exclusiveMinimum": 0}, "protocol_delta": {"type": "integer", "exclusiveMaximum": 0}}}}}
+    },
+    {
+      "if": {"properties": {"confirmation_status": {"const": "CONFIRMED"}, "confirmation_policy": {"const": "invariant_violation"}}, "required": ["confirmation_status", "confirmation_policy"]},
+      "then": {"properties": {"impact": {"properties": {"applicability": {"const": "not_applicable"}, "admissible": {"const": false}, "executed": {"const": false}, "attacker_observation": {"type": "null"}, "protocol_observation": {"type": "null"}, "attacker_delta": {"type": "null"}, "protocol_delta": {"type": "null"}, "unit": {"type": "null"}}}}}
     }
   ],
-  "required": ["schema_version", "run_id", "generated_at", "confirmation_status", "source_kind", "final_evaluation_outcome", "target", "artifacts", "build", "toolchain", "chain", "funding", "assumptions", "initial_state", "transactions", "before_after", "invariant", "impact", "gas", "minimization", "poc", "replay_invocation_template", "replay", "assurance", "certificate_identity_sha256", "certificate_sha256"],
+  "required": ["schema_version", "run_id", "generated_at", "confirmation_status", "source_kind", "final_evaluation_outcome", "confirmation_policy", "target", "artifacts", "build", "toolchain", "chain", "funding", "assumptions", "initial_state", "transactions", "before_after", "initial_invariants", "invariant", "impact", "gas", "minimization", "poc", "replay_invocation_template", "replay", "assurance", "certificate_identity_sha256", "certificate_sha256"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
     "run_id": {"type": "string", "minLength": 1},
     "generated_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
-    "confirmation_status": {"enum": ["NOT_CONFIRMED", "CANDIDATE_VIOLATION", "CONFIRMED"]},
+    "confirmation_status": {"enum": ["NOT_CONFIRMED", "CONFIRMED"]},
     "source_kind": {"enum": ["executed", "static_lead"]},
     "final_evaluation_outcome": {"$ref": "#/$defs/outcome"},
+    "confirmation_policy": {"enum": ["invariant_and_economic_impact", "invariant_violation"]},
     "target": {"$ref": "#/$defs/target"},
     "artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
     "build": {"$ref": "#/$defs/build"},
@@ -38,6 +46,7 @@
     "initial_state": {"$ref": "#/$defs/state"},
     "transactions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/transaction"}},
     "before_after": {"type": "object", "additionalProperties": false, "required": ["before", "after"], "properties": {"before": {"$ref": "#/$defs/state"}, "after": {"$ref": "#/$defs/state"}}},
+    "initial_invariants": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/invariant"}},
     "invariant": {"$ref": "#/$defs/invariant"},
     "impact": {"$ref": "#/$defs/impact"},
     "gas": {"$ref": "#/$defs/gas"},
@@ -63,7 +72,7 @@
     "state": {"type": "object", "additionalProperties": false, "required": ["values", "state_sha256"], "properties": {"values": {"type": "object", "additionalProperties": {"oneOf": [{"type": "integer"}, {"type": "boolean"}]}}, "state_sha256": {"$ref": "#/$defs/sha256"}}},
     "transaction": {"type": "object", "additionalProperties": false, "required": ["index", "action_id", "target_id", "signature", "sender_slot", "args", "value_wei", "calldata_sha256", "transaction_sha256", "expected_success", "receipt_status", "gas_used", "return_data", "revert_data", "trace_sha256", "observation_state_sha256"], "properties": {"index": {"type": "integer", "minimum": 1}, "action_id": {"type": "string", "minLength": 1}, "target_id": {"type": "string", "minLength": 1}, "signature": {"type": "string", "minLength": 1}, "sender_slot": {"type": "integer", "minimum": 0}, "args": {"type": "array"}, "value_wei": {"type": "integer", "minimum": 0}, "calldata_sha256": {"$ref": "#/$defs/sha256"}, "transaction_sha256": {"$ref": "#/$defs/sha256"}, "expected_success": {"type": "boolean"}, "receipt_status": {"type": "integer", "minimum": 0, "maximum": 1}, "gas_used": {"type": "integer", "minimum": 0}, "return_data": {"type": ["string", "null"]}, "revert_data": {"type": ["string", "null"]}, "trace_sha256": {"$ref": "#/$defs/sha256"}, "observation_state_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}}},
     "invariant": {"type": "object", "additionalProperties": false, "required": ["id", "expression", "description", "foundry_assertion", "evaluated", "value", "reason"], "properties": {"id": {"type": "string", "minLength": 1}, "expression": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "foundry_assertion": {"type": "string", "minLength": 1}, "evaluated": {"type": "boolean"}, "value": {"type": ["boolean", "null"]}, "reason": {"type": ["string", "null"]}}},
-    "impact": {"type": "object", "additionalProperties": false, "required": ["attacker_observation", "protocol_observation", "attacker_delta", "protocol_delta", "unit", "admissible", "executed"], "properties": {"attacker_observation": {"type": "string", "minLength": 1}, "protocol_observation": {"type": "string", "minLength": 1}, "attacker_delta": {"type": "integer"}, "protocol_delta": {"type": "integer"}, "unit": {"type": "string", "minLength": 1}, "admissible": {"type": "boolean"}, "executed": {"type": "boolean"}}},
+    "impact": {"type": "object", "additionalProperties": false, "required": ["applicability", "attacker_observation", "protocol_observation", "attacker_delta", "protocol_delta", "unit", "admissible", "executed"], "properties": {"applicability": {"enum": ["economic", "not_applicable"]}, "attacker_observation": {"type": ["string", "null"], "minLength": 1}, "protocol_observation": {"type": ["string", "null"], "minLength": 1}, "attacker_delta": {"type": ["integer", "null"]}, "protocol_delta": {"type": ["integer", "null"]}, "unit": {"type": ["string", "null"], "minLength": 1}, "admissible": {"type": "boolean"}, "executed": {"type": "boolean"}}},
     "gas": {"type": "object", "additionalProperties": false, "required": ["total_gas_used", "per_transaction"], "properties": {"total_gas_used": {"type": "integer", "minimum": 0}, "per_transaction": {"type": "array", "items": {"type": "integer", "minimum": 0}}}},
     "minimization": {"type": "object", "additionalProperties": false, "required": ["original_steps", "minimized_steps", "evaluation_count", "uncached_candidate_count", "candidate_attempt_count", "unique_candidate_count", "cache_hits", "transaction_count", "attempted_operators", "locally_minimal", "minimality_claim", "final_outcome"], "properties": {"original_steps": {"type": "integer", "minimum": 1}, "minimized_steps": {"type": "integer", "minimum": 1}, "evaluation_count": {"type": "integer", "minimum": 1}, "uncached_candidate_count": {"type": "integer", "minimum": 1}, "candidate_attempt_count": {"type": "integer", "minimum": 1}, "unique_candidate_count": {"type": "integer", "minimum": 1}, "cache_hits": {"type": "integer", "minimum": 0}, "transaction_count": {"type": "integer", "minimum": 0}, "attempted_operators": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "locally_minimal": {"type": "boolean"}, "minimality_claim": {"const": "Replay-verified local minimum under one-step deletion only."}, "final_outcome": {"$ref": "#/$defs/outcome"}}},
     "poc": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "manifest_sha256", "source_sha256", "artifact_sha256", "test_name"], "properties": {"path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*://).+$"}, "sha256": {"$ref": "#/$defs/sha256"}, "manifest_sha256": {"$ref": "#/$defs/sha256"}, "source_sha256": {"$ref": "#/$defs/sha256"}, "artifact_sha256": {"$ref": "#/$defs/sha256"}, "test_name": {"const": "test_qprover_replay"}}},

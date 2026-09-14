@@ -24,6 +24,7 @@ from qprover.models import (
     Outcome,
     TargetManifest,
 )
+from qprover.qualification import qualify_violation
 from qprover.search.base import Evaluation
 
 
@@ -378,8 +379,19 @@ class ScenarioEvaluator:
         return records, any_false, any_inconclusive
 
     def _impact(self, current: ObservationSnapshot) -> dict[str, object]:
-        attacker_id = self.manifest.impact.attacker_asset_observation
-        protocol_id = self.manifest.impact.protocol_asset_observation
+        if self.manifest.confirmation.kind == "invariant_violation":
+            return {
+                "attacker_delta": None,
+                "protocol_delta": None,
+                "unit": None,
+                "admissible": False,
+                "executed": False,
+            }
+        impact_spec = self.manifest.impact
+        if impact_spec is None:
+            raise EvaluatorError("economic confirmation requires impact accounting")
+        attacker_id = impact_spec.attacker_asset_observation
+        protocol_id = impact_spec.protocol_asset_observation
         attacker_delta = _integer(
             current.values[attacker_id], "attacker asset observation"
         ) - _integer(
@@ -395,7 +407,7 @@ class ScenarioEvaluator:
         return {
             "attacker_delta": attacker_delta,
             "protocol_delta": protocol_delta,
-            "unit": self.manifest.impact.unit,
+            "unit": impact_spec.unit,
             "admissible": attacker_delta > 0 and protocol_delta < 0,
         }
 
@@ -468,8 +480,29 @@ class ScenarioEvaluator:
         step_records: list[dict[str, object]] = []
         current = self.initial_observations
         self.current_observations = current
-        final_invariants, any_false, any_inconclusive = self._invariants(current)
+        baseline_invariants, any_false, any_inconclusive = self._invariants(current)
+        final_invariants = baseline_invariants
         final_impact = self._impact(current)
+        invariant_ids = tuple(item.id for item in self.manifest.invariants)
+        baseline_qualification = qualify_violation(
+            policy=self.manifest.confirmation.kind,
+            invariant_ids=invariant_ids,
+            baseline=baseline_invariants,
+            current=baseline_invariants,
+            impact=final_impact,
+        )
+        if any_false or any_inconclusive:
+            return Evaluation(
+                outcome=Outcome.INCONCLUSIVE,
+                transaction_count=0,
+                state_fingerprint=current.state_hash,
+                metadata={
+                    "category": "invariant-baseline",
+                    "reason": baseline_qualification.reason,
+                    "baseline_invariants": baseline_invariants,
+                    "confirmation_policy": self.manifest.confirmation.kind,
+                },
+            )
         violation_prefix: int | None = None
         submitted = 0
 
@@ -644,12 +677,35 @@ class ScenarioEvaluator:
             record["observation_state_hash"] = current.state_hash
             record["observations"] = dict(current.values)
             record["invariants"] = final_invariants
-            if (
-                violation_prefix is None
-                and any_false
-                and final_impact["admissible"] is True
-            ):
+            qualification = qualify_violation(
+                policy=self.manifest.confirmation.kind,
+                invariant_ids=invariant_ids,
+                baseline=baseline_invariants,
+                current=final_invariants,
+                impact=final_impact,
+            )
+            if violation_prefix is None and qualification.qualified:
                 violation_prefix = index
+                return Evaluation(
+                    outcome=Outcome.VIOLATION,
+                    transaction_count=submitted,
+                    trace_features=frozenset(features),
+                    state_fingerprint=current.state_hash,
+                    metadata={
+                        "initial_observations": dict(self.initial_observations.values),
+                        "baseline_observations": dict(self.initial_observations.values),
+                        "current_observations": dict(current.values),
+                        "steps": step_records,
+                        "invariants": final_invariants,
+                        "baseline_invariants": baseline_invariants,
+                        "impact": final_impact,
+                        "confirmation_policy": self.manifest.confirmation.kind,
+                        "qualification": qualification.to_dict(),
+                        "violated_invariant_id": qualification.invariant_id,
+                        "violation_prefix_length": violation_prefix,
+                        "confirmation": "not_confirmed",
+                    },
+                )
 
         if violation_prefix is not None:
             outcome = Outcome.VIOLATION
@@ -668,7 +724,9 @@ class ScenarioEvaluator:
                 "current_observations": dict(current.values),
                 "steps": step_records,
                 "invariants": final_invariants,
+                "baseline_invariants": baseline_invariants,
                 "impact": final_impact,
+                "confirmation_policy": self.manifest.confirmation.kind,
                 "violation_prefix_length": violation_prefix,
                 "confirmation": "not_confirmed",
             },

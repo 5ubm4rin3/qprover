@@ -6,6 +6,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from qprover.parameters import ActionVariant
 from qprover.search.bqm import (
     STOP,
     SearchFeedback,
@@ -309,3 +310,109 @@ def test_bqm_index_rejects_coerced_positions(
 
     with pytest.raises(ValueError, match="exact integer"):
         bqm.index(bad_position, "prepare")
+
+
+def test_bqm_groups_concrete_variants_under_original_action_limit() -> None:
+    problem = SearchProblem(
+        actions=("prime:v1", "prime:v2", "attack:v1"),
+        max_sequence_length=3,
+        repetition_groups={
+            "prime:v1": "prime",
+            "prime:v2": "prime",
+            "attack:v1": "attack",
+        },
+        group_repetition_limits={"prime": 1, "attack": 1},
+    )
+    bqm = SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+
+    legal = bqm.encode(("prime:v1", "attack:v1"))
+    illegal = list(legal)
+    illegal[bqm.index(1, "attack:v1")] = 0
+    illegal[bqm.index(1, "prime:v2")] = 1
+
+    assert bqm.decode(legal).feasibility.feasible
+    assert not bqm.decode(illegal).feasibility.feasible
+    assert bqm.decode(illegal).feasibility.repetition_violations == ("prime",)
+    assert bqm.energy(illegal) > bqm.energy(legal)
+
+
+def test_bqm_groups_variants_under_higher_original_action_limit() -> None:
+    problem = SearchProblem(
+        actions=("repeat:v1", "repeat:v2", "finish:v1"),
+        max_sequence_length=3,
+        repetition_groups={
+            "repeat:v1": "repeat",
+            "repeat:v2": "repeat",
+            "finish:v1": "finish",
+        },
+        group_repetition_limits={"repeat": 2, "finish": 1},
+    )
+    bqm = SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+
+    legal = bqm.encode(("repeat:v1", "repeat:v2", "finish:v1"))
+    illegal = list(legal)
+    illegal[bqm.index(2, "finish:v1")] = 0
+    illegal[bqm.index(2, "repeat:v1")] = 1
+
+    assert bqm.decode(legal).feasibility.feasible
+    assert not bqm.decode(illegal).feasibility.feasible
+    assert bqm.decode(illegal).feasibility.repetition_violations == ("repeat",)
+    assert bqm.energy(illegal) > bqm.energy(legal)
+
+
+def test_search_problem_serializes_each_variant_exactly_once() -> None:
+    variants = (
+        ActionVariant(
+            action_id="prime",
+            target_id="scenario",
+            signature="prime(uint256)",
+            sender_slot=1,
+            args=(1,),
+            value_wei=1,
+            max_repetitions=1,
+            argument_provenance=(("finite",),),
+            value_provenance=("finite",),
+        ),
+        ActionVariant(
+            action_id="attack",
+            target_id="scenario",
+            signature="attack()",
+            sender_slot=1,
+            args=(),
+            value_wei=0,
+            max_repetitions=1,
+            argument_provenance=(),
+            value_provenance=("finite",),
+        ),
+    )
+    problem = SearchProblem(
+        actions=("prime", "attack"),
+        max_sequence_length=2,
+        variants=variants,
+    )
+
+    assert [item["canonical_id"] for item in problem.to_dict()["variants"]] == [
+        variant.canonical_id for variant in variants
+    ]
+
+
+def test_search_problem_and_bqm_have_canonical_hashes() -> None:
+    first = SearchProblem(
+        actions=("a", "b"),
+        max_sequence_length=2,
+        utilities={"b": 0.2, "a": 0.1},
+        transitions={("a", "b"): 0.4},
+    )
+    second = SearchProblem(
+        actions=("a", "b"),
+        max_sequence_length=2,
+        utilities={"a": 0.1, "b": 0.2},
+        transitions={("a", "b"): 0.4},
+    )
+    first_bqm = SequenceBQMBuilder().build(first, SearchFeedback.empty())
+    second_bqm = SequenceBQMBuilder().build(second, SearchFeedback.empty())
+
+    assert first.canonical_json() == second.canonical_json()
+    assert first.sha256 == second.sha256
+    assert first_bqm.canonical_json() == second_bqm.canonical_json()
+    assert first_bqm.sha256 == second_bqm.sha256

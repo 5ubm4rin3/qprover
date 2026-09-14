@@ -23,7 +23,14 @@ class PredicateEvaluator:
         return Evaluation(
             outcome=Outcome.VIOLATION if admissible else Outcome.PASS,
             transaction_count=len(candidate.steps),
-            metadata={"impact": {"admissible": admissible}},
+            metadata={
+                "impact": {"admissible": admissible},
+                "qualification": {
+                    "qualified": admissible,
+                    "policy": "invariant_and_economic_impact",
+                    "invariant_id": "property",
+                },
+            },
         )
 
 
@@ -90,8 +97,35 @@ def test_minimizer_rejects_nonviolating_or_inadmissible_seed() -> None:
             "values": (7,),
         }
     }
-    with pytest.raises(MinimizationError, match="admissible executed violation"):
+    with pytest.raises(MinimizationError, match="qualified executed violation"):
         minimize(Candidate((_step("noise_a"),)), evaluator, domains)
+
+
+def test_minimizer_never_switches_to_a_different_invariant() -> None:
+    original = Candidate((_step("prepare"), _step("trigger")))
+
+    class SwitchingEvaluator:
+        def evaluate(self, candidate: Candidate) -> Evaluation:
+            selected = "original" if len(candidate.steps) == 2 else "different"
+            return Evaluation(
+                Outcome.VIOLATION,
+                len(candidate.steps),
+                metadata={
+                    "qualification": {
+                        "qualified": True,
+                        "policy": "invariant_violation",
+                        "invariant_id": selected,
+                    }
+                },
+            )
+
+    domains = {
+        action: {"sender_slots": (2,), "arguments": ((9,),), "values": (7,)}
+        for action in ("prepare", "trigger")
+    }
+    result = minimize(original, SwitchingEvaluator(), domains)
+
+    assert result.candidate == original
 
 
 def test_minimizer_uses_only_manifest_allowed_slots_and_values() -> None:
@@ -111,7 +145,14 @@ def test_minimizer_uses_only_manifest_allowed_slots_and_values() -> None:
             return Evaluation(
                 outcome=Outcome.VIOLATION if valid else Outcome.INCONCLUSIVE,
                 transaction_count=len(proposed.steps) if valid else 0,
-                metadata={"impact": {"admissible": valid}},
+                metadata={
+                    "impact": {"admissible": valid},
+                    "qualification": {
+                        "qualified": valid,
+                        "policy": "invariant_and_economic_impact",
+                        "invariant_id": "property",
+                    },
+                },
             )
 
     result = minimize(candidate, ReentryPredicate(), manifest)

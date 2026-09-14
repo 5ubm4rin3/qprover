@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -67,6 +69,8 @@ class SearchProblem:
     length_weight: float = 0.05
     variants: tuple[ActionVariant, ...] = ()
     hypothesis_sequences: tuple[tuple[str, ...], ...] = ()
+    repetition_groups: Mapping[str, str] | None = None
+    group_repetition_limits: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
         actions = tuple(self.actions)
@@ -192,6 +196,32 @@ class SearchProblem:
             raise ValueError(
                 f"unknown hypothesis action: {sorted(unknown_hypotheses)[0]}"
             )
+        groups = dict(self.repetition_groups or {action: action for action in actions})
+        if set(groups) != known or any(
+            not isinstance(group, str) or not group for group in groups.values()
+        ):
+            raise ValueError("repetition groups must map every action to a group")
+        group_names = tuple(dict.fromkeys(groups[action] for action in actions))
+        explicit_group_limits = self.group_repetition_limits
+        if explicit_group_limits is None:
+            group_limits: dict[str, int] = {}
+            for action in actions:
+                group = groups[action]
+                action_limit = limits[action]
+                prior = group_limits.get(group)
+                if prior is not None and prior != action_limit:
+                    raise ValueError(
+                        f"grouped actions disagree on repetition limit: {group}"
+                    )
+                group_limits[group] = action_limit
+        else:
+            group_limits = dict(explicit_group_limits)
+            if set(group_limits) != set(group_names):
+                raise ValueError("group repetition limits must cover every group")
+            group_limits = {
+                group: _exact_positive_int(limit, "group repetition limits")
+                for group, limit in group_limits.items()
+            }
         object.__setattr__(self, "actions", actions)
         object.__setattr__(self, "utilities", _frozen_mapping(utilities))
         object.__setattr__(
@@ -207,6 +237,71 @@ class SearchProblem:
         object.__setattr__(self, "transition_weight", weights[1])
         object.__setattr__(self, "revert_weight", weights[2])
         object.__setattr__(self, "length_weight", weights[3])
+        object.__setattr__(self, "repetition_groups", _frozen_mapping(groups))
+        object.__setattr__(
+            self, "group_repetition_limits", _frozen_mapping(group_limits)
+        )
+
+    @property
+    def groups(self) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(self.repetition_groups[action] for action in self.actions)
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "actions": list(self.actions),
+            "max_sequence_length": self.max_sequence_length,
+            "utilities": {key: self.utilities[key] for key in sorted(self.utilities)},
+            "transitions": [
+                {"source": first, "target": second, "benefit": value}
+                for (first, second), value in sorted(self.transitions.items())
+            ],
+            "repetition_limits": {
+                key: self.repetition_limits[key]
+                for key in sorted(self.repetition_limits)
+            },
+            "repetition_groups": {
+                key: self.repetition_groups[key]
+                for key in sorted(self.repetition_groups)
+            },
+            "group_repetition_limits": {
+                key: self.group_repetition_limits[key]
+                for key in sorted(self.group_repetition_limits)
+            },
+            "discounts": list(self.discounts),
+            "weights": {
+                "utility": self.utility_weight,
+                "transition": self.transition_weight,
+                "revert": self.revert_weight,
+                "length": self.length_weight,
+            },
+            "variants": [
+                {
+                    "canonical_id": variant.canonical_id,
+                    "action_id": variant.action_id,
+                    "target_id": variant.target_id,
+                    "signature": variant.signature,
+                    "sender_slot": variant.sender_slot,
+                    "args": list(variant.args),
+                    "value_wei": variant.value_wei,
+                    "max_repetitions": variant.max_repetitions,
+                    "argument_provenance": [
+                        list(item) for item in variant.argument_provenance
+                    ],
+                    "value_provenance": list(variant.value_provenance),
+                }
+                for variant in self.variants
+            ],
+            "hypothesis_sequences": [list(item) for item in self.hypothesis_sequences],
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,15 +428,16 @@ class BinaryQuadraticModel:
         return (*self.problem.actions, STOP)
 
     def repetition_indices(self, action: str) -> tuple[int, ...]:
-        if action not in self.problem.actions:
-            raise ValueError(f"unknown action: {action}")
+        group = self.problem.repetition_groups.get(action, action)
+        if group not in self.problem.groups:
+            raise ValueError(f"unknown action or repetition group: {action}")
         offset = self.problem.max_sequence_length * len(self.choices)
-        for candidate in self.problem.actions:
-            limit = self.problem.repetition_limits[candidate]
+        for candidate in self.problem.groups:
+            limit = self.problem.group_repetition_limits[candidate]
             auxiliary_count = (
                 limit if 1 < limit < self.problem.max_sequence_length else 0
             )
-            if candidate == action:
+            if candidate == group:
                 return tuple(range(offset, offset + auxiliary_count))
             offset += auxiliary_count
         raise AssertionError("unreachable action lookup")
@@ -401,23 +497,29 @@ class BinaryQuadraticModel:
             for action in problem.actions
         )
         repetition = self.constraint_penalty * sum(
-            selected[first, action] * selected[second, action]
-            for action in problem.actions
-            if problem.repetition_limits[action] == 1
+            selected[first, first_action] * selected[second, second_action]
+            for group in problem.groups
+            if problem.group_repetition_limits[group] == 1
             for first in range(problem.max_sequence_length)
             for second in range(first + 1, problem.max_sequence_length)
+            for first_action in problem.actions
+            if problem.repetition_groups[first_action] == group
+            for second_action in problem.actions
+            if problem.repetition_groups[second_action] == group
         )
         repetition += self.constraint_penalty * sum(
             (
                 sum(
                     selected[position, action]
                     for position in range(problem.max_sequence_length)
+                    for action in problem.actions
+                    if problem.repetition_groups[action] == group
                 )
-                - sum(values[index] for index in self.repetition_indices(action))
+                - sum(values[index] for index in self.repetition_indices(group))
             )
             ** 2
-            for action in problem.actions
-            if 1 < problem.repetition_limits[action] < problem.max_sequence_length
+            for group in problem.groups
+            if 1 < problem.group_repetition_limits[group] < problem.max_sequence_length
         )
         utility = -problem.utility_weight * sum(
             problem.discounts[position]
@@ -489,19 +591,19 @@ class BinaryQuadraticModel:
             }
         )
         counts = Counter(
-            action
+            self.problem.repetition_groups[action]
             for position in range(self.problem.max_sequence_length)
             for action in self.problem.actions
             if values[self.index(position, action)]
         )
         repetitions = tuple(
-            action
-            for action in self.problem.actions
-            if counts[action] > self.problem.repetition_limits[action]
+            group
+            for group in self.problem.groups
+            if counts[group] > self.problem.group_repetition_limits[group]
             or (
-                self.repetition_indices(action)
-                and counts[action]
-                != sum(values[index] for index in self.repetition_indices(action))
+                self.repetition_indices(group)
+                and counts[group]
+                != sum(values[index] for index in self.repetition_indices(group))
             )
         )
         audit = FeasibilityAudit(
@@ -518,20 +620,48 @@ class BinaryQuadraticModel:
             raise ValueError("sequence exceeds BQM horizon")
         if any(action not in self.problem.actions for action in actions):
             raise ValueError("sequence contains an unknown action")
-        counts = Counter(actions)
+        counts = Counter(self.problem.repetition_groups[action] for action in actions)
         if any(
-            counts[action] > self.problem.repetition_limits[action]
-            for action in self.problem.actions
+            counts[group] > self.problem.group_repetition_limits[group]
+            for group in self.problem.groups
         ):
             raise ValueError("sequence exceeds a repetition limit")
         bits = [0] * len(self.variables)
         for position in range(self.problem.max_sequence_length):
             action = actions[position] if position < len(actions) else STOP
             bits[self.index(position, action)] = 1
-        for action in self.problem.actions:
-            for index in self.repetition_indices(action)[: counts[action]]:
+        for group in self.problem.groups:
+            for index in self.repetition_indices(group)[: counts[group]]:
                 bits[index] = 1
         return tuple(bits)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "problem_sha256": self.problem.sha256,
+            "variables": list(self.variables),
+            "linear": [[index, self.linear[index]] for index in sorted(self.linear)],
+            "quadratic": [
+                [first, second, self.quadratic[(first, second)]]
+                for first, second in sorted(self.quadratic)
+            ],
+            "offset": self.offset,
+            "non_constraint_linear": [
+                [index, self.non_constraint_linear[index]]
+                for index in sorted(self.non_constraint_linear)
+            ],
+            "non_constraint_quadratic": [
+                [first, second, self.non_constraint_quadratic[(first, second)]]
+                for first, second in sorted(self.non_constraint_quadratic)
+            ],
+            "constraint_penalty": self.constraint_penalty,
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode()).hexdigest()
 
 
 def _add_linear(coefficients: dict[int, float], index: int, value: float) -> None:
@@ -582,10 +712,10 @@ class SequenceBQMBuilder:
             for action in choices
         )
         variables += tuple(
-            f"repeat[{action},{occurrence}]"
-            for action in problem.actions
-            if 1 < problem.repetition_limits[action] < problem.max_sequence_length
-            for occurrence in range(1, problem.repetition_limits[action] + 1)
+            f"repeat[{group},{occurrence}]"
+            for group in problem.groups
+            if 1 < problem.group_repetition_limits[group] < problem.max_sequence_length
+            for occurrence in range(1, problem.group_repetition_limits[group] + 1)
         )
 
         def index(position: int, action: str) -> int:
@@ -656,29 +786,39 @@ class SequenceBQMBuilder:
                     index(position + 1, action),
                     penalty,
                 )
-        for action in problem.actions:
-            limit = problem.repetition_limits[action]
+        for group in problem.groups:
+            limit = problem.group_repetition_limits[group]
+            grouped_actions = tuple(
+                action
+                for action in problem.actions
+                if problem.repetition_groups[action] == group
+            )
             if limit == 1:
                 for first in range(problem.max_sequence_length):
                     for second in range(first + 1, problem.max_sequence_length):
-                        _add_quadratic(
-                            linear,
-                            quadratic,
-                            index(first, action),
-                            index(second, action),
-                            penalty,
-                        )
+                        for first_action in grouped_actions:
+                            for second_action in grouped_actions:
+                                _add_quadratic(
+                                    linear,
+                                    quadratic,
+                                    index(first, first_action),
+                                    index(second, second_action),
+                                    penalty,
+                                )
                 continue
             if limit >= problem.max_sequence_length:
                 continue
             action_indices = tuple(
                 index(position, action)
                 for position in range(problem.max_sequence_length)
+                for action in grouped_actions
             )
             auxiliary_start = problem.max_sequence_length * len(choices) + sum(
-                problem.repetition_limits[previous]
-                for previous in problem.actions[: problem.actions.index(action)]
-                if 1 < problem.repetition_limits[previous] < problem.max_sequence_length
+                problem.group_repetition_limits[previous]
+                for previous in problem.groups[: problem.groups.index(group)]
+                if 1
+                < problem.group_repetition_limits[previous]
+                < problem.max_sequence_length
             )
             auxiliary_indices = tuple(range(auxiliary_start, auxiliary_start + limit))
             for variable in (*action_indices, *auxiliary_indices):
@@ -689,12 +829,12 @@ class SequenceBQMBuilder:
             for first_offset, first in enumerate(auxiliary_indices):
                 for second in auxiliary_indices[first_offset + 1 :]:
                     _add_quadratic(linear, quadratic, first, second, 2 * penalty)
-            for first in range(problem.max_sequence_length):
+            for action_index in action_indices:
                 for auxiliary in auxiliary_indices:
                     _add_quadratic(
                         linear,
                         quadratic,
-                        index(first, action),
+                        action_index,
                         auxiliary,
                         -2 * penalty,
                     )

@@ -49,6 +49,52 @@ H2 = "2" * 64
 H3 = "3" * 64
 
 
+def test_invariant_only_impact_is_explicitly_not_applicable() -> None:
+    evidence = ImpactEvidence(
+        applicability="not_applicable",
+        attacker_observation=None,
+        protocol_observation=None,
+        attacker_delta=None,
+        protocol_delta=None,
+        unit=None,
+        admissible=False,
+        executed=False,
+    )
+
+    assert evidence.applicability == "not_applicable"
+    assert evidence.attacker_delta is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"attacker_observation": "attacker_assets"},
+        {"protocol_observation": "protocol_assets"},
+        {"attacker_delta": 0},
+        {"protocol_delta": 0},
+        {"unit": "wei"},
+        {"admissible": True},
+        {"executed": True},
+    ],
+)
+def test_not_applicable_impact_rejects_every_economic_claim(
+    mutation: dict[str, object],
+) -> None:
+    data = {
+        "applicability": "not_applicable",
+        "attacker_observation": None,
+        "protocol_observation": None,
+        "attacker_delta": None,
+        "protocol_delta": None,
+        "unit": None,
+        "admissible": False,
+        "executed": False,
+    }
+    data.update(mutation)
+    with pytest.raises(ValidationError, match="not-applicable"):
+        ImpactEvidence(**data)
+
+
 def _state_hash(values: dict[str, int]) -> str:
     payload = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
@@ -153,6 +199,17 @@ def _base(tmp_path: Path) -> dict[str, object]:
                 state_sha256=_state_hash(
                     {"protocol_assets": 0, "attacker_assets": 11 * 10**19}
                 ),
+            ),
+        ),
+        "initial_invariants": (
+            InvariantEvidence(
+                id="assets_preserved",
+                expression="protocol_assets >= initial_protocol_assets",
+                description="Assets stay present.",
+                foundry_assertion="assertGe(target.protocolAssets(), initialAssets);",
+                evaluated=True,
+                value=True,
+                reason=None,
             ),
         ),
         "invariant": InvariantEvidence(
@@ -297,6 +354,45 @@ def test_complete_confirmed_certificate_validates_with_pydantic_and_schema(
     schema = json.loads(Path("schemas/certificate.schema.json").read_text())
     jsonschema.Draft202012Validator.check_schema(schema)
     jsonschema.validate(data, schema)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"id": "other"},
+        {"expression": "true"},
+        {"description": "tampered"},
+        {"foundry_assertion": "assert(true);"},
+        {"evaluated": False},
+        {"value": False},
+    ],
+)
+def test_certificate_rejects_tampered_initial_invariant(
+    tmp_path: Path, mutation: dict[str, object]
+) -> None:
+    data = _base(tmp_path)
+    initial = data["initial_invariants"][0]
+    data["initial_invariants"] = (initial.model_copy(update=mutation),)
+
+    with pytest.raises(ValidationError, match="baseline-true"):
+        create_certificate(**data)
+
+
+def test_certificate_rejects_duplicate_initial_invariant(tmp_path: Path) -> None:
+    data = _base(tmp_path)
+    initial = data["initial_invariants"][0]
+    data["initial_invariants"] = (initial, initial)
+
+    with pytest.raises(ValidationError, match="baseline-true"):
+        create_certificate(**data)
+
+
+def test_certificate_rejects_pre_policy_schema_version(tmp_path: Path) -> None:
+    data = _confirmed(tmp_path).model_dump(mode="json")
+    data["schema_version"] = "1.0"
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        ProofCertificate.model_validate(data)
 
 
 def test_certificate_labels_replay_invocation_as_an_unresolved_template(

@@ -208,6 +208,18 @@ def make_executed_certificate(
                 values=current, state_sha256=evaluation.state_fingerprint
             ),
         ),
+        initial_invariants=tuple(
+            InvariantEvidence(
+                id=item.id,
+                expression=item.expression,
+                description=item.description,
+                foundry_assertion=item.foundry_assertion,
+                evaluated=True,
+                value=True,
+                reason=None,
+            )
+            for item in manifest.invariants
+        ),
         invariant=InvariantEvidence(
             id=invariant.id,
             expression=invariant.expression,

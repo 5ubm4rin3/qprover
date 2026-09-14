@@ -158,7 +158,9 @@ _COMPARISONS = {
 }
 
 
-def _render_invariant(expression: str, observations: set[str]) -> str:
+def _render_invariant(
+    expression: str, observations: set[str], *, current_prefix: str = "final"
+) -> str:
     try:
         root = ast.parse(expression, mode="eval")
     except SyntaxError as error:
@@ -173,7 +175,7 @@ def _render_invariant(expression: str, observations: set[str]) -> str:
                 if observation in observations:
                     return node.id
             elif node.id in observations:
-                return f"final_{node.id}"
+                return f"{current_prefix}_{node.id}"
             raise ReplayError("invariant references unknown observation")
         if isinstance(node, ast.Constant) and type(node.value) in (bool, int):
             return _solidity_literal(node.value)
@@ -268,14 +270,36 @@ def validate_semantic_binding(
         or certificate.invariant.foundry_assertion != declared.foundry_assertion
     ):
         raise ReplayError("certificate invariant semantics do not match manifest")
+    initial = tuple(
+        item for item in certificate.initial_invariants if item.id == declared.id
+    )
     if (
-        certificate.impact.attacker_observation
-        != manifest.impact.attacker_asset_observation
-        or certificate.impact.protocol_observation
-        != manifest.impact.protocol_asset_observation
-        or certificate.impact.unit != manifest.impact.unit
+        len(initial) != 1
+        or initial[0].expression != declared.expression
+        or initial[0].description != declared.description
+        or initial[0].foundry_assertion != declared.foundry_assertion
+        or not initial[0].evaluated
+        or initial[0].value is not True
     ):
-        raise ReplayError("certificate impact semantics do not match manifest")
+        raise ReplayError(
+            "certificate initial invariant semantics do not match manifest"
+        )
+    if certificate.confirmation_policy != manifest.confirmation.kind:
+        raise ReplayError("certificate confirmation policy does not match manifest")
+    if manifest.confirmation.kind == "invariant_and_economic_impact":
+        if manifest.impact is None:
+            raise ReplayError("economic manifest omitted impact accounting")
+        if (
+            certificate.impact.applicability != "economic"
+            or certificate.impact.attacker_observation
+            != manifest.impact.attacker_asset_observation
+            or certificate.impact.protocol_observation
+            != manifest.impact.protocol_asset_observation
+            or certificate.impact.unit != manifest.impact.unit
+        ):
+            raise ReplayError("certificate impact semantics do not match manifest")
+    elif certificate.impact.applicability != "not_applicable":
+        raise ReplayError("invariant-only certificate contains an economic claim")
     expected_funding = tuple(
         (actor.id, actor.slot, actor.balance_wei) for actor in manifest.actors
     )
@@ -371,6 +395,11 @@ def foundry_poc_source(
     observation_names = {item.id for item in manifest.observations}
     invariant_expression = _render_invariant(
         certificate.invariant.expression, observation_names
+    )
+    baseline_invariant_expression = _render_invariant(
+        certificate.invariant.expression,
+        observation_names,
+        current_prefix="initial",
     )
     lines = [
         "// SPDX-License-Identifier: Apache-2.0",
@@ -490,6 +519,7 @@ def foundry_poc_source(
             f"        assert(initial_{name} == "
             f"{_solidity_literal(certificate.initial_state.values[observation.id])});"
         )
+    lines.append(f"        assert({baseline_invariant_expression});")
 
     action_specs = {item.id: item for item in manifest.actions}
     for transaction in certificate.transactions:
@@ -543,22 +573,25 @@ def foundry_poc_source(
             f"{_solidity_literal(certificate.before_after.after.values[observation.id])});"
         )
 
-    attacker = _identifier(manifest.impact.attacker_asset_observation)
-    protocol = _identifier(manifest.impact.protocol_asset_observation)
-    lines.extend(
-        [
-            f"        assert(!({invariant_expression}));",
-            f"        assert(final_{attacker} >= initial_{attacker});",
-            f"        assert(final_{attacker} - initial_{attacker} == "
-            f"{certificate.impact.attacker_delta});",
-            f"        assert(initial_{protocol} >= final_{protocol});",
-            f"        assert(initial_{protocol} - final_{protocol} == "
-            f"{abs(certificate.impact.protocol_delta)});",
-            "    }",
-            "}",
-            "",
-        ]
-    )
+    lines.append(f"        assert(!({invariant_expression}));")
+    if certificate.confirmation_policy == "invariant_and_economic_impact":
+        if manifest.impact is None:
+            raise ReplayError("economic manifest omitted impact accounting")
+        attacker = _identifier(manifest.impact.attacker_asset_observation)
+        protocol = _identifier(manifest.impact.protocol_asset_observation)
+        assert certificate.impact.attacker_delta is not None
+        assert certificate.impact.protocol_delta is not None
+        lines.extend(
+            [
+                f"        assert(final_{attacker} >= initial_{attacker});",
+                f"        assert(final_{attacker} - initial_{attacker} == "
+                f"{certificate.impact.attacker_delta});",
+                f"        assert(initial_{protocol} >= final_{protocol});",
+                f"        assert(initial_{protocol} - final_{protocol} == "
+                f"{abs(certificate.impact.protocol_delta)});",
+            ]
+        )
+    lines.extend(["    }", "}", ""])
     source = "\n".join(lines)
     forbidden = (
         "vm.store",
@@ -1188,6 +1221,23 @@ def _verify_execution_binding(
                 invariants, (str, bytes)
             ):
                 raise ReplayError("executed invariant evidence mismatch")
+            baseline_invariants = metadata.get("baseline_invariants")
+            baseline_matches = tuple(
+                item
+                for item in baseline_invariants or ()
+                if isinstance(item, Mapping)
+                and item.get("invariant_id") == certificate.invariant.id
+            )
+            qualification = metadata.get("qualification")
+            if (
+                len(baseline_matches) != 1
+                or baseline_matches[0].get("value") is not True
+                or not isinstance(qualification, Mapping)
+                or qualification.get("qualified") is not True
+                or qualification.get("policy") != certificate.confirmation_policy
+                or qualification.get("invariant_id") != certificate.invariant.id
+            ):
+                raise ReplayError("executed qualification evidence mismatch")
             matches = tuple(
                 item
                 for item in invariants
@@ -1253,11 +1303,28 @@ def _verify_execution_binding(
                     )
                     reduced_evaluation = evaluator.evaluate(reduced)
                     reduced_impact = reduced_evaluation.metadata.get("impact")
-                    if (
+                    reduced_qualification = reduced_evaluation.metadata.get(
+                        "qualification"
+                    )
+                    reduced_satisfies = (
                         reduced_evaluation.outcome is Outcome.VIOLATION
-                        and isinstance(reduced_impact, Mapping)
-                        and reduced_impact.get("admissible") is True
+                        and isinstance(reduced_qualification, Mapping)
+                        and reduced_qualification.get("qualified") is True
+                        and reduced_qualification.get("policy")
+                        == certificate.confirmation_policy
+                        and reduced_qualification.get("invariant_id")
+                        == certificate.invariant.id
+                    )
+                    if (
+                        certificate.confirmation_policy
+                        == "invariant_and_economic_impact"
                     ):
+                        reduced_satisfies = (
+                            reduced_satisfies
+                            and isinstance(reduced_impact, Mapping)
+                            and reduced_impact.get("admissible") is True
+                        )
+                    if reduced_satisfies:
                         raise ReplayError("executed local minimality evidence mismatch")
     except ReplayError:
         raise

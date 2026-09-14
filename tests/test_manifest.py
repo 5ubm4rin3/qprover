@@ -358,9 +358,7 @@ def test_manifest_rejects_observation_id_that_is_not_expression_identifier(
 ) -> None:
     raw = minimal_manifest(tmp_path)
     raw["observations"][0]["id"] = "protocol-assets"
-    raw["invariants"][0]["expression"] = (
-        "attacker_assets >= initial_attacker_assets"
-    )
+    raw["invariants"][0]["expression"] = "attacker_assets >= initial_attacker_assets"
     raw["impact"]["protocol_asset_observation"] = "protocol-assets"
 
     with pytest.raises(ManifestError):
@@ -418,9 +416,7 @@ def test_manifest_accepts_expression_addressable_observation_id(tmp_path: Path) 
     raw = minimal_manifest(tmp_path)
     raw["observations"][0]["id"] = "protocol_total_2"
     raw["impact"]["protocol_asset_observation"] = "protocol_total_2"
-    raw["invariants"][0]["expression"] = (
-        "protocol_total_2 >= initial_protocol_total_2"
-    )
+    raw["invariants"][0]["expression"] = "protocol_total_2 >= initial_protocol_total_2"
 
     manifest = load_manifest(write_json(tmp_path / "target.json", raw))
 
@@ -529,6 +525,20 @@ def test_published_schema_matches_model_schema() -> None:
         "actions",
         "observations",
         "invariants",
-        "impact",
         "limits",
     }
+    assert len(published["allOf"]) == 2
+
+
+def test_manifest_confirmation_policy_is_explicit_and_backward_compatible(
+    tmp_path: Path,
+) -> None:
+    raw = minimal_manifest(tmp_path)
+    economic = load_manifest(write_json(tmp_path / "economic.json", raw))
+    raw = json.loads(json.dumps(raw))
+    raw["confirmation"] = {"kind": "invariant_violation"}
+    raw.pop("impact")
+    invariant_only = load_manifest(write_json(tmp_path / "invariant.json", raw))
+
+    assert economic.confirmation.kind == "invariant_and_economic_impact"
+    assert invariant_only.confirmation.kind == "invariant_violation"

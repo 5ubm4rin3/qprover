@@ -15,15 +15,41 @@ from qprover.models import (
     ActorSpec,
     ArgumentSpec,
     Candidate,
+    ConfirmationSpec,
     FiniteDomain,
     ImpactSpec,
     IntegerDomain,
     Outcome,
     TargetManifest,
 )
+from qprover.qualification import qualify_violation
 from qprover.search.controller import SearchController
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_qualification_rejects_duplicate_invariant_evidence() -> None:
+    true_record = {
+        "invariant_id": "property",
+        "status": "evaluated",
+        "value": True,
+    }
+    false_record = {
+        "invariant_id": "property",
+        "status": "evaluated",
+        "value": False,
+    }
+
+    duplicated = qualify_violation(
+        policy="invariant_violation",
+        invariant_ids=("property",),
+        baseline=(true_record, true_record),
+        current=(false_record,),
+        impact={"admissible": False},
+    )
+
+    assert not duplicated.qualified
+    assert duplicated.reason == "invariant set mismatch"
 
 
 def _manifest(name: str) -> TargetManifest:
@@ -198,6 +224,8 @@ def test_evaluator_rejects_candidate_outside_manifest_without_execution(
     assert result.outcome is Outcome.INCONCLUSIVE
     assert result.transaction_count == 0
     assert result.metadata["category"] == "candidate"
+    assert result.metadata["invalid_step"] == 1
+    assert "allow-list" in result.metadata["reason"]
 
 
 def test_evaluator_enforces_integer_domain_constraints_without_execution() -> None:
@@ -352,6 +380,128 @@ def test_evaluator_rejects_unaffordable_step_before_submission() -> None:
     assert result.metadata["category"] == "candidate"
     assert result.metadata["invalid_step"] == 1
     assert "insufficient" in result.metadata["reason"]
+
+
+def test_evaluator_returns_first_violation_before_reverting_suffix() -> None:
+    manifest = _manifest("scenario_reentrancy_a")
+    candidate = Candidate(
+        (
+            _step(manifest, "step_alpha", args=(10**18,), value_wei=10**18),
+            _step(manifest, "step_beta"),
+            _step(manifest, "step_beta"),
+        )
+    )
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.VIOLATION
+    assert result.transaction_count == 2
+    assert result.metadata["violation_prefix_length"] == 2
+    assert len(result.metadata["steps"]) == 2
+
+
+def test_evaluator_returns_first_violation_before_repairing_suffix() -> None:
+    original = _manifest("scenario_reentrancy_a")
+    donate = next(action for action in original.actions if action.id == "noise_one")
+    repaired_donate = donate.model_copy(
+        update={"value_domain": FiniteDomain(kind="finite", values=(0, 2 * 10**18))}
+    )
+    manifest = original.model_copy(
+        update={
+            "actions": tuple(
+                repaired_donate if action.id == donate.id else action
+                for action in original.actions
+            )
+        }
+    )
+    candidate = Candidate(
+        (
+            _step(manifest, "step_alpha", args=(10**18,), value_wei=10**18),
+            _step(manifest, "step_beta"),
+            _step(manifest, "noise_one", value_wei=2 * 10**18),
+        )
+    )
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.VIOLATION
+    assert result.transaction_count == 2
+    assert result.metadata["violation_prefix_length"] == 2
+    assert len(result.metadata["steps"]) == 2
+
+
+def test_invariant_only_policy_accepts_executed_false_invariant_without_profit() -> (
+    None
+):
+    original = _manifest("scenario_access_control_a")
+    invariant = original.invariants[0].model_copy(
+        update={"expression": "attacker_assets >= initial_attacker_assets"}
+    )
+    manifest = original.model_copy(
+        update={
+            "confirmation": ConfirmationSpec(kind="invariant_violation"),
+            "invariants": (invariant,),
+            "impact": None,
+        }
+    )
+    candidate = Candidate((_step(manifest, "noise_one", value_wei=10**18),))
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.VIOLATION
+    assert result.transaction_count == 1
+    assert result.metadata["confirmation_policy"] == "invariant_violation"
+    assert result.metadata["qualification"]["invariant_id"] == invariant.id
+    assert dict(result.metadata["impact"]) == {
+        "attacker_delta": None,
+        "protocol_delta": None,
+        "unit": None,
+        "admissible": False,
+        "executed": False,
+    }
+
+
+def test_false_baseline_invariant_is_nonqualifying_configuration() -> None:
+    original = _manifest("scenario_access_control_a")
+    invalid = original.invariants[0].model_copy(
+        update={"expression": "protocol_assets < initial_protocol_assets"}
+    )
+    manifest = original.model_copy(update={"invariants": (invalid,)})
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(
+            Candidate((_step(manifest, "noise_two", args=(7,)),))
+        )
+
+    assert result.outcome is Outcome.INCONCLUSIVE
+    assert result.transaction_count == 0
+    assert result.metadata["category"] == "invariant-baseline"
+
+
+def test_first_manifest_ordered_true_to_false_invariant_is_selected() -> None:
+    original = _manifest("scenario_reentrancy_a")
+    first = original.invariants[0].model_copy(
+        update={
+            "id": "attacker_cap",
+            "expression": "attacker_assets <= initial_attacker_assets",
+        }
+    )
+    manifest = original.model_copy(update={"invariants": (first, *original.invariants)})
+    candidate = Candidate(
+        (
+            _step(manifest, "step_alpha", args=(10**18,), value_wei=10**18),
+            _step(manifest, "step_beta"),
+        )
+    )
+
+    with build_target(manifest) as bundle, LocalAnvil() as anvil:
+        result = ScenarioEvaluator(manifest, bundle, anvil).evaluate(candidate)
+
+    assert result.outcome is Outcome.VIOLATION
+    assert result.metadata["violated_invariant_id"] == "attacker_cap"
 
 
 def test_later_unaffordable_step_preserves_actual_prior_transaction_count() -> None:

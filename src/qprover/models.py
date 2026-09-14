@@ -200,6 +200,14 @@ class ImpactSpec(StrictModel):
     unit: StrictStr = Field(min_length=1)
 
 
+class ConfirmationSpec(StrictModel):
+    """Manifest-bound condition required for an executed violation outcome."""
+
+    kind: Literal["invariant_and_economic_impact", "invariant_violation"] = (
+        "invariant_and_economic_impact"
+    )
+
+
 class SearchLimits(StrictModel):
     max_sequence_length: StrictPositiveInt
     max_variants: StrictPositiveInt = 64
@@ -209,6 +217,37 @@ class SearchLimits(StrictModel):
 
 
 class TargetManifest(StrictModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "confirmation": {
+                                "properties": {
+                                    "kind": {"const": "invariant_and_economic_impact"}
+                                }
+                            }
+                        }
+                    },
+                    "then": {"required": ["impact"]},
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "confirmation": {
+                                "properties": {"kind": {"const": "invariant_violation"}}
+                            }
+                        },
+                        "required": ["confirmation"],
+                    },
+                    "then": {"properties": {"impact": {"type": "null"}}},
+                },
+            ]
+        },
+    )
     schema_version: Literal["1.0"]
     target: TargetIdentity
     actors: tuple[ActorSpec, ...] = Field(min_length=1)
@@ -216,8 +255,20 @@ class TargetManifest(StrictModel):
     actions: tuple[ActionSpec, ...] = Field(min_length=1)
     observations: tuple[ObservationSpec, ...] = Field(min_length=1)
     invariants: tuple[InvariantSpec, ...] = Field(min_length=1)
-    impact: ImpactSpec
+    confirmation: ConfirmationSpec = ConfirmationSpec()
+    impact: ImpactSpec | None = None
     limits: SearchLimits
+
+    @model_validator(mode="after")
+    def confirmation_shape_is_explicit(self) -> TargetManifest:
+        if (
+            self.confirmation.kind == "invariant_and_economic_impact"
+            and self.impact is None
+        ):
+            raise ValueError("economic confirmation requires impact accounting")
+        if self.confirmation.kind == "invariant_violation" and self.impact is not None:
+            raise ValueError("invariant-only confirmation must omit impact accounting")
+        return self
 
 
 class Outcome(str, Enum):  # noqa: UP042 - exact public interface from the plan
@@ -244,9 +295,7 @@ class ActionStep:
     value_wei: int = 0
 
     def __post_init__(self) -> None:
-        frozen = tuple(
-            _freeze_nested(item, allow_mappings=False) for item in self.args
-        )
+        frozen = tuple(_freeze_nested(item, allow_mappings=False) for item in self.args)
         object.__setattr__(self, "args", frozen)
 
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from qprover.graph import GraphEdge, GraphNode, ProgramGraph
 from qprover.models import ActionSpec, TargetManifest
@@ -25,6 +27,19 @@ class Hypothesis:
     rationale: str
 
 
+@dataclass(frozen=True, slots=True)
+class ActionFunction:
+    """Exact compiler-backed function selected for one manifest action."""
+
+    action_id: str
+    deployment_id: str
+    artifact_ref: str
+    signature: str
+    selector: str
+    function_id: str
+    provenance: tuple[str, ...]
+
+
 def _function_nodes(graph: ProgramGraph) -> tuple[GraphNode, ...]:
     return tuple(node for node in graph.nodes if node.kind == "function")
 
@@ -33,10 +48,17 @@ def _contract_nodes(graph: ProgramGraph) -> tuple[GraphNode, ...]:
     return tuple(node for node in graph.nodes if node.kind == "contract")
 
 
-def _actions_by_function(
+def action_function_mapping(
     graph: ProgramGraph,
     manifest: TargetManifest,
-) -> dict[str, tuple[ActionSpec, ...]]:
+) -> Mapping[str, ActionFunction]:
+    """Resolve every allow-listed action to one effective compiler declaration.
+
+    Resolution follows the deployed contract's linearization and compiler ABI
+    selector.  Source names, action labels, and benchmark expectations never
+    participate in the choice.
+    """
+
     deployment_artifact = {
         deployment.id: deployment.artifact for deployment in manifest.deployments
     }
@@ -54,7 +76,7 @@ def _actions_by_function(
         )
         functions.setdefault(key, []).append(node.id)
 
-    grouped: dict[str, list[ActionSpec]] = {}
+    resolved: dict[str, ActionFunction] = {}
     for action in manifest.actions:
         artifact_ref = deployment_artifact[action.target_id]
         deployments = contract_nodes.get(artifact_ref, ())
@@ -90,9 +112,7 @@ def _actions_by_function(
                 f"{artifact_ref}:{action.signature}"
             )
         selector_signatures = {
-            signature
-            for signature, candidate in abi_entries
-            if candidate == selector
+            signature for signature, candidate in abi_entries if candidate == selector
         }
         if len(selector_signatures) != 1:
             raise ValueError(
@@ -119,7 +139,28 @@ def _actions_by_function(
                 f"allowed action {action.id} has no effective function declaration: "
                 f"{artifact_ref}:{action.signature}"
             )
-        grouped.setdefault(function_id, []).append(action)
+        function_node = graph.node(function_id)
+        resolved[action.id] = ActionFunction(
+            action_id=action.id,
+            deployment_id=action.target_id,
+            artifact_ref=artifact_ref,
+            signature=action.signature,
+            selector=selector,
+            function_id=function_id,
+            provenance=tuple(function_node.provenance),
+        )
+    return MappingProxyType(resolved)
+
+
+def _actions_by_function(
+    graph: ProgramGraph,
+    manifest: TargetManifest,
+) -> dict[str, tuple[ActionSpec, ...]]:
+    mapped = action_function_mapping(graph, manifest)
+    action_specs = {action.id: action for action in manifest.actions}
+    grouped: dict[str, list[ActionSpec]] = {}
+    for action_id, resolution in mapped.items():
+        grouped.setdefault(resolution.function_id, []).append(action_specs[action_id])
     return {
         function_id: tuple(sorted(actions, key=lambda item: item.id))
         for function_id, actions in grouped.items()
@@ -201,6 +242,22 @@ def generate_hypotheses(
         function_ids = (edge.source, edge.target)
         base_evidence = _edge_evidence(edge)
 
+        if sink_attributes.get("external_call_before_write"):
+            candidates.append(
+                _create(
+                    "state-establishing-predecessor-to-external-call-before-write",
+                    pair,
+                    function_ids,
+                    base_evidence
+                    + (f"function:{edge.target}:external-call-before-write",),
+                    edge.provenance + sink_node.provenance,
+                    0.95,
+                    "Prioritize a compiler-backed state-establishing dependency "
+                    "before a sink whose external call precedes a state write; "
+                    "the motif is label-neutral and remains only an execution lead.",
+                )
+            )
+
         value_call_ids = set(sink_attributes.get("value_flow_call_ids", ()))
         if value_call_ids:
             before_edges = tuple(
@@ -211,8 +268,7 @@ def generate_hypotheses(
             )
             if before_edges:
                 evidence = base_evidence + tuple(
-                    f"edge:{item.source}->{item.target}:before"
-                    for item in before_edges
+                    f"edge:{item.source}->{item.target}:before" for item in before_edges
                 )
                 provenance = edge.provenance + tuple(
                     value for item in before_edges for value in item.provenance
@@ -224,9 +280,7 @@ def generate_hypotheses(
                         function_ids,
                         evidence,
                         provenance,
-                        0.9
-                        + 0.05
-                        * graph.transition_benefit(edge.source, edge.target),
+                        0.9 + 0.05 * graph.transition_benefit(edge.source, edge.target),
                         "Prioritize a state-establishing action before a value call "
                         "that precedes its state update; execution is required to "
                         "validate impact.",

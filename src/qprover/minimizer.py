@@ -12,7 +12,7 @@ from qprover.search.base import CandidateEvaluator, Evaluation
 
 
 class MinimizationError(RuntimeError):
-    """A seed or final candidate did not retain admissible executed impact."""
+    """A seed or final candidate did not retain its declared violation policy."""
 
 
 class EvaluatorFactory(Protocol):
@@ -51,13 +51,25 @@ class MinimizationResult:
     ]
 
 
-def _is_violation(evaluation: Evaluation) -> bool:
-    impact = evaluation.metadata.get("impact")
-    return (
-        evaluation.outcome is Outcome.VIOLATION
-        and isinstance(impact, Mapping)
-        and impact.get("admissible") is True
-    )
+def _qualification_identity(evaluation: Evaluation) -> tuple[str, str] | None:
+    qualification = evaluation.metadata.get("qualification")
+    if (
+        evaluation.outcome is not Outcome.VIOLATION
+        or not isinstance(qualification, Mapping)
+        or qualification.get("qualified") is not True
+        or qualification.get("policy")
+        not in {"invariant_and_economic_impact", "invariant_violation"}
+        or not isinstance(qualification.get("invariant_id"), str)
+    ):
+        return None
+    return qualification["policy"], qualification["invariant_id"]
+
+
+def _is_violation(
+    evaluation: Evaluation, expected: tuple[str, str] | None = None
+) -> bool:
+    identity = _qualification_identity(evaluation)
+    return identity is not None and (expected is None or identity == expected)
 
 
 def _evaluate_fresh(
@@ -179,9 +191,11 @@ def minimize(
     transaction_count = 0
     cache_hits = 0
     last_evaluation: Evaluation | None = None
+    expected_qualification: tuple[str, str] | None = None
 
     def probe(proposed: Candidate, operator: str, *, fresh: bool = False) -> bool:
-        nonlocal evaluation_count, transaction_count, cache_hits, last_evaluation
+        nonlocal evaluation_count, transaction_count, cache_hits
+        nonlocal last_evaluation, expected_qualification
         cached = not fresh and proposed.canonical_id in cache
         if cached:
             evaluation = cache[proposed.canonical_id]
@@ -195,7 +209,9 @@ def minimize(
             if not fresh:
                 cache[proposed.canonical_id] = evaluation
         last_evaluation = evaluation
-        accepted = _is_violation(evaluation)
+        accepted = _is_violation(evaluation, expected_qualification)
+        if accepted and expected_qualification is None:
+            expected_qualification = _qualification_identity(evaluation)
         attempts.append(
             MinimizationAttempt(
                 operator=operator,
@@ -211,7 +227,7 @@ def minimize(
         return accepted
 
     if not probe(candidate, "initial-fresh-evaluation", fresh=True):
-        raise MinimizationError("seed is not an admissible executed violation")
+        raise MinimizationError("seed is not a qualified executed violation")
     current = candidate
 
     # Deterministic contiguous-chunk ddmin.
@@ -386,7 +402,7 @@ def minimize(
             break
 
     if not probe(current, "final-fresh-evaluation", fresh=True):
-        raise MinimizationError("final fresh evaluation lost the admissible violation")
+        raise MinimizationError("final fresh evaluation lost the qualified violation")
     if last_evaluation is None:  # pragma: no cover - guarded by the successful probe
         raise AssertionError("final evaluation was not retained")
     final_evaluation = last_evaluation

@@ -86,6 +86,10 @@ class QuboStrategy:
         self._decoded_feasible = 0
         self._decoded_infeasible = 0
         self._solver_metadata: dict[str, object] = {}
+        self._build_evidence: list[dict[str, object]] = []
+        self._solver_reads = 0
+        self._solver_sweeps = 0
+        self._solver_wall_seconds = 0.0
         self._ranked: tuple[tuple[float, Candidate], ...] = ()
         self._ranked_is_exact = False
         self._last_bqm: BinaryQuadraticModel | None = None
@@ -117,6 +121,10 @@ class QuboStrategy:
             token: self._problem.repetition_limits[variant.action_id]
             for token, variant in self._variant_by_token.items()
         }
+        groups = {
+            token: variant.action_id
+            for token, variant in self._variant_by_token.items()
+        }
         discounts = self._problem.discounts
         return SearchProblem(
             actions=self._tokens,
@@ -129,6 +137,8 @@ class QuboStrategy:
             transition_weight=self._problem.transition_weight,
             revert_weight=self._problem.revert_weight,
             length_weight=self._problem.length_weight,
+            repetition_groups=groups,
+            group_repetition_limits=dict(self._problem.repetition_limits),
         )
 
     def _sample(self, bqm: BinaryQuadraticModel) -> SampleSet:
@@ -184,6 +194,35 @@ class QuboStrategy:
         self._decoded_feasible += feasible
         self._decoded_infeasible += infeasible
         self._solver_metadata = dict(samples.metadata)
+        reads = samples.metadata.get(
+            "reads", samples.metadata.get("reads_requested", 0)
+        )
+        sweeps = samples.metadata.get("sweeps", 0)
+        wall_seconds = samples.metadata.get("wall_seconds", 0.0)
+        self._solver_reads += reads if type(reads) is int and reads >= 0 else 0
+        self._solver_sweeps += sweeps if type(sweeps) is int and sweeps >= 0 else 0
+        self._solver_wall_seconds += (
+            float(wall_seconds)
+            if type(wall_seconds) in (int, float) and wall_seconds >= 0
+            else 0.0
+        )
+        self._build_evidence.append(
+            {
+                "build_index": self._builds,
+                "seed": samples.metadata.get("seed", self._seed + self._builds),
+                "problem_sha256": optimization.sha256,
+                "model_sha256": bqm.sha256,
+                "logical_bits": len(bqm.variables),
+                "couplers": len(bqm.quadratic),
+                "decoded_feasible": feasible,
+                "decoded_infeasible": infeasible,
+                "solver": dict(samples.metadata),
+                "model": bqm.to_dict(),
+                "best_objective_components": (
+                    samples.first.components.as_dict() if samples.samples else {}
+                ),
+            }
+        )
         self._builds += 1
         self._feedback_since_build = 0
 
@@ -318,3 +357,34 @@ class QuboStrategy:
                 "transition_enabled": self._transition_enabled,
             },
         )
+
+    @property
+    def evidence(self) -> dict[str, object]:
+        """Return cumulative, serializable optimization evidence for this run."""
+
+        if not self._initialized:
+            raise RuntimeError("strategy is not initialized")
+        return {
+            "schema_version": "1.0",
+            "strategy": self.name,
+            "seed": self._seed,
+            "problem_sha256": self._problem.sha256,
+            "problem": self._problem.to_dict(),
+            "transition_enabled": self._transition_enabled,
+            "quantum_advantage_claimed": False,
+            "solver_totals": {
+                "calls": self._builds,
+                "reads": self._solver_reads,
+                "sweeps": self._solver_sweeps,
+                "wall_seconds": self._solver_wall_seconds,
+                "decoded_feasible": self._decoded_feasible,
+                "decoded_infeasible": self._decoded_infeasible,
+            },
+            "fallback": {
+                "exact_fallbacks": self._exact_fallbacks,
+                "feasible_count_exact": self._feasible_count_exact,
+                "feasible_space_count": self._feasible_space_count,
+                "fallback_space_bound": self._fallback_space_bound,
+            },
+            "builds": list(self._build_evidence),
+        }

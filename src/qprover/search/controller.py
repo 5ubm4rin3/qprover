@@ -19,6 +19,7 @@ from qprover.search.base import (
     freeze_json_mapping,
     thaw_json,
 )
+from qprover.search.bqm import SearchProblem
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,8 +153,19 @@ def _evaluation_contract_error(
 ) -> str | None:
     length = len(candidate.steps)
     count = result.transaction_count
-    if result.outcome in {Outcome.PASS, Outcome.VIOLATION} and count != length:
-        return f"{result.outcome.value} transaction_count must equal candidate length"
+    if result.outcome is Outcome.PASS and count != length:
+        return "PASS transaction_count must equal candidate length"
+    if result.outcome is Outcome.VIOLATION:
+        prefix = result.metadata.get("violation_prefix_length")
+        if count == length and prefix in (None, count):
+            return None
+        if not 1 <= count < length or prefix != count:
+            if prefix is None:
+                return "VIOLATION transaction_count must equal candidate length"
+            return (
+                "VIOLATION transaction_count must equal candidate length or its "
+                "recorded positive candidate prefix"
+            )
     if result.outcome is Outcome.REVERT and not 1 <= count <= length:
         return "REVERT transaction_count must be a positive prefix"
     if result.outcome in {Outcome.INCONCLUSIVE, Outcome.INFRA_ERROR} and count > length:
@@ -190,6 +202,9 @@ class SearchController:
         strategy: SearchStrategy,
         evaluator: CandidateEvaluator,
         limits: SearchLimits,
+        *,
+        problem: SearchProblem | None = None,
+        seed: int | None = None,
     ) -> SearchRun:
         started = self._clock()
         run_id = self._run_id_factory()
@@ -205,10 +220,42 @@ class SearchController:
         violation: Candidate | None = None
         failed = False
         failure_reason: str | None = None
-        stop_reason = "search_space_exhausted"
+        stop_reason = "solver_exhausted_unproven"
         finished = started
 
-        while True:
+        initialization_stopped = False
+        if (problem is None) != (seed is None):
+            raise ValueError("problem and seed must be supplied together")
+        if problem is not None and seed is not None:
+            try:
+                strategy.initialize(problem, seed)
+            except Exception as error:  # strategy initialization boundary
+                finished = self._clock()
+                failed = True
+                failure_reason = (
+                    f"strategy initialization raised {type(error).__name__}"
+                )
+                stop_reason = "strategy_initialization_error"
+                initialization_stopped = True
+                ledger.record(
+                    finished,
+                    "initialization",
+                    severity="error",
+                    category="strategy",
+                    payload={"error_type": type(error).__name__, "seed": seed},
+                )
+            else:
+                finished = self._clock()
+                ledger.record(
+                    finished,
+                    "initialization",
+                    payload={"seed": seed, "problem_sha256": problem.sha256},
+                )
+                if finished - started >= limits.wall_seconds:
+                    stop_reason = "wall_budget"
+                    initialization_stopped = True
+
+        while not initialization_stopped:
             now = self._clock()
             finished = now
             if now - started >= limits.wall_seconds:
@@ -230,14 +277,14 @@ class SearchController:
                     stop_reason = "wall_budget"
                 else:
                     proposal_stats = getattr(strategy, "stats", None)
-                    unproven = (
+                    proven = (
                         isinstance(proposal_stats, StrategyStats)
-                        and proposal_stats.metadata.get("exhaustion_proven") is False
+                        and proposal_stats.metadata.get("exhaustion_proven") is True
                     )
                     stop_reason = (
-                        "solver_exhausted_unproven"
-                        if unproven
-                        else "search_space_exhausted"
+                        "search_space_exhausted"
+                        if proven
+                        else "solver_exhausted_unproven"
                     )
                 break
             if not isinstance(proposed, Candidate):
@@ -366,7 +413,13 @@ class SearchController:
                 duplicate_proposals += 1
                 consecutive_duplicates += 1
                 if consecutive_duplicates >= self._duplicate_retry_limit:
-                    stop_reason = "search_space_exhausted"
+                    proposal_stats = getattr(strategy, "stats", None)
+                    stop_reason = (
+                        "search_space_exhausted"
+                        if isinstance(proposal_stats, StrategyStats)
+                        and proposal_stats.metadata.get("exhaustion_proven") is True
+                        else "solver_exhausted_unproven"
+                    )
                     break
                 continue
             consecutive_duplicates = 0

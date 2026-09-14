@@ -316,6 +316,56 @@ def test_controller_rechecks_wall_budget_after_slow_proposal_at_equality() -> No
     assert run.events[0].timestamp_offset == pytest.approx(3.0)
 
 
+def test_controller_charges_strategy_initialization_to_wall_budget() -> None:
+    from qprover.search.bqm import SearchProblem
+
+    clock = TickClock((20.0, 23.0))
+    strategy = ScriptedStrategy((candidate("prepare"),))
+    evaluator = FakeEvaluator((Outcome.PASS,))
+
+    run = controller(clock=clock).run(
+        strategy=strategy,
+        evaluator=evaluator,
+        limits=limits(wall_seconds=3),
+        problem=SearchProblem(actions=("prepare",), max_sequence_length=1),
+        seed=7,
+    )
+
+    assert run.stop_reason == "wall_budget"
+    assert run.candidates_evaluated == 0
+    assert evaluator.calls == []
+    assert run.events[0].phase == "initialization"
+
+
+def test_none_proposal_is_unproven_without_explicit_exhaustion_proof() -> None:
+    run = controller().run(
+        strategy=ScriptedStrategy((None,)),
+        evaluator=FakeEvaluator(()),
+        limits=limits(),
+    )
+
+    assert run.stop_reason == "solver_exhausted_unproven"
+
+
+def test_controller_accepts_first_violation_prefix_accounting() -> None:
+    proposed = candidate("prepare", "trigger", "repair")
+    strategy = ScriptedStrategy((proposed,))
+
+    class PrefixEvaluator:
+        def evaluate(self, candidate: Candidate) -> Evaluation:
+            return Evaluation(
+                outcome=Outcome.VIOLATION,
+                transaction_count=2,
+                metadata={"violation_prefix_length": 2},
+            )
+
+    run = controller().run(strategy, PrefixEvaluator(), limits())
+
+    assert not run.failed
+    assert run.stop_reason == "violation"
+    assert run.evm_transactions == 2
+
+
 @pytest.mark.parametrize(
     "outcome",
     [Outcome.PASS, Outcome.VIOLATION, Outcome.REVERT],
@@ -458,7 +508,7 @@ def test_controller_bounds_duplicate_retries() -> None:
     assert run.candidates_evaluated == 1
     assert len(evaluator.calls) == 1
     assert run.duplicate_proposals == 3
-    assert run.stop_reason == "search_space_exhausted"
+    assert run.stop_reason == "solver_exhausted_unproven"
 
 
 def test_controller_records_stable_event_ledger() -> None:
@@ -479,7 +529,7 @@ def test_controller_records_stable_event_ledger() -> None:
         "stop",
     )
     assert all(event.timestamp_offset >= 0 for event in run.events)
-    assert run.events[-1].payload["reason"] == "search_space_exhausted"
+    assert run.events[-1].payload["reason"] == "solver_exhausted_unproven"
     assert json.loads(json.dumps(run.events[-1].to_dict()))["run_id"] == "run-fixed"
 
 
@@ -542,7 +592,7 @@ def test_controller_accepts_exact_lifecycle_without_optional_stats() -> None:
         limits=limits(),
     )
 
-    assert run.stop_reason == "search_space_exhausted"
+    assert run.stop_reason == "solver_exhausted_unproven"
     assert run.strategy_stats.name == "LifecycleOnlyStrategy"
     assert run.strategy_stats.counters == {}
 

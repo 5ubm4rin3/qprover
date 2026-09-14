@@ -234,12 +234,13 @@ def _validate_ids_and_references(manifest: TargetManifest) -> None:
                 f"observation {observation.id!r} references unknown actor"
             )
 
-    impact_references = {
-        manifest.impact.attacker_asset_observation,
-        manifest.impact.protocol_asset_observation,
-    }
-    if not impact_references.issubset(observation_ids):
-        raise ManifestError("impact references unknown observation")
+    if manifest.impact is not None:
+        impact_references = {
+            manifest.impact.attacker_asset_observation,
+            manifest.impact.protocol_asset_observation,
+        }
+        if not impact_references.issubset(observation_ids):
+            raise ManifestError("impact references unknown observation")
 
     allowed_names = observation_ids | {f"initial_{name}" for name in observation_ids}
     for invariant in manifest.invariants:

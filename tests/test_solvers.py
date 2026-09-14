@@ -85,6 +85,28 @@ def test_exact_feasible_oracle_includes_empty_and_bounded_repetitions() -> None:
     assert sequences == {(), ("repeat",), ("repeat", "repeat")}
 
 
+def test_exact_feasible_oracle_aggregates_concrete_variant_repetitions() -> None:
+    problem = SearchProblem(
+        actions=("prime:v1", "prime:v2", "attack:v1"),
+        max_sequence_length=3,
+        repetition_groups={
+            "prime:v1": "prime",
+            "prime:v2": "prime",
+            "attack:v1": "attack",
+        },
+        group_repetition_limits={"prime": 1, "attack": 1},
+    )
+    bqm = SequenceBQMBuilder().build(problem, SearchFeedback.empty())
+
+    sequences = {
+        sample.decoded.sequence
+        for sample in exact_feasible_sequences(problem, bqm).samples
+    }
+
+    assert ("prime:v1", "prime:v2") not in sequences
+    assert ("prime:v2", "attack:v1") in sequences
+
+
 def test_quadratic_repetition_constraint_enforces_limit_above_one() -> None:
     problem = SearchProblem(
         actions=("repeat",),

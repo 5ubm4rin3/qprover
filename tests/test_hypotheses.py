@@ -10,7 +10,7 @@ from test_artifacts import fixture_manifest_data
 
 from qprover.analysis import AnalysisReport
 from qprover.graph import build_program_graph
-from qprover.hypotheses import generate_hypotheses
+from qprover.hypotheses import action_function_mapping, generate_hypotheses
 from qprover.models import TargetManifest
 
 
@@ -30,7 +30,10 @@ def test_graph_dependency_is_consumed_by_hypothesis(report: AnalysisReport) -> N
     graph = build_program_graph(report)
     hypotheses = generate_hypotheses(graph, fixture_manifest(report))
     hypothesis = next(
-        item for item in hypotheses if item.action_ids == ("deposit", "withdraw")
+        item
+        for item in hypotheses
+        if item.action_ids == ("deposit", "withdraw")
+        and item.kind == "external-call-before-state-write"
     )
 
     assert hypothesis.kind == "external-call-before-state-write"
@@ -38,9 +41,7 @@ def test_graph_dependency_is_consumed_by_hypothesis(report: AnalysisReport) -> N
     assert hypothesis.evidence
     assert hypothesis.provenance
     assert hypothesis.assumed_ordering == ("deposit", "withdraw")
-    assert all(
-        "Fixture.sol" in function_id for function_id in hypothesis.function_ids
-    )
+    assert all("Fixture.sol" in function_id for function_id in hypothesis.function_ids)
 
 
 def test_hypotheses_cover_role_and_oracle_dependency_motifs(
@@ -114,12 +115,16 @@ def test_hypotheses_map_inherited_and_overridden_deployment_actions(
         if hypothesis.kind == "public-value-sink-with-weak-or-unknown-guard"
     }
 
-    assert weak["inherited_sink"] == report.function(
-        "Base.sol", "Base", "inheritedSink(address)"
-    ).canonical_id
-    assert weak["overridden_sink"] == report.function(
-        "Derived.sol", "Derived", "overriddenSink(address)"
-    ).canonical_id
+    assert (
+        weak["inherited_sink"]
+        == report.function("Base.sol", "Base", "inheritedSink(address)").canonical_id
+    )
+    assert (
+        weak["overridden_sink"]
+        == report.function(
+            "Derived.sol", "Derived", "overriddenSink(address)"
+        ).canonical_id
+    )
 
 
 def test_hypotheses_fail_closed_for_unresolved_allowed_action(
@@ -155,9 +160,7 @@ def test_hypotheses_fail_closed_for_ambiguous_deployment_artifact(
     ambiguous = dataclasses.replace(report, contracts=report.contracts + (duplicate,))
 
     with pytest.raises(ValueError, match="ambiguous deployment artifact"):
-        generate_hypotheses(
-            build_program_graph(ambiguous), fixture_manifest(ambiguous)
-        )
+        generate_hypotheses(build_program_graph(ambiguous), fixture_manifest(ambiguous))
 
 
 def test_external_call_before_write_hypothesis_requires_same_value_call(
@@ -251,3 +254,31 @@ def test_hypotheses_fail_closed_on_deployment_abi_selector_collision(
 
     with pytest.raises(ValueError, match="ABI selector collision"):
         generate_hypotheses(build_program_graph(broken_report), manifest)
+
+
+def test_reentrancy_twins_receive_identical_label_neutral_sequence_guidance() -> None:
+    from pathlib import Path
+
+    from qprover.analysis import analyze
+    from qprover.artifacts import build_target
+    from qprover.manifest import load_manifest
+
+    root = Path(__file__).parents[1]
+    guidance = []
+    for suffix in ("a", "b"):
+        manifest = load_manifest(root / f"benchmarks/scenario_reentrancy_{suffix}.json")
+        with build_target(manifest) as bundle:
+            graph = build_program_graph(analyze(bundle))
+            mapping = action_function_mapping(graph, manifest)
+            hypotheses = generate_hypotheses(graph, manifest)
+        assert tuple(mapping) == tuple(action.id for action in manifest.actions)
+        assert all(item.function_id and item.provenance for item in mapping.values())
+        motif = next(
+            item
+            for item in hypotheses
+            if item.kind
+            == "state-establishing-predecessor-to-external-call-before-write"
+        )
+        guidance.append((motif.action_ids, motif.score))
+
+    assert guidance[0] == guidance[1] == (("step_alpha", "step_beta"), 0.95)

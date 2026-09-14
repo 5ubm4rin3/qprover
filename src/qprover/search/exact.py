@@ -86,10 +86,10 @@ def exact_feasible_sequences(
     sequences: list[tuple[str, ...]] = [()]
     for length in range(1, problem.max_sequence_length + 1):
         for sequence in itertools.product(problem.actions, repeat=length):
-            counts = Counter(sequence)
+            counts = Counter(problem.repetition_groups[action] for action in sequence)
             if all(
-                counts[action] <= problem.repetition_limits[action]
-                for action in problem.actions
+                counts[group] <= problem.group_repetition_limits[group]
+                for group in problem.groups
             ):
                 sequences.append(sequence)
     samples = [sample_from_bits(bqm, bqm.encode(sequence)) for sequence in sequences]

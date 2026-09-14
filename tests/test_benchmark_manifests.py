@@ -145,6 +145,7 @@ def test_every_benchmark_manifest_has_a_production_analysis_closure() -> None:
         "access_control": ("authorization-writer-to-guarded-value-sink",),
         "governance": ("authorization-writer-to-guarded-value-sink",),
         "oracle": ("public-value-sink-with-weak-or-unknown-guard",),
+        "reentrancy": ("state-establishing-predecessor-to-external-call-before-write",),
         "side_entrance": ("public-value-sink-with-weak-or-unknown-guard",),
         "signature_replay": ("public-value-sink-with-weak-or-unknown-guard",),
     }
@@ -166,15 +167,10 @@ def test_every_benchmark_manifest_has_a_production_analysis_closure() -> None:
             assert expand_action_variants(manifest, report)
             hypotheses = generate_hypotheses(graph, manifest)
             family = manifest.target.id.removeprefix("scenario_").rsplit("_", 1)[0]
-            if family == "reentrancy":
-                # The current static lead rules do not model the dynamically created
-                # callback actor, so the executable reentrancy pair intentionally has
-                # no static hypothesis. Ground-truth Foundry witnesses cover it.
-                assert hypotheses == ()
-            else:
-                assert tuple(hypothesis.kind for hypothesis in hypotheses) == (
-                    expected_hypotheses[family]
-                )
+            assert (
+                tuple(hypothesis.kind for hypothesis in hypotheses)
+                == (expected_hypotheses[family])
+            )
         assert bundle.closed is True
 
     assert built_targets == [path.stem for path in _manifest_paths()]

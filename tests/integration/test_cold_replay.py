@@ -453,10 +453,8 @@ def test_cold_verify_rejects_manifest_semantic_and_absolute_state_forgery(
             "foundry_assertion": "assert(false);",
         }
     )
-    forged_invariant = create_certificate(**invariant_data)
-    write_certificate(forged_invariant, certificate_path)
-    with pytest.raises(ReplayError, match="invariant semantics"):
-        cold_verify(certificate_path)
+    with pytest.raises(ValueError, match="baseline-true"):
+        create_certificate(**invariant_data)
 
     certificate_path = _prepare(tmp_path / "state", "access_control")
     certificate = ProofCertificate.model_validate_json(certificate_path.read_text())

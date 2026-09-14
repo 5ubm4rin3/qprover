@@ -251,13 +251,31 @@ class InvariantEvidence(StrictModel):
 
 
 class ImpactEvidence(StrictModel):
-    attacker_observation: StrictStr = Field(min_length=1)
-    protocol_observation: StrictStr = Field(min_length=1)
-    attacker_delta: StrictInt
-    protocol_delta: StrictInt
-    unit: StrictStr = Field(min_length=1)
+    applicability: Literal["economic", "not_applicable"] = "economic"
+    attacker_observation: StrictStr | None = Field(default=None, min_length=1)
+    protocol_observation: StrictStr | None = Field(default=None, min_length=1)
+    attacker_delta: StrictInt | None = None
+    protocol_delta: StrictInt | None = None
+    unit: StrictStr | None = Field(default=None, min_length=1)
     admissible: StrictBool
     executed: StrictBool
+
+    @model_validator(mode="after")
+    def applicability_matches_fields(self) -> Self:
+        fields = (
+            self.attacker_observation,
+            self.protocol_observation,
+            self.attacker_delta,
+            self.protocol_delta,
+            self.unit,
+        )
+        if self.applicability == "economic" and any(item is None for item in fields):
+            raise ValueError("economic impact requires complete accounting fields")
+        if self.applicability == "not_applicable" and (
+            any(item is not None for item in fields) or self.admissible or self.executed
+        ):
+            raise ValueError("not-applicable impact cannot contain economic claims")
+        return self
 
 
 class GasEvidence(StrictModel):
@@ -465,12 +483,17 @@ class EvidenceEvent(StrictModel):
 
 
 class ProofCertificate(StrictModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.1"] = "1.1"
     run_id: StrictStr = Field(min_length=1)
     generated_at: datetime
-    confirmation_status: ConfirmationStatus
+    confirmation_status: Literal[
+        ConfirmationStatus.NOT_CONFIRMED, ConfirmationStatus.CONFIRMED
+    ]
     source_kind: Literal["executed", "static_lead"]
     final_evaluation_outcome: Outcome
+    confirmation_policy: Literal[
+        "invariant_and_economic_impact", "invariant_violation"
+    ] = "invariant_and_economic_impact"
     target: TargetEvidence
     artifacts: tuple[ArtifactEvidence, ...] = Field(min_length=1)
     build: BuildEvidence
@@ -481,6 +504,7 @@ class ProofCertificate(StrictModel):
     initial_state: StateEvidence
     transactions: tuple[TransactionEvidence, ...] = Field(min_length=1)
     before_after: BeforeAfterEvidence
+    initial_invariants: tuple[InvariantEvidence, ...] = Field(min_length=1)
     invariant: InvariantEvidence
     impact: ImpactEvidence
     gas: GasEvidence
@@ -572,25 +596,47 @@ class ProofCertificate(StrictModel):
             != self.before_after.after.state_sha256
         ):
             raise ValueError("final transaction and after state evidence must match")
+        initial_matches = tuple(
+            item for item in self.initial_invariants if item.id == self.invariant.id
+        )
+        if (
+            len(initial_matches) != 1
+            or not initial_matches[0].evaluated
+            or initial_matches[0].value is not True
+            or initial_matches[0].expression != self.invariant.expression
+            or initial_matches[0].description != self.invariant.description
+            or initial_matches[0].foundry_assertion != self.invariant.foundry_assertion
+            or not self.invariant.evaluated
+            or self.invariant.value is not False
+        ):
+            raise ValueError(
+                "certificate requires one baseline-true to final-false invariant"
+            )
         before = self.before_after.before.values
         after = self.before_after.after.values
-        attacker = self.impact.attacker_observation
-        protocol = self.impact.protocol_observation
-        if attacker not in before or attacker not in after:
-            raise ValueError("attacker impact observation is missing")
-        if protocol not in before or protocol not in after:
-            raise ValueError("protocol impact observation is missing")
-        if (
-            type(before[attacker]) is not int
-            or type(after[attacker]) is not int
-            or type(before[protocol]) is not int
-            or type(after[protocol]) is not int
-        ):
-            raise ValueError("impact observations must be integers")
-        if self.impact.attacker_delta != after[attacker] - before[attacker]:
-            raise ValueError("attacker impact delta does not match observations")
-        if self.impact.protocol_delta != after[protocol] - before[protocol]:
-            raise ValueError("protocol impact delta does not match observations")
+        if self.confirmation_policy == "invariant_and_economic_impact":
+            if self.impact.applicability != "economic":
+                raise ValueError("economic confirmation requires economic impact")
+            attacker = self.impact.attacker_observation
+            protocol = self.impact.protocol_observation
+            assert attacker is not None and protocol is not None
+            if attacker not in before or attacker not in after:
+                raise ValueError("attacker impact observation is missing")
+            if protocol not in before or protocol not in after:
+                raise ValueError("protocol impact observation is missing")
+            if (
+                type(before[attacker]) is not int
+                or type(after[attacker]) is not int
+                or type(before[protocol]) is not int
+                or type(after[protocol]) is not int
+            ):
+                raise ValueError("impact observations must be integers")
+            if self.impact.attacker_delta != after[attacker] - before[attacker]:
+                raise ValueError("attacker impact delta does not match observations")
+            if self.impact.protocol_delta != after[protocol] - before[protocol]:
+                raise ValueError("protocol impact delta does not match observations")
+        elif self.impact.applicability != "not_applicable":
+            raise ValueError("invariant-only confirmation forbids economic claims")
         if (
             self.confirmation_status is ConfirmationStatus.CONFIRMED
             and not allow_unsealed
@@ -606,10 +652,6 @@ class ProofCertificate(StrictModel):
             or not self.minimization.locally_minimal
             or not self.invariant.evaluated
             or self.invariant.value is not False
-            or not self.impact.executed
-            or not self.impact.admissible
-            or self.impact.attacker_delta <= 0
-            or self.impact.protocol_delta >= 0
             or self.chain.external_rpc
             or not self.replay.local_only
             or self.replay.recipe is None
@@ -617,6 +659,18 @@ class ProofCertificate(StrictModel):
         )
         if failed:
             raise ValueError("CONFIRMED requires complete executed local evidence")
+        if self.confirmation_policy == "invariant_and_economic_impact":
+            if (
+                not self.impact.executed
+                or not self.impact.admissible
+                or self.impact.attacker_delta is None
+                or self.impact.protocol_delta is None
+                or self.impact.attacker_delta <= 0
+                or self.impact.protocol_delta >= 0
+            ):
+                raise ValueError("CONFIRMED economic evidence is incomplete")
+        elif self.impact.applicability != "not_applicable":
+            raise ValueError("CONFIRMED invariant-only impact must be not applicable")
         expected_indices = (1, 2, 3)
         if tuple(item.index for item in self.replay.records) != expected_indices:
             raise ValueError("CONFIRMED requires exactly three ordered cold replays")
@@ -765,6 +819,12 @@ def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str
         else ProofCertificate.model_validate(certificate.model_dump(mode="json"))
     )
     impact = validated.impact
+    impact_lines = (
+        f"- Attacker gain: {impact.attacker_delta:,} {impact.unit}\n"
+        f"- Protocol delta: {impact.protocol_delta:,} {impact.unit}\n"
+        if impact.applicability == "economic"
+        else "- Economic impact: not applicable to this invariant-only proof\n"
+    )
     return (
         f"# QProver proof certificate `{validated.run_id}`\n\n"
         f"- Status: `{validated.confirmation_status.value}`\n"
@@ -772,8 +832,8 @@ def render_markdown(certificate: ProofCertificate | Mapping[str, object]) -> str
         f"- Unverified revision label: `{validated.target.revision}`\n"
         f"- Final outcome: `{validated.final_evaluation_outcome.value}`\n"
         f"- Invariant: `{validated.invariant.id}`\n"
-        f"- Attacker gain: {impact.attacker_delta:,} {impact.unit}\n"
-        f"- Protocol delta: {impact.protocol_delta:,} {impact.unit}\n"
+        f"- Confirmation policy: `{validated.confirmation_policy}`\n"
+        f"{impact_lines}"
         f"- Gas used: {validated.gas.total_gas_used:,}\n"
         f"- Minimized steps: {validated.minimization.minimized_steps:,}\n"
         f"- Cold replays: {len(validated.replay.records):,}\n"
