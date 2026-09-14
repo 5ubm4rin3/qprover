@@ -986,6 +986,9 @@ Commit: `feat: orchestrate optimization-guided exploit proofs`
 
 - Create: `src/qprover/benchmark.py`
 - Create: `src/qprover/report.py`
+- Modify: `src/qprover/pipeline.py`
+- Modify: `src/qprover/search/controller.py`
+- Modify: `benchmarks/labels.json`
 - Create: `schemas/benchmark-suite.schema.json`
 - Create: `schemas/benchmark-run.schema.json`
 - Create: `schemas/benchmark-score.schema.json`
@@ -1000,53 +1003,145 @@ Commit: `feat: orchestrate optimization-guided exploit proofs`
 - `scores.jsonl` is a post-execution join with hidden expected classes.
 - Markdown/JSON summaries are fully regenerated from validated raw records and a
   labels file only after the complete execution matrix finishes.
+- The runner accepts no labels path or labels object. A built-in strategy factory
+  receives only its validated public configuration; a fresh strategy instance
+  receives only the existing `SearchProblem` and seed. This is an API isolation
+  boundary, not a sandbox against a deliberately malicious in-process plugin.
+- Freeze a `matrix_id` over the canonical suite/config, every manifest, source
+  closure, build/problem identity, effective limits, QProver executable-source
+  and lockfile hashes, and Python/Forge/Anvil versions. A Git `HEAD+dirty` label is
+  recorded but is not sufficient identity because distinct dirty trees collide.
 
 - [ ] **Step 1: Write strict suite/run/score model RED tests**
 
-Validate duplicate targets/seeds, finite timings, conditional first-violation
-metrics, problem/config/input hashes, identical effective budgets, complete
-matrix cells, strategy initialization/search/proof timing separation, QUBO
-solver dimensions/calls/time, failure categories, and censored misses. Neither
-run records nor any strategy-visible object may contain expected class, witness,
-or labels data.
+Require strict Pydantic/JSON-Schema parity, `additionalProperties: false`, exact
+integers rather than booleans, finite nonnegative timings, SHA-256 syntax, and
+conditional unions. Validate duplicate targets/seeds/strategies, one frozen
+matrix identity, requested versus effective budgets, and budget equality across
+strategies within each target/seed block. Bind each run key to matrix, manifest,
+source closure, build, problem, strategy/config, seed, effective budgets,
+QProver source/lockfile identity, and toolchain; reject mixed identities.
+
+Define disjoint result variants for completed search, controlled failure, and
+incomplete/cancelled work; QUBO evidence and non-QUBO `not_applicable` evidence;
+and observed hit versus censored miss. Enforce accounting identities: candidate
+outcomes sum to evaluated candidates, transaction totals agree with execution
+records, first-hit counters do not exceed totals, and `CONFIRMED` requires an
+accepted in-budget search hit, bound certificate, and three successful cold
+replays. Neither a raw run nor any strategy-visible object may contain an
+expected class, supplied witness, labels path/hash, or paired expected-class
+metadata. A raw row may identify its public target, but target IDs, paths, and
+contract names must not enter the strategy input. Add scorer-only explicit
+family/pair metadata to `labels.json`; never infer pairing from filenames or copy
+supplied witnesses into scores/reports.
 
 - [ ] **Step 2: Write append/resume RED tests**
 
-Derive a run key from suite, manifest, problem, strategy/config, seed, effective
-budgets, and QProver revision. Append one canonical row using `O_APPEND`, locking,
-one write, and `fsync`. Resume at run granularity without duplicates; reject
-partial trailing lines and conflicting duplicate keys. Preserve prior completed
-runs after interruption.
+Open the journal beneath verified non-link parents; reject symlinked,
+hard-linked, or non-regular targets. Under one advisory lock, strictly reread the
+journal, revalidate its matrix and artifact/result/certificate/event/QUBO hashes,
+reject duplicate JSON keys, duplicate/conflicting run keys, partial trailing
+lines, and unknown schema versions, then append one self-hashed canonical row
+with `O_APPEND`, one checked write, and `fsync`. Never replace or truncate prior
+evidence.
 
-- [ ] **Step 3: Implement execution matrix and raw journal**
+Test the crash window after proof publication but before journal append: resume
+must validate and reconcile the stable cell output, or safely rerun it without
+duplicating a journal key. Preserve prior committed rows after SIGINT/SIGTERM;
+abruptly interrupted work remains an incomplete cell rather than a fabricated
+failure or miss. Source/config/toolchain drift must start a new matrix or fail
+closed, never reuse stale evidence.
 
-Schedule the Cartesian matrix deterministically. Initialize each strategy with
-the same public problem and effective limits, isolate each run/output directory,
-and close every bundle/Anvil process. Do not open the label path until every
-scheduled search completes. Benchmark failures are records, not silently dropped
-cells.
+- [ ] **Step 3: Write label isolation and lifecycle RED tests**
 
-- [ ] **Step 4: Write reporting RED tests**
+Install an access spy proving the labels file remains unopened until the final
+scheduled terminal row is durably appended. Run the raw matrix from a sanitized
+copy with `labels.json` and `ScenarioWitnesses.t.sol` absent and assert identical
+candidate order and semantic run evidence after excluding declared timing/run-ID
+fields. Recursively inspect the public `SearchProblem`, strategy config, and
+feedback for forbidden label/witness values; assert the targeted compiler closure
+does not contain the witness harness.
 
-Assert order-independent deterministic output, per-target and macro results,
-executed-violation versus confirmed rates on positives, false-confirmed rate on
-negatives, cold-replay rates both conditional and overall, censored
-time/transactions-to-first-violation with `n_success / n_scheduled`, stop/failure
-counts, candidate/transaction/revert/feature/minimization/solver totals, and
-explicit incomplete cells. Repeated deterministic-policy seeds are not treated
-as independent samples.
+Inject interruption during build, Anvil startup, search, minimization, cold
+replay, publication, and append. Require one outer main-thread
+`ExecutionRuntime`, LIFO cleanup of only owned process groups/build/staging
+resources, closed locks/descriptors, preserved committed rows, and no terminal
+row for an abruptly cancelled current cell.
 
-- [ ] **Step 5: Implement post-execution scoring and reports**
+- [ ] **Step 4: Implement execution matrix, timing, and raw journal**
 
-Use exact binomial intervals for proportions and paired/fixture-stratified
-comparisons where supported. A measured zero false-confirmed count must include
-its uncertainty bound and never be described as zero risk. Write suite/results/
-labels/config hashes and the exact reproduction command.
+Preflight and freeze the complete matrix before executing it. Schedule the
+Cartesian product sequentially in a deterministic counterbalanced strategy
+order within target/seed blocks so warm-cache order never always favors one
+strategy. Create a fresh strategy and isolated output root per cell, reuse the
+outer runtime through nested `prove_violation`, and close every bundle and Anvil.
+Controlled build/search/proof failures are terminal records, not dropped cells;
+cancellation remains incomplete.
 
-- [ ] **Step 6: Run Task 8B gates and commit**
+Add minimal production timing/accounting fields to `pipeline.py` and
+`search/controller.py`, measured with a monotonic clock rather than reconstructed
+from UTC timestamps. Keep setup/
+build, strategy initialization, search loop, fresh validation, minimization, PoC
+generation, cold replay, publication, and total wall time disjoint. Separate
+search transactions from fresh/minimization/final/replay work and use explicit
+unknown/not-applicable variants when a count cannot be measured; never encode an
+unavailable metric as zero. Distinguish an executed violation, an accepted
+in-budget first-violation prefix, proof attempted, and cold-replay confirmation,
+including a violation evaluation that finishes after the wall budget. Validate
+cumulative QUBO builds, problem/model hashes, bits, couplers, calls, reads,
+sweeps, fallback work, and solver/end-to-end time rather than trusting only the
+latest strategy metadata.
 
-Run unit tests, interrupted/resumed smoke matrix over all four strategies, schema
-validation, full Python suite, Ruff, and changed-file formatting.
+- [ ] **Step 5: Write complete-matrix scoring and reporting RED tests**
+
+Assert that opening labels or emitting `scores.jsonl` fails closed until every
+expected run key has exactly one valid terminal record; an incomplete matrix may
+emit only a label-free completeness report. Score rows bind the raw-row and
+labels hashes and contain the expected class but no supplied witness. Regenerate
+sorted Markdown/JSON byte-for-byte from validated raw records regardless of
+JSONL order, without volatile timestamps or incremental aggregate state.
+
+Report per-target and fixture-balanced macro executed-violation, accepted search
+hit, confirmed, negative false-confirmed, family-pair-correct, and cold-replay
+rates both conditional on proof attempts and overall scheduled positives. Show
+`n_success / n_scheduled`, stop/failure counts, and candidate, transaction,
+revert, feature, minimization, and solver totals. Declare seed semantics per
+strategy/backend: repeated ignored seeds for deterministic policies are one
+effective replicate for inference, and disagreement is a reproducibility
+failure rather than additional sample size.
+
+- [ ] **Step 6: Implement family-aware statistics and censoring**
+
+Use two-sided 95% Clopper-Pearson intervals for marginal proportions; a measured
+zero false-confirmed count retains a nonzero upper bound and is never called zero
+risk. Treat stochastic seeds as nested within fixture families and use paired,
+family-stratified or hierarchical comparisons with recorded deterministic
+resampling seeds; emphasize effect sizes/uncertainty and apply Holm correction if
+multiple significance claims are made. Do not treat related target/seed cells as
+independent discoveries.
+
+For time/transactions to first violation, never average only successes. Report
+success-conditional summaries explicitly plus a common-horizon restricted mean
+or equivalent censored summary. Budget stops and unproven solver exhaustion are
+right-censored at actual observed spend; proven finite-space exhaustion and
+infrastructure/nondeterminism failures remain separately visible rather than
+being silently censored or excluded. Write suite/results/labels/config/matrix
+hashes, sanitized host/toolchain metadata, and an exact workspace-relative
+reproduction command.
+
+- [ ] **Step 7: Run Task 8B gates, disclose limits, and commit**
+
+Run unit tests, strict schema parity, two-process concurrent append, partial-line
+and duplicate-key rejection, source/config/toolchain drift, artifact tampering,
+post-proof/pre-journal crash recovery, label deletion/access-spy equivalence,
+deterministic-seed reproduction, report input reordering, interrupted/resumed
+smoke matrix over all four strategies, and owned-resource cleanup. Then run the
+full Python suite, Ruff, and changed-file formatting.
+
+The generated report must state that MicroBench is a small, synthetic, public,
+white-box paired suite; related twins are not independent; optimization weights
+must not be tuned on reported evaluation cells; and these results establish
+neither broad real-world exploit discovery nor quantum advantage.
 
 Commit: `feat: record label-isolated exploit benchmarks`
 
