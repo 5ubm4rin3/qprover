@@ -224,6 +224,7 @@ def _base(tmp_path: Path) -> dict[str, object]:
             reason=None,
         ),
         "impact": ImpactEvidence(
+            applicability="economic",
             attacker_observation="attacker_assets",
             protocol_observation="protocol_assets",
             attacker_delta=10**19,
@@ -442,6 +443,30 @@ def test_economic_impact_requires_executed_accounting_in_model_and_schema(
     schema = json.loads(Path("schemas/certificate.schema.json").read_text())
 
     with pytest.raises(ValidationError, match="executed"):
+        ImpactEvidence.model_validate(data["impact"])
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(data, schema)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "applicability",
+        "attacker_observation",
+        "protocol_observation",
+        "attacker_delta",
+        "protocol_delta",
+        "unit",
+    ],
+)
+def test_raw_impact_omissions_fail_in_model_and_schema(
+    tmp_path: Path, field: str
+) -> None:
+    data = json.loads(_confirmed(tmp_path).canonical_json())
+    data["impact"].pop(field)
+    schema = json.loads(Path("schemas/certificate.schema.json").read_text())
+
+    with pytest.raises(ValidationError, match=field):
         ImpactEvidence.model_validate(data["impact"])
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(data, schema)

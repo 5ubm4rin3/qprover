@@ -217,16 +217,24 @@ class LocalAnvil:
             "--disable-min-priority-fee",
         )
         try:
-            self._process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
             runtime = current_runtime()
             if runtime is not None:
-                self._runtime_cleanup_token = runtime.register(self.close)
+                process, token = runtime.spawn(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._process = process
+                self._runtime_cleanup_token = token
+            else:
+                self._process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
         except OSError as error:
             self._process = None
             self._port = None

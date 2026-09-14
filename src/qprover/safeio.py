@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import secrets
 import shutil
 import stat
+from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 
 class SafeOutputError(RuntimeError):
     """An output path violates the trusted local publication boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationOutcome:
+    """The post-rename state; durability warnings cannot revoke a committed run."""
+
+    destination: Path
+    durability_warning: str | None = None
 
 
 def _absolute_lexical(path: Path) -> Path:
@@ -147,7 +158,63 @@ def create_private_directory(path: Path) -> Path:
     return absolute
 
 
-def publish_private_directory(staging: Path, destination: Path) -> Path:
+def validated_private_tree(root: Path) -> Mapping[str, str]:
+    """Return fd-hashed regular files after rejecting every unsafe tree entry."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(_absolute_lexical(root), flags)
+    except OSError as error:
+        raise SafeOutputError("staging root is not a trusted directory") from error
+    records: dict[str, str] = {}
+
+    def visit(directory_fd: int, prefix: str) -> None:
+        for name in os.listdir(directory_fd):
+            if name in {".", ".."}:
+                raise SafeOutputError("invalid staging entry")
+            entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            relative = f"{prefix}/{name}" if prefix else name
+            if stat.S_ISLNK(entry.st_mode) or (
+                not stat.S_ISREG(entry.st_mode) and not stat.S_ISDIR(entry.st_mode)
+            ):
+                raise SafeOutputError("staging contains a link or special entry")
+            if stat.S_ISDIR(entry.st_mode):
+                child = os.open(name, flags, dir_fd=directory_fd)
+                try:
+                    visit(child, relative)
+                finally:
+                    os.close(child)
+                continue
+            if entry.st_nlink != 1:
+                raise SafeOutputError("staging contains a hard-linked file")
+            file_fd = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                opened = os.fstat(file_fd)
+                opened_identity = (opened.st_dev, opened.st_ino, opened.st_size)
+                entry_identity = (entry.st_dev, entry.st_ino, entry.st_size)
+                if opened_identity != entry_identity:
+                    raise SafeOutputError("staging entry changed while publishing")
+                with os.fdopen(os.dup(file_fd), "rb") as handle:
+                    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (after.st_dev, after.st_ino, after.st_size) != entry_identity:
+                    raise SafeOutputError("staging entry changed while publishing")
+                records[relative] = digest
+            finally:
+                os.close(file_fd)
+
+    try:
+        visit(root_fd, "")
+    finally:
+        os.close(root_fd)
+    return records
+
+
+def publish_private_directory(staging: Path, destination: Path) -> PublicationOutcome:
     """Atomically rename a private sibling directory to an immutable run path."""
 
     staging_abs = _absolute_lexical(staging)
@@ -172,10 +239,16 @@ def publish_private_directory(staging: Path, destination: Path) -> Path:
             src_dir_fd=parent_fd,
             dst_dir_fd=parent_fd,
         )
-        os.fsync(parent_fd)
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            # The atomic namespace update already committed.  Report the
+            # durability boundary to the caller without permitting a second,
+            # contradictory publication for the same run id.
+            return PublicationOutcome(destination_abs, f"post-rename fsync: {error}")
     finally:
         os.close(parent_fd)
-    return destination_abs
+    return PublicationOutcome(destination_abs)
 
 
 def remove_private_directory(path: Path) -> None:
@@ -193,7 +266,9 @@ def remove_private_directory(path: Path) -> None:
 
 __all__ = [
     "SafeOutputError",
+    "PublicationOutcome",
     "create_private_directory",
+    "validated_private_tree",
     "publish_private_directory",
     "remove_private_directory",
     "safe_atomic_write",

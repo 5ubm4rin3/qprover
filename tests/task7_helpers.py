@@ -230,6 +230,7 @@ def make_executed_certificate(
             reason=invariant_record["reason"],
         ),
         impact=ImpactEvidence(
+            applicability="economic",
             attacker_observation=manifest.impact.attacker_asset_observation,
             protocol_observation=manifest.impact.protocol_asset_observation,
             attacker_delta=impact["attacker_delta"],

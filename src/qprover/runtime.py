@@ -40,26 +40,41 @@ class ExecutionRuntime:
         if existing is not None:
             yield existing
             return
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("top-level execution runtime requires the main thread")
         runtime = cls()
-        token = _ACTIVE.set(runtime)
         prior_handlers: dict[int, object] = {}
-        is_main = threading.current_thread() is threading.main_thread()
-        if is_main:
+        with runtime._blocked_signals():
+            token = _ACTIVE.set(runtime)
             for number in (signal.SIGINT, signal.SIGTERM):
                 prior_handlers[number] = signal.getsignal(number)
                 signal.signal(number, runtime._handle_signal)
-        atexit.register(runtime.cleanup)
+            atexit.register(runtime.cleanup)
         try:
             yield runtime
             runtime.checkpoint()
         finally:
-            runtime.cleanup()
-            with suppress(Exception):
-                atexit.unregister(runtime.cleanup)
-            if is_main:
+            with runtime._blocked_signals():
+                runtime.cleanup()
+                with suppress(Exception):
+                    atexit.unregister(runtime.cleanup)
                 for number, handler in prior_handlers.items():
                     signal.signal(number, handler)
-            _ACTIVE.reset(token)
+                _ACTIVE.reset(token)
+
+    @contextmanager
+    def _blocked_signals(self) -> Iterator[None]:
+        """Defer cooperative cancellation across ownership hand-off windows."""
+
+        if not hasattr(signal, "pthread_sigmask"):
+            yield
+            return
+        blocked = {signal.SIGINT, signal.SIGTERM}
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            yield
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
 
     def _handle_signal(self, number: int, frame: object) -> None:
         del frame
@@ -93,6 +108,22 @@ class ExecutionRuntime:
         with self._lock:
             self._callbacks.pop(token, None)
 
+    def own_path(
+        self, create: Callable[[], Path], cleanup: Callable[[Path], None]
+    ) -> tuple[Path, int]:
+        """Create and register one exact cleanup target while signals are blocked."""
+
+        with self._blocked_signals():
+            self.checkpoint()
+            path = create()
+            try:
+                token = self.register(lambda owned=path: cleanup(owned))
+            except BaseException:
+                with suppress(BaseException):
+                    cleanup(path)
+                raise
+        return path, token
+
     def cleanup(self) -> None:
         with self._lock:
             if self._cleaned:
@@ -120,6 +151,25 @@ class ExecutionRuntime:
             with suppress(BaseException):
                 process.wait(timeout=2)
 
+    def spawn(
+        self,
+        command: Sequence[str],
+        **kwargs: object,
+    ) -> tuple[subprocess.Popen[object], int]:
+        """Spawn and register exactly one new-session process group atomically."""
+
+        with self._blocked_signals():
+            self.checkpoint()
+            process = subprocess.Popen(
+                tuple(command), start_new_session=True, **kwargs  # type: ignore[arg-type]
+            )
+            try:
+                token = self.register(lambda: self._terminate_process(process))
+            except BaseException:
+                self._terminate_process(process)
+                raise
+        return process, token
+
     def run(
         self,
         command: Sequence[str],
@@ -131,17 +181,15 @@ class ExecutionRuntime:
         """Run an exact-owned process group with cooperative cancellation."""
 
         self.checkpoint()
-        process = subprocess.Popen(
-            tuple(command),
+        process, cleanup_token = self.spawn(
+            command,
             cwd=cwd,
             env=dict(env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
         )
-        cleanup_token = self.register(lambda: self._terminate_process(process))
         try:
             while True:
                 self.checkpoint()

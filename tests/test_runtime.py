@@ -5,6 +5,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,23 @@ def test_runtime_nesting_restores_handlers_and_cleans_once() -> None:
 
     assert cleaned == ["owned"]
     assert {number: signal.getsignal(number) for number in prior} == prior
+
+
+def test_top_level_runtime_rejects_non_main_thread() -> None:
+    errors: list[BaseException] = []
+
+    def activate_in_worker() -> None:
+        try:
+            with ExecutionRuntime.activate():
+                pass
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=activate_in_worker)
+    worker.start()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "main thread" in str(errors[0])

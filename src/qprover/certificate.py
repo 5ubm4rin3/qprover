@@ -250,12 +250,12 @@ class InvariantEvidence(StrictModel):
 
 
 class ImpactEvidence(StrictModel):
-    applicability: Literal["economic", "not_applicable"] = "economic"
-    attacker_observation: StrictStr | None = Field(default=None, min_length=1)
-    protocol_observation: StrictStr | None = Field(default=None, min_length=1)
-    attacker_delta: StrictInt | None = None
-    protocol_delta: StrictInt | None = None
-    unit: StrictStr | None = Field(default=None, min_length=1)
+    applicability: Literal["economic", "not_applicable"]
+    attacker_observation: StrictStr | None = Field(min_length=1)
+    protocol_observation: StrictStr | None = Field(min_length=1)
+    attacker_delta: StrictInt | None
+    protocol_delta: StrictInt | None
+    unit: StrictStr | None = Field(min_length=1)
     admissible: StrictBool
     executed: StrictBool
 

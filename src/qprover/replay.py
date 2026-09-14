@@ -951,6 +951,15 @@ def _clean_directory(path: Path) -> None:
         raise ReplayError(f"replay directory remains after cleanup: {path}")
 
 
+def _owned_temporary_directory(prefix: str) -> tuple[Path, int | None]:
+    runtime = current_runtime()
+    if runtime is None:
+        return Path(tempfile.mkdtemp(prefix=prefix)), None
+    return runtime.own_path(
+        lambda: Path(tempfile.mkdtemp(prefix=prefix)), _clean_directory
+    )
+
+
 def _hash_compiler_sources(sources: dict[str, Any]) -> str:
     digest = hashlib.sha256()
     for name in sorted(sources):
@@ -966,7 +975,9 @@ def _hash_compiler_sources(sources: dict[str, Any]) -> str:
 
 
 def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) -> None:
-    temporary = Path(tempfile.mkdtemp(prefix="qprover-replay-preflight-"))
+    temporary, cleanup_token = _owned_temporary_directory(
+        "qprover-replay-preflight-"
+    )
     out = temporary / "out"
     cache = temporary / "cache"
     sources = tuple(
@@ -1068,6 +1079,9 @@ def _offline_preflight(certificate: ProofCertificate, manifest: TargetManifest) 
         raise ReplayError("offline compiler preflight could not run") from error
     finally:
         _clean_directory(temporary)
+        runtime = current_runtime()
+        if runtime is not None and cleanup_token is not None:
+            runtime.unregister(cleanup_token)
 
 
 def _load_validated_certificate(path: Path) -> ProofCertificate:
@@ -1396,7 +1410,9 @@ def cold_verify(
     recipe = build_replay_recipe(certificate, manifest, poc_bytes)
     records: list[ReplayRecord] = []
     for index in range(1, 4):
-        run_root = Path(tempfile.mkdtemp(prefix=f"qprover-cold-{index}-"))
+        run_root, cleanup_token = _owned_temporary_directory(
+            f"qprover-cold-{index}-"
+        )
         try:
             materialization = materialize_replay_recipe(
                 certificate, manifest, recipe, poc_bytes, run_root
@@ -1455,6 +1471,9 @@ def cold_verify(
             )
         finally:
             _clean_directory(run_root)
+            runtime = current_runtime()
+            if runtime is not None and cleanup_token is not None:
+                runtime.unregister(cleanup_token)
 
     updated = _seal_certificate(certificate, recipe, tuple(records))
     write_certificate(updated, path)

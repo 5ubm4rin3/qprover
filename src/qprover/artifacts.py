@@ -505,7 +505,14 @@ def build_target(manifest: TargetManifest, *, offline: bool = False) -> Artifact
             )
         parsed_requests.append((source_name, contract_name))
 
-    build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
+    runtime = current_runtime()
+    if runtime is None:
+        build_root = Path(tempfile.mkdtemp(prefix="qprover-foundry-build-"))
+    else:
+        build_root, _ = runtime.own_path(
+            lambda: Path(tempfile.mkdtemp(prefix="qprover-foundry-build-")),
+            lambda path: shutil.rmtree(path, ignore_errors=True),
+        )
     try:
         return _build_target_in_workspace(
             manifest, root, parsed_requests, build_root, offline=offline
