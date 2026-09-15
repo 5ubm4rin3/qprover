@@ -1,0 +1,34 @@
+{
+  "additionalProperties": false,
+  "description": "Public targets and seeds. Labels are deliberately absent.",
+  "properties": {
+    "manifests": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Manifests",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "seeds": {
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 1,
+      "title": "Seeds",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifests",
+    "seeds"
+  ],
+  "title": "BenchmarkSuite",
+  "type": "object"
+}

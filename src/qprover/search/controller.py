@@ -62,6 +62,8 @@ class SearchRun:
     evm_transactions: int
     duplicate_proposals: int
     wall_seconds: float
+    initialization_seconds: float
+    search_seconds: float
     outcome_counts: Mapping[Outcome, int]
     evaluations: tuple[EvaluatedCandidate, ...]
     events: tuple[SearchEvent, ...]
@@ -96,6 +98,8 @@ class SearchRun:
             "evm_transactions": self.evm_transactions,
             "duplicate_proposals": self.duplicate_proposals,
             "wall_seconds": self.wall_seconds,
+            "initialization_seconds": self.initialization_seconds,
+            "search_seconds": self.search_seconds,
             "outcome_counts": {
                 outcome.value: self.outcome_counts.get(outcome, 0)
                 for outcome in Outcome
@@ -222,6 +226,7 @@ class SearchController:
         failure_reason: str | None = None
         stop_reason = "solver_exhausted_unproven"
         finished = started
+        initialization_finished = started
 
         initialization_stopped = False
         if (problem is None) != (seed is None):
@@ -254,6 +259,7 @@ class SearchController:
                 if finished - started >= limits.wall_seconds:
                     stop_reason = "wall_budget"
                     initialization_stopped = True
+        initialization_finished = finished
 
         while not initialization_stopped:
             now = self._clock()
@@ -555,6 +561,8 @@ class SearchController:
             evm_transactions=transactions,
             duplicate_proposals=duplicate_proposals,
             wall_seconds=max(0.0, finished - started),
+            initialization_seconds=max(0.0, initialization_finished - started),
+            search_seconds=max(0.0, finished - initialization_finished),
             outcome_counts={outcome: outcomes[outcome] for outcome in Outcome},
             evaluations=tuple(evaluations),
             events=tuple(ledger.events),

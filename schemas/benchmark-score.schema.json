@@ -1,0 +1,122 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "correct": {
+      "title": "Correct",
+      "type": "boolean"
+    },
+    "expected": {
+      "enum": [
+        "positive",
+        "negative"
+      ],
+      "title": "Expected",
+      "type": "string"
+    },
+    "false_confirmed": {
+      "title": "False Confirmed",
+      "type": "boolean"
+    },
+    "family": {
+      "minLength": 1,
+      "title": "Family",
+      "type": "string"
+    },
+    "labels_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Labels Sha256",
+      "type": "string"
+    },
+    "matrix_id": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Matrix Id",
+      "type": "string"
+    },
+    "pair": {
+      "enum": [
+        "a",
+        "b"
+      ],
+      "title": "Pair",
+      "type": "string"
+    },
+    "predicted": {
+      "enum": [
+        "positive",
+        "negative",
+        "failure",
+        "incomplete"
+      ],
+      "title": "Predicted",
+      "type": "string"
+    },
+    "public_target_id": {
+      "minLength": 1,
+      "title": "Public Target Id",
+      "type": "string"
+    },
+    "raw_row_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Raw Row Sha256",
+      "type": "string"
+    },
+    "run_key": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Run Key",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "score_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Score Sha256",
+      "type": "string"
+    },
+    "seed": {
+      "title": "Seed",
+      "type": "integer"
+    },
+    "strategy": {
+      "enum": [
+        "random",
+        "coverage",
+        "risk",
+        "qubo"
+      ],
+      "title": "Strategy",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "score_sha256",
+    "run_key",
+    "matrix_id",
+    "public_target_id",
+    "strategy",
+    "seed",
+    "expected",
+    "predicted",
+    "correct",
+    "false_confirmed",
+    "family",
+    "pair",
+    "raw_row_sha256",
+    "labels_sha256"
+  ],
+  "title": "BenchmarkScore",
+  "type": "object"
+}
