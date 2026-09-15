@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UV_PYTHON: "3.14.7"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.11"
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.14.7
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.4.0
+
+      - name: Sync locked environment
+        run: uv sync --frozen --all-groups
+
+      - name: Lockfile check
+        run: uv lock --check
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Python tests
+        run: uv run pytest -q
+
+      - name: Foundry fixture tests
+        run: forge test --root benchmarks/foundry -vv
+
+      - name: Doctor
+        run: uv run qprover doctor --json
+
+      - name: Autonomous demo
+        run: |
+          rm -rf /tmp/qprover-demo-core
+          uv run qprover demo --json --out /tmp/qprover-demo-core

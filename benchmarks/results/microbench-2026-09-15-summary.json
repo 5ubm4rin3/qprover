@@ -1,0 +1,101 @@
+{
+  "schema_version": "1.0",
+  "name": "QProver MicroBench v1 verified summary",
+  "date": "2026-09-15",
+  "matrix_id": "b2ff4d9988c6af854e599b6b2b5f07f181f5f7551bfea6937d80c41c9d5b3529",
+  "scheduled_cells": 480,
+  "targets": 12,
+  "seeds": 10,
+  "strategies": {
+    "coverage": {
+      "positive_confirmed": 12,
+      "positive_total": 60,
+      "positive_rate": 0.2,
+      "negative_false_confirmed": 0,
+      "negative_total": 60,
+      "candidates": 883,
+      "search_transactions": 1956
+    },
+    "random": {
+      "positive_confirmed": 21,
+      "positive_total": 60,
+      "positive_rate": 0.35,
+      "negative_false_confirmed": 0,
+      "negative_total": 60,
+      "candidates": 879,
+      "search_transactions": 1565
+    },
+    "risk": {
+      "positive_confirmed": 20,
+      "positive_total": 60,
+      "positive_rate": 0.3333333333333333,
+      "negative_false_confirmed": 0,
+      "negative_total": 60,
+      "candidates": 820,
+      "search_transactions": 1070
+    },
+    "qubo": {
+      "positive_confirmed": 45,
+      "positive_total": 60,
+      "positive_rate": 0.75,
+      "positive_ci95": [0.6214036445204558, 0.8528139262009964],
+      "negative_false_confirmed": 0,
+      "negative_total": 60,
+      "candidates": 702,
+      "search_transactions": 1541,
+      "solver_calls": 123,
+      "solver_reads": 7872,
+      "solver_sweeps": 14760,
+      "solver_seconds": 184.43410400219727,
+      "max_logical_bits": 42,
+      "max_couplers": 384
+    }
+  },
+  "family_positive_confirmed": {
+    "coverage": {
+      "access_control": "5/10",
+      "governance": "0/10",
+      "oracle": "2/10",
+      "reentrancy": "2/10",
+      "side_entrance": "2/10",
+      "signature_replay": "1/10"
+    },
+    "random": {
+      "access_control": "5/10",
+      "governance": "1/10",
+      "oracle": "4/10",
+      "reentrancy": "5/10",
+      "side_entrance": "5/10",
+      "signature_replay": "1/10"
+    },
+    "risk": {
+      "access_control": "10/10",
+      "governance": "0/10",
+      "oracle": "0/10",
+      "reentrancy": "10/10",
+      "side_entrance": "0/10",
+      "signature_replay": "0/10"
+    },
+    "qubo": {
+      "access_control": "10/10",
+      "governance": "4/10",
+      "oracle": "8/10",
+      "reentrancy": "10/10",
+      "side_entrance": "10/10",
+      "signature_replay": "3/10"
+    }
+  },
+  "toolchain": {
+    "python": "3.14.7",
+    "uv": "0.12.11",
+    "forge": "1.4.0",
+    "anvil": "1.4.0"
+  },
+  "limitations": [
+    "small synthetic public white-box paired benchmark",
+    "paired twins are related and not independent",
+    "bounded manifest-defined action and argument domains",
+    "no hidden-target generalization claim from this result",
+    "no quantum hardware used and no quantum-advantage claim"
+  ]
+}

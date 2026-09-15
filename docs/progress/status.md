@@ -1,73 +1,78 @@
 # QProver Project Status
 
-Last updated: 2026-09-12 (Asia/Seoul)
+Last updated: 2026-09-15 (Asia/Seoul)
 
 ## Current phase
 
-Research and architecture discovery.
+Submission packaging and release-candidate verification.
 
-## Governing objective
+## Verified implementation state
 
-Satisfy all 13 completion criteria in `AGENTS.md` with a reproducible,
-EVM-validated autonomous exploit-search system and a defensible comparison of
-optimization-guided search against meaningful classical baselines.
+Core Tasks 1–8C are implemented on the `feat/qprover-build` development line. The latest pre-packaging verified commit supplied for documentation work is `25c5be7` (`fix: make full benchmark reports reproducible`).
+
+Verified local gates before submission packaging:
+
+- `uv lock --check` — pass;
+- Ruff format — pass;
+- Ruff lint — pass;
+- Python tests — **1,237 passed**;
+- Foundry benchmark fixtures — **12/12 passed**;
+- `qprover doctor --json` — `ok=true`;
+- one-command autonomous demo — `CONFIRMED`;
+- demo proof — **3/3 successful cold replays**;
+- QUBO demo objective — non-flat;
+- MicroBench full matrix — **480/480 cells completed**;
+- benchmark report/scoring — 480 rows scored.
+
+## Benchmark headline
+
+Full MicroBench v1:
+
+```text
+12 targets × 10 seeds × 4 strategies = 480 cells
+```
+
+Positive exploit confirmation:
+
+- Coverage: 12/60 (20.0%)
+- Random: 21/60 (35.0%)
+- Risk: 20/60 (33.3%)
+- QUBO: **45/60 (75.0%)**
+
+No false confirmations were observed in 60 negative runs per strategy.
+
+Interpretation: QUBO improved search yield/candidate efficiency on this small synthetic benchmark, at the cost of additional simulated-annealing compute. No quantum-advantage or universal real-world superiority claim is made.
 
 ## Completed
 
-- Read and adopted `AGENTS.md` as the governing contract.
-- Loaded the applicable Superpowers and deep-research workflows.
-- Inventoried the initially empty repository and core local toolchain.
-- Confirmed Foundry/Anvil/Cast 1.4.0, Slither 0.11.6, Aderyn 0.6.8,
-  Python 3.14.7, uv 0.12.11, Rust 1.98.0, Node 26.8.1, and authenticated
-  GitHub CLI access.
-- Confirmed Docker is installed but its daemon is not running.
-- Confirmed the system `solc` selector currently targets an Intel-only
-  compiler and is unusable on this ARM host; Foundry-managed solc remains an
-  available path.
-- Started independent research streams for exploit-search literature,
-  optimization-guided test planning, and competition/benchmark/tooling facts.
+- [x] Coherent end-to-end architecture
+- [x] Important automated tests
+- [x] Reproducible end-to-end exploit demonstration
+- [x] Meaningful search baselines
+- [x] Actual benchmark results
+- [x] Documented limitations
+- [x] Clean setup/reproduction documentation
+- [x] Verified development state pushed to GitHub feature branch
+- [x] README / architecture / benchmark / demo submission documentation prepared
+- [x] Pitch-deck content and demo-video storyboard prepared
 
-## Open work
+## Remaining release gates
 
-- Synthesize research and compare architecture alternatives.
-- Write and self-review the architecture specification.
-- Write the task-level implementation plan.
-- Implement and verify the analyzer, graph, search strategies, local EVM
-  execution, minimizer, certificate, benchmarks, and CLI.
-- Run real benchmarks and save raw plus summarized results.
-- Prepare documentation, CI, demo, presentation, and video storyboard.
-- Perform independent code and security review; resolve serious findings.
-- Publish the verified repository and create the release tag.
+- [ ] Push submission-documentation commit
+- [ ] Confirm GitHub Actions CI passes on the exact release candidate
+- [ ] Perform final whole-branch independent code/security review
+- [ ] Resolve any serious final review findings
+- [ ] Merge verified feature branch into intended default branch
+- [ ] Change repository visibility to public before TRUST404 submission
+- [ ] Export pitch deck to PDF
+- [ ] Record and verify ≤5-minute demo video
+- [ ] Test participant-package adapter if organizer schemas/runner become available
+- [ ] Create final release tag after all gates are green
 
-## Rulings and constraints
+## Important constraints
 
-- Ruling: the user's end-to-end autonomous authorization satisfies the normal
-  brainstorming approval gates; the design and plan will still be written and
-  reviewed, but work will not pause for routine approval.
-- Ruling: the environment denied writes to the pre-existing `.git/index`.
-  Development therefore uses `.qprover-git/` as a git-ignored writable Git
-  metadata directory with the project root as its work tree. This preserves
-  atomic history and publication capability while leaving user-visible files
-  at the repository root. Cost if wrong: native Git commands without explicit
-  `--git-dir=.qprover-git --work-tree=.` will show the original read-only
-  branch rather than development history.
-- Offensive execution is restricted to fresh local Anvil chains or explicitly
-  controlled forks. No public-chain broadcasts are permitted.
-- Static findings and search scores are hypotheses only. A finding is confirmed
-  only after local EVM execution and a successful deterministic replay.
-
-## Completion checklist
-
-- [ ] Coherent end-to-end architecture
-- [ ] Important automated tests
-- [ ] Reproducible end-to-end exploit demonstration
-- [ ] Meaningful search baselines
-- [ ] Actual benchmark results
-- [ ] Documented limitations
-- [ ] Clean setup reproducibility
-- [ ] Passing CI
-- [ ] Independent review
-- [ ] Serious review issues resolved
-- [ ] Verified state on GitHub
-- [ ] Final release/tag
-- [ ] Hackathon presentation/demo materials
+- Offensive execution remains restricted to local/authorized environments.
+- An executed invariant violation is required; static/model output alone is unconfirmed.
+- Solver exhaustion does not prove target safety.
+- Benchmark labels/witnesses are scorer-only and not strategy inputs.
+- Exact TRUST404 grader-schema compatibility remains unverified until the participant package is available.
