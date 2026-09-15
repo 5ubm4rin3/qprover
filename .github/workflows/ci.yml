@@ -45,6 +45,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Prime Solidity compiler cache
+        run: forge build --root benchmarks/foundry
+
       - name: Python tests
         run: uv run pytest -q
 
