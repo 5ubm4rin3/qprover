@@ -1,7 +1,7 @@
 # Optimization-Guided Search for Stateful Test Ordering and Regression-Corpus Selection
 
-**Research status:** scoped technical recommendation  
-**Last reviewed:** 2026-09-12  
+**Research status:** scoped technical recommendation
+**Last reviewed:** 2026-09-12
 **Scope:** benign software-test scheduling and regression-suite optimization only
 
 ## Executive recommendation
@@ -357,7 +357,7 @@ Always report:
 - feasibility rate and each constraint's violation magnitude;
 - best, median, interquartile range, and 95% confidence interval of objective value;
 - normalized optimality gap
-  
+
   \[
   g=\frac{E-E^*}{\max(1,|E^*|)};
   \]
