@@ -329,6 +329,19 @@ def write_completeness_report(
     return json_path, markdown_path
 
 
+def _reproduction_argument(path: Path) -> str:
+    """Return a stable workspace-relative benchmark path when possible."""
+
+    resolved = path.resolve()
+    parts = resolved.parts
+    benchmark_positions = [
+        index for index, part in enumerate(parts) if part == "benchmarks"
+    ]
+    if benchmark_positions:
+        return "/".join(parts[benchmark_positions[-1] :])
+    return resolved.as_posix()
+
+
 def build_report(
     *,
     matrix: BenchmarkMatrix,
@@ -483,6 +496,39 @@ def build_report(
         for name, values in sorted(pair_counts.items())
     }
 
+    strategy_family_counts: dict[
+        tuple[str, str],
+        dict[str, int],
+    ] = defaultdict(
+        lambda: {
+            "positive_total": 0,
+            "positive_confirmed": 0,
+            "negative_total": 0,
+            "negative_false_confirmed": 0,
+        }
+    )
+    for score in scores:
+        counts = strategy_family_counts[(score.strategy, score.family)]
+        if score.expected == "positive":
+            counts["positive_total"] += 1
+            counts["positive_confirmed"] += int(score.predicted == "positive")
+        else:
+            counts["negative_total"] += 1
+            counts["negative_false_confirmed"] += int(score.predicted == "positive")
+
+    strategy_family: dict[str, dict[str, object]] = defaultdict(dict)
+    for (strategy, family), counts in sorted(strategy_family_counts.items()):
+        strategy_family[strategy][family] = {
+            "positive_confirmed": _rate(
+                counts["positive_confirmed"],
+                counts["positive_total"],
+            ),
+            "negative_false_confirmed": _rate(
+                counts["negative_false_confirmed"],
+                counts["negative_total"],
+            ),
+        }
+
     matrix_payload = _canonical(matrix.model_dump(mode="json")) + "\n"
     return {
         "schema_version": "1.0",
@@ -505,6 +551,7 @@ def build_report(
             score_by_key,
         ),
         "family_pair_correct": pair_correct,
+        "strategy_family": strategy_family,
         "methodology": {
             "seed_semantics": (
                 "Deterministic policies must agree across repeated ignored "
@@ -524,9 +571,13 @@ def build_report(
             ),
         },
         "reproduce": (
-            "uv run qprover benchmark --suite benchmarks/suite.json "
-            "--config benchmarks/config/smoke.json --out <output> && "
-            "uv run qprover report --input <output>"
+            f"uv run qprover benchmark --suite {_reproduction_argument(suite_path)} "
+            f"--config {_reproduction_argument(config_path)} --workspace . "
+            "--out <output> && "
+            "uv run qprover report --input <output> "
+            f"--suite {_reproduction_argument(suite_path)} "
+            f"--config {_reproduction_argument(config_path)} "
+            f"--labels {_reproduction_argument(labels_path)}"
         ),
     }
 
@@ -579,6 +630,35 @@ def write_report(
             f"{false_confirmed['successes']}/{false_confirmed['total']} | "
             f"{raw['censored_misses']} |"
         )
+    family_summary = report.get("strategy_family", {})
+    if not isinstance(family_summary, dict):
+        raise ValueError("strategy-family report entry must be an object")
+
+    lines.extend(
+        [
+            "",
+            "## Strategy × family",
+            "",
+            "| Strategy | Family | Positive confirmed | Negative false-confirmed |",
+            "|---|---|---:|---:|",
+        ]
+    )
+    for strategy, families in sorted(family_summary.items()):
+        if not isinstance(families, dict):
+            raise ValueError("strategy-family entry must be an object")
+        for family, raw in sorted(families.items()):
+            if not isinstance(raw, dict):
+                raise ValueError("strategy-family rate entry must be an object")
+            positive = raw["positive_confirmed"]
+            negative = raw["negative_false_confirmed"]
+            if not isinstance(positive, dict) or not isinstance(negative, dict):
+                raise ValueError("strategy-family rate must be an object")
+            lines.append(
+                f"| {strategy} | {family} | "
+                f"{positive['successes']}/{positive['total']} | "
+                f"{negative['successes']}/{negative['total']} |"
+            )
+
     lines.extend(
         [
             "",
