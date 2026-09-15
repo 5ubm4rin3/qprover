@@ -16,6 +16,9 @@ dependencies = [
   "z3-solver>=4.15,<5",
 ]
 
+[project.scripts]
+qprover = "qprover.cli:main"
+
 [dependency-groups]
 dev = [
   "hypothesis>=6.140,<7",
