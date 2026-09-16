@@ -54,7 +54,9 @@ def _sources(tmp_path: Path) -> tuple[Path, Path]:
     target = src / "Demo.sol"
     target.write_text("pragma solidity 0.8.24; contract Demo {}", encoding="utf-8")
     invariants = tmp_path / "Invariants.sol"
-    invariants.write_text("pragma solidity 0.8.24; contract Invariants {}", encoding="utf-8")
+    invariants.write_text(
+        "pragma solidity 0.8.24; contract Invariants {}", encoding="utf-8"
+    )
     return target, invariants
 
 
@@ -124,7 +126,9 @@ def _analysis() -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def _compiler_facts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(trust404, "compile_track04_target", lambda *_a, **_kw: _analysis())
+    monkeypatch.setattr(
+        trust404, "compile_track04_target", lambda *_a, **_kw: _analysis()
+    )
 
 
 def test_v2_search_model_contains_only_generic_call_actions(tmp_path: Path) -> None:
