@@ -152,7 +152,11 @@ def test_v2_dependency_transitions_are_label_neutral_and_deterministic(
     first = build_search_model(target, invariants, manifest)
     second = build_search_model(target, invariants, manifest)
 
-    assert first == second
+    assert first.actions == second.actions
+    assert first.variants == second.variants
+    assert first.utilities == second.utilities
+    assert first.transitions == second.transitions
+    assert first.max_sequence_length == second.max_sequence_length
     assert (
         "call:move(address,uint256)",
         "call:withdraw(uint256)",
