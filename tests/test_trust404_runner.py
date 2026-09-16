@@ -5,8 +5,58 @@ import json
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import qprover.trust404 as trust404
 from qprover.trust404_harness import VerificationResult
+
+
+def _function(
+    signature: str,
+    *,
+    parameters: tuple[str, ...] = (),
+    mutability: str = "nonpayable",
+    reads: tuple[str, ...] = (),
+    writes: tuple[str, ...] = (),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        signature=signature,
+        visibility="external",
+        state_mutability=mutability,
+        function_selector="0x12345678",
+        parameters=parameters,
+        canonical_id=f"function:Demo:{signature}",
+        transitive_storage_reads=reads,
+        transitive_storage_writes=writes,
+        calls=(),
+        value_flows=(),
+        external_call_before_write=False,
+        source_name="Demo.sol",
+        source_span="0:1:0",
+    )
+
+
+def _analysis() -> SimpleNamespace:
+    contract = SimpleNamespace(
+        functions=(
+            _function("setOwner(address)", parameters=("address",), writes=("owner",)),
+            _function("deposit()", mutability="payable", writes=("balances",)),
+            _function("withdraw()", reads=("balances",), writes=("balances",)),
+        )
+    )
+    return SimpleNamespace(
+        report=SimpleNamespace(contract=lambda *_args: contract),
+        graph=SimpleNamespace(),
+        source_name="Demo.sol",
+        contract_name="Demo",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _compiler_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(trust404, "compile_track04_target", lambda *_a, **_kw: _analysis())
 
 
 def _files(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -96,16 +146,6 @@ def test_run_track04_returns_one_and_keeps_best_candidate_when_not_proven(
     from qprover.trust404_runner import run_track04
 
     target, invariants, manifest = _files(tmp_path)
-    target.write_text(
-        """pragma solidity 0.8.24;
-contract Demo {
-    mapping(address=>uint256) public balances;
-    function deposit() external payable { balances[msg.sender] += msg.value; }
-    function withdraw() external { uint256 x=balances[msg.sender]; balances[msg.sender]=0; (bool ok,)=msg.sender.call{value:x}(\"\"); require(ok); }
-}
-""",
-        encoding="utf-8",
-    )
     out = tmp_path / "out"
 
     def verifier(*args, **kwargs):
