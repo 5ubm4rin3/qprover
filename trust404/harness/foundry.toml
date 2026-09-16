@@ -1,0 +1,39 @@
+# TRUST404 Track 04 — 하네스 Foundry 설정
+#
+# forge 1.7.1 / solc 0.8.24 에서 컴파일·sanity 동작을 확인했다.
+#
+# 결정론 원칙(DETERMINISM.md 참고): block.number/timestamp 는 항상 매니페스트
+# 값으로 vm.roll/vm.warp 고정. optimizer/solc/evm_version 버전을 고정해 참가자
+# 환경과 채점 샌드박스의 바이트코드가 같아지게 한다. 채점 샌드박스는 네트워크
+# 차단이므로 rpc_endpoints 는 정의하지 않는다(= fork 모드 사실상 불가, mode는
+# "local" 만 지원).
+
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = ["lib"]
+
+solc = "0.8.24"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+bytecode_hash = "none"
+
+# 참가자가 만든 Exploit.sol 을 하네스 프로젝트 루트에 두고 컴파일할 수 있도록
+# 소스 루트 하나만 쓴다. remappings 없이 컴파일되는 것이 타깃/Exploit 모두의 전제.
+remappings = []
+
+ffi = false
+fs_permissions = [
+  { access = "read", path = "./" },
+  { access = "read", path = "../targets" },
+]
+
+[fuzz]
+runs = 1
+seed = "0x2a"
+
+[invariant]
+runs = 1

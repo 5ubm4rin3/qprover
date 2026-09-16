@@ -25,3 +25,6 @@ build/
 .idea/
 .vscode/
 task-5-report.md
+
+# TRUST404 local Foundry dependencies
+trust404/harness/lib/
