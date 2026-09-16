@@ -83,7 +83,9 @@ def _find_target_artifact(
         raw = _load_json(path)
         metadata = raw.get("metadata")
         settings = metadata.get("settings") if isinstance(metadata, dict) else None
-        target = settings.get("compilationTarget") if isinstance(settings, dict) else None
+        target = (
+            settings.get("compilationTarget") if isinstance(settings, dict) else None
+        )
         if target == {source_name: contract_name}:
             matches.append((path, raw))
     if len(matches) != 1:
@@ -114,10 +116,14 @@ def _source_units(build_info: dict[str, Any]) -> tuple[SourceUnitArtifact, ...]:
     for source_name in sorted(input_sources):
         input_record = input_sources[source_name]
         output_record = output_sources.get(source_name)
-        content = input_record.get("content") if isinstance(input_record, dict) else None
+        content = (
+            input_record.get("content") if isinstance(input_record, dict) else None
+        )
         ast = output_record.get("ast") if isinstance(output_record, dict) else None
         if not isinstance(content, str) or not isinstance(ast, dict):
-            raise Track04AnalysisError(f"build-info source is incomplete: {source_name}")
+            raise Track04AnalysisError(
+                f"build-info source is incomplete: {source_name}"
+            )
         units.append(
             SourceUnitArtifact(
                 source_name=source_name,
@@ -137,7 +143,9 @@ def _target_artifact(
 ) -> ContractArtifact:
     abi = raw.get("abi")
     bytecode_record = raw.get("bytecode")
-    bytecode = bytecode_record.get("object") if isinstance(bytecode_record, dict) else None
+    bytecode = (
+        bytecode_record.get("object") if isinstance(bytecode_record, dict) else None
+    )
     ast = raw.get("ast")
     layout = raw.get("storageLayout")
     if not isinstance(abi, list):
@@ -187,7 +195,9 @@ def compile_track04_target(
     if not contract.is_file():
         raise FileNotFoundError(f"contract not found: {contract}")
 
-    target_root = contract.parent.parent if contract.parent.name == "src" else contract.parent
+    target_root = (
+        contract.parent.parent if contract.parent.name == "src" else contract.parent
+    )
     expected = (target_root / target_src).resolve()
     if expected != contract:
         raise Track04AnalysisError(
@@ -230,7 +240,9 @@ def compile_track04_target(
 
         build_info_paths = sorted((workspace / "out" / "build-info").glob("*.json"))
         if len(build_info_paths) != 1:
-            raise Track04AnalysisError("compiler must emit exactly one build-info record")
+            raise Track04AnalysisError(
+                "compiler must emit exactly one build-info record"
+            )
         build_info = _load_json(build_info_paths[0])
         compiler_version = build_info.get("solcVersion")
         input_evm = build_info.get("input", {}).get("settings", {}).get("evmVersion")
@@ -247,7 +259,9 @@ def compile_track04_target(
         artifact_path, artifact_raw = _find_target_artifact(
             workspace / "out", source_name, target_name
         )
-        build_info_id = str(build_info.get("id") or _sha256(build_info_paths[0].read_bytes())[:16])
+        build_info_id = str(
+            build_info.get("id") or _sha256(build_info_paths[0].read_bytes())[:16]
+        )
         target_artifact = _target_artifact(
             artifact_path,
             artifact_raw,
