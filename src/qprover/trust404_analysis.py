@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -47,6 +48,41 @@ def _run(command: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise Track04AnalysisError(f"compiler build failed: {detail}")
     return result
+
+
+def _local_solc(solc_version: str) -> str | None:
+    """Return an exact local solc path when one matches the organizer version."""
+
+    candidates = tuple(
+        dict.fromkeys(
+            item
+            for item in (
+                os.environ.get("QPROVER_SOLC"),
+                "/usr/local/bin/solc",
+                shutil.which("solc"),
+            )
+            if item
+        )
+    )
+    for candidate in candidates:
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                (str(path), "--version"),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        version_text = f"{result.stdout}\n{result.stderr}"
+        match = re.search(r"Version:\s*(\d+\.\d+\.\d+)", version_text)
+        if result.returncode == 0 and match and match.group(1) == solc_version:
+            return str(path)
+    return None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -224,6 +260,12 @@ def compile_track04_target(
                 ),
                 encoding="utf-8",
             )
+        local_solc = _local_solc(solc_version)
+        compiler_args = (
+            ("--use", local_solc, "--offline")
+            if local_solc is not None
+            else ("--use", solc_version)
+        )
         command = (
             "forge",
             "build",
@@ -235,6 +277,7 @@ def compile_track04_target(
             "--build-info",
             "--extra-output",
             "storageLayout",
+            *compiler_args,
         )
         _run(command, workspace)
 
