@@ -84,7 +84,9 @@ def test_run_track04_writes_proven_exploit_and_deterministic_attempt_log(
     assert "setOwner(address)" in exploit
     assert "result=PROVEN" in log
     assert "violated=ownerUnchanged" in log
-    assert "stage=macro" in log
+    assert "stage=search" in log
+    assert "stage=macro" not in log
+    assert "stage=direct" not in log
 
 
 def test_run_track04_returns_one_and_keeps_best_candidate_when_not_proven(
@@ -126,6 +128,7 @@ contract Demo {
     lines = (out / "attempts.log").read_text(encoding="utf-8").splitlines()
     assert 1 <= len(lines) <= 2
     assert all("result=NOT_PROVEN" in line for line in lines)
+    assert all("stage=search" in line for line in lines)
 
 
 def test_run_track04_returns_two_for_harness_infrastructure_failure(
