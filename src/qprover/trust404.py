@@ -17,11 +17,17 @@ SELF_ADDRESS = "__QPROVER_SELF__"
 OTHER_ADDRESS = "__QPROVER_OTHER__"
 TARGET_ADDRESS = "__QPROVER_TARGET__"
 ADDRESS_REF_PREFIX = "__QPROVER_ADDRESS_REF__:"
+UINT_REF_PREFIX = "__QPROVER_UINT_REF__:"
 EXIT_FOUND = 0
 EXIT_NOT_FOUND = 1
 EXIT_ERROR = 2
 
 _CONTRACT_TYPE = re.compile(r"^(?:contract|interface)\s+([A-Za-z_]\w*)")
+_UINT_TYPE = re.compile(r"uint(?:[0-9]+)?$")
+_MAPPING_ADDRESS_UINT = re.compile(
+    r"mapping\s*\(\s*address\s*=>\s*(uint(?:[0-9]+)?)\s*\)$"
+)
+_RUNTIME_SCALES = ((1, 1), (9, 10), (1, 2), (2, 1))
 
 
 class ManifestContractError(ValueError):
@@ -183,6 +189,18 @@ class Track04SearchModel:
     analysis: Track04Analysis
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeUintSource:
+    target_path: tuple[str, ...]
+    signature: str
+    argument_mode: str
+    reads: tuple[str, ...]
+
+    @property
+    def identity(self) -> tuple[tuple[str, ...], str, str]:
+        return self.target_path, self.signature, self.argument_mode
+
+
 def _address_ref(path: tuple[str, ...]) -> str:
     return ADDRESS_REF_PREFIX + "|".join(path)
 
@@ -197,26 +215,62 @@ def _decode_address_ref(value: str) -> tuple[str, ...]:
     return path
 
 
+def _uint_ref(source: _RuntimeUintSource, numerator: int, denominator: int) -> str:
+    path = "/".join(source.target_path) if source.target_path else "~"
+    return UINT_REF_PREFIX + "|".join(
+        (
+            path,
+            source.signature,
+            source.argument_mode,
+            str(numerator),
+            str(denominator),
+        )
+    )
+
+
+def _decode_uint_ref(
+    value: str,
+) -> tuple[tuple[str, ...], str, str, int, int]:
+    if not value.startswith(UINT_REF_PREFIX):
+        raise ValueError("not a QProver uint reference")
+    parts = value[len(UINT_REF_PREFIX) :].split("|")
+    if len(parts) != 5:
+        raise ValueError("invalid uint reference")
+    path_text, signature, mode, numerator_text, denominator_text = parts
+    path = () if path_text == "~" else tuple(path_text.split("/"))
+    if mode not in {"none", "self"}:
+        raise ValueError("unsupported uint source argument mode")
+    try:
+        numerator = int(numerator_text)
+        denominator = int(denominator_text)
+    except ValueError as error:
+        raise ValueError("invalid uint reference scale") from error
+    if numerator < 0 or denominator <= 0:
+        raise ValueError("invalid uint reference scale")
+    return path, signature, mode, numerator, denominator
+
+
 def _abi_values(
     abi_type: str,
     manifest: Track04Manifest,
     *,
     address_refs: tuple[str, ...] = (),
+    uint_refs: tuple[str, ...] = (),
 ) -> tuple[object, ...]:
     if re.fullmatch(r"uint(?:[0-9]+)?", abi_type):
         width_text = abi_type[4:]
         width = int(width_text) if width_text else 256
         maximum = (1 << width) - 1
-        values = [0, 1, 10**6, 10**18]
+        values: list[object] = [maximum, *uint_refs, 10**18]
         if manifest.deploy_value_wei:
             values.extend(
                 [
-                    manifest.deploy_value_wei // 2,
                     manifest.deploy_value_wei,
+                    manifest.deploy_value_wei // 2,
                 ]
             )
-        values.append(maximum)
-        return tuple(dict.fromkeys(value for value in values if 0 <= value <= maximum))
+        values.extend((10**6, 1, 0))
+        return tuple(dict.fromkeys(values))
     if re.fullmatch(r"int(?:[0-9]+)?", abi_type):
         width_text = abi_type[3:]
         width = int(width_text) if width_text else 256
@@ -245,6 +299,47 @@ def _abi_values(
     return ()
 
 
+def _anchor_values(domain: tuple[object, ...]) -> tuple[object, ...]:
+    if len(domain) <= 3:
+        return domain
+    return tuple(dict.fromkeys((domain[0], domain[1], domain[-1])))
+
+
+def _bounded_products(
+    domains: Sequence[tuple[object, ...]], cap: int
+) -> tuple[tuple[object, ...], ...]:
+    if not domains:
+        return ((),)
+    if len(domains) == 1:
+        return tuple((value,) for value in domains[0][:cap])
+    result: list[tuple[object, ...]] = []
+    seen: set[str] = set()
+
+    def append(values: tuple[object, ...]) -> bool:
+        key = repr(values)
+        if key in seen:
+            return False
+        seen.add(key)
+        result.append(values)
+        return len(result) >= cap
+
+    anchors = tuple(_anchor_values(domain) for domain in domains)
+    for values in itertools.product(*anchors):
+        if append(tuple(values)):
+            return tuple(result)
+    baseline = tuple(domain[0] for domain in domains)
+    for index, domain in enumerate(domains):
+        for value in domain:
+            values = list(baseline)
+            values[index] = value
+            if append(tuple(values)):
+                return tuple(result)
+    for values in itertools.product(*domains):
+        if append(tuple(values)):
+            return tuple(result)
+    return tuple(result)
+
+
 def _variants(
     action_id: str,
     signature: str,
@@ -253,18 +348,24 @@ def _variants(
     manifest: Track04Manifest,
     *,
     address_refs: tuple[str, ...] = (),
+    uint_refs: tuple[str, ...] = (),
     cap: int = 24,
 ) -> tuple[Track04Variant, ...]:
     domains = [
-        _abi_values(param_type, manifest, address_refs=address_refs)
+        _abi_values(
+            param_type,
+            manifest,
+            address_refs=address_refs,
+            uint_refs=uint_refs,
+        )
         for param_type in param_types
     ]
     if any(not domain for domain in domains):
         return ()
-    products = itertools.product(*domains) if domains else ((),)
+    argument_products = _bounded_products(tuple(domains), cap)
     values = (0, 10**18) if payable else (0,)
     result: list[Track04Variant] = []
-    for args in products:
+    for args in argument_products:
         for value in values:
             result.append(
                 Track04Variant(
@@ -390,6 +491,92 @@ def _function_effects(
     return memo
 
 
+def _runtime_uint_sources(
+    reachable: Sequence[tuple[tuple[str, ...], Any]],
+    effects: Mapping[str, tuple[frozenset[str], frozenset[str]]],
+) -> tuple[_RuntimeUintSource, ...]:
+    sources: dict[tuple[tuple[str, ...], str, str], _RuntimeUintSource] = {}
+    for target_path, contract in reachable:
+        for function in getattr(contract, "functions", ()):
+            if (
+                function.visibility not in {"public", "external"}
+                or function.state_mutability not in {"view", "pure"}
+                or function.function_selector is None
+                or len(getattr(function, "returns", ())) != 1
+                or _UINT_TYPE.fullmatch(str(function.returns[0])) is None
+            ):
+                continue
+            parameters = tuple(function.parameters)
+            if parameters == ():
+                mode = "none"
+            elif parameters == ("address",):
+                mode = "self"
+            else:
+                continue
+            reads, _ = effects.get(
+                function.canonical_id,
+                (frozenset(function.transitive_storage_reads), frozenset()),
+            )
+            source = _RuntimeUintSource(
+                target_path=target_path,
+                signature=function.signature,
+                argument_mode=mode,
+                reads=tuple(sorted(reads)),
+            )
+            sources[source.identity] = source
+
+        abi_signatures = set(getattr(contract, "abi_signatures", ()))
+        for storage in getattr(contract, "storage", ()):
+            type_name = str(storage.type_name)
+            storage_id = getattr(storage, "canonical_id", None)
+            reads = (str(storage_id),) if storage_id is not None else ()
+            if _UINT_TYPE.fullmatch(type_name):
+                signature = f"{storage.name}()"
+                if signature in abi_signatures:
+                    source = _RuntimeUintSource(
+                        target_path=target_path,
+                        signature=signature,
+                        argument_mode="none",
+                        reads=reads,
+                    )
+                    sources[source.identity] = source
+                continue
+            if _MAPPING_ADDRESS_UINT.fullmatch(type_name):
+                signature = f"{storage.name}(address)"
+                if signature in abi_signatures:
+                    source = _RuntimeUintSource(
+                        target_path=target_path,
+                        signature=signature,
+                        argument_mode="self",
+                        reads=reads,
+                    )
+                    sources[source.identity] = source
+    return tuple(sources[key] for key in sorted(sources))
+
+
+def _rank_uint_refs(
+    sources: Sequence[_RuntimeUintSource],
+    *,
+    action_reads: frozenset[str],
+    action_writes: frozenset[str],
+    action_path: tuple[str, ...],
+    limit_sources: int = 3,
+) -> tuple[str, ...]:
+    relevant_state = action_reads | action_writes
+
+    def rank(source: _RuntimeUintSource) -> tuple[int, int, str]:
+        overlap = len(set(source.reads) & relevant_state)
+        same_target = int(source.target_path == action_path)
+        return -overlap, -same_target, _uint_ref(source, 1, 1)
+
+    selected = sorted(sources, key=rank)[:limit_sources]
+    return tuple(
+        _uint_ref(source, numerator, denominator)
+        for source in selected
+        for numerator, denominator in _RUNTIME_SCALES
+    )
+
+
 def _action_id(
     target_path: tuple[str, ...], signature: str, *, callback_enabled: bool
 ) -> str:
@@ -420,6 +607,7 @@ def build_search_model(
     reachable = _reachable_contracts(analysis)
     address_refs = tuple(_address_ref(path) for path, _ in reachable if path)
     effects = _function_effects(analysis.report)
+    uint_sources = _runtime_uint_sources(reachable, effects)
 
     actions: list[Track04Action] = []
     variants: list[Track04Variant] = []
@@ -441,6 +629,12 @@ def build_search_model(
                     frozenset(function.transitive_storage_writes),
                 ),
             )
+            uint_refs = _rank_uint_refs(
+                uint_sources,
+                action_reads=reads,
+                action_writes=writes,
+                action_path=target_path,
+            )
             modes = (False, True) if function.external_call_before_write else (False,)
             for callback_enabled in modes:
                 action_id = _action_id(
@@ -456,6 +650,7 @@ def build_search_model(
                     function.state_mutability == "payable",
                     manifest,
                     address_refs=address_refs,
+                    uint_refs=uint_refs,
                 )
                 if not action_variants:
                     continue
@@ -514,6 +709,16 @@ def _address_expression(root: str, path: tuple[str, ...]) -> str:
     return expression
 
 
+def _uint_expression(value: str) -> str:
+    path, signature, mode, numerator, denominator = _decode_uint_ref(value)
+    target = _address_expression("target", path)
+    if mode == "self":
+        data = f'abi.encodeWithSignature("{signature}", address(this))'
+    else:
+        data = f'abi.encodeWithSignature("{signature}")'
+    return f"_scale(_readUint({target}, {data}), {numerator}, {denominator})"
+
+
 def _solidity_literal(value: object) -> str:
     if value == SELF_ADDRESS:
         return "address(this)"
@@ -523,6 +728,8 @@ def _solidity_literal(value: object) -> str:
         return "target"
     if isinstance(value, str) and value.startswith(ADDRESS_REF_PREFIX):
         return _address_expression("target", _decode_address_ref(value))
+    if isinstance(value, str) and value.startswith(UINT_REF_PREFIX):
+        return _uint_expression(value)
     if type(value) is bool:
         return "true" if value else "false"
     if type(value) is int:
@@ -611,6 +818,19 @@ contract Exploit {{{callback_fields}
         (bool ok, bytes memory result) = target.staticcall(data);
         require(ok && result.length >= 32, "qprover-address");
         value = abi.decode(result, (address));
+    }}
+
+    function _readUint(address target, bytes memory data) private view returns (uint256 value) {{
+        (bool ok, bytes memory result) = target.staticcall(data);
+        require(ok && result.length >= 32, "qprover-uint");
+        value = abi.decode(result, (uint256));
+    }}
+
+    function _scale(uint256 value, uint256 numerator, uint256 denominator) private pure returns (uint256) {{
+        require(denominator != 0, "qprover-scale");
+        if (value == 0 || numerator == 0) return 0;
+        if (value > type(uint256).max / numerator) return type(uint256).max;
+        return (value * numerator) / denominator;
     }}
 {receive_block}}}
 """
