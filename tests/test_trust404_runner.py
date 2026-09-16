@@ -56,7 +56,9 @@ def _analysis() -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def _compiler_facts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(trust404, "compile_track04_target", lambda *_a, **_kw: _analysis())
+    monkeypatch.setattr(
+        trust404, "compile_track04_target", lambda *_a, **_kw: _analysis()
+    )
 
 
 def _files(tmp_path: Path) -> tuple[Path, Path, Path]:
