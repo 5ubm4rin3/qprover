@@ -1,4 +1,4 @@
-"""Official TRUST404 Track 04 CLI execution loop for QProver."""
+"""Official TRUST404 Track 04 CLI execution loop for QProver v2."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from qprover.trust404 import (
     EXIT_NOT_FOUND,
     ManifestContractError,
     Track04Manifest,
-    Track04SearchBlueprint,
-    build_search_blueprint,
+    Track04SearchModel,
+    build_search_model,
     render_candidate,
     to_qprover_problem,
 )
@@ -43,43 +43,6 @@ class _AttemptLedger:
     fatal_error: bool = False
 
 
-def _subset_blueprint(
-    blueprint: Track04SearchBlueprint,
-    *,
-    macro_only: bool,
-) -> Track04SearchBlueprint | None:
-    chosen = tuple(
-        action
-        for action in blueprint.actions
-        if (action.kind != "direct") is macro_only
-    )
-    if not chosen:
-        return None
-    ids = {action.id for action in chosen}
-    variants = tuple(
-        variant for variant in blueprint.variants if variant.action_id in ids
-    )
-    utilities = {key: value for key, value in blueprint.utilities.items() if key in ids}
-    transitions = {
-        pair: value
-        for pair, value in blueprint.transitions.items()
-        if pair[0] in ids and pair[1] in ids
-    }
-    hypotheses = tuple(
-        sequence
-        for sequence in blueprint.hypothesis_sequences
-        if sequence and all(action in ids for action in sequence)
-    )
-    return Track04SearchBlueprint(
-        actions=chosen,
-        variants=variants,
-        utilities=utilities,
-        transitions=transitions,
-        hypothesis_sequences=hypotheses,
-        max_sequence_length=1 if macro_only else blueprint.max_sequence_length,
-    )
-
-
 def _make_qubo_strategy():
     from qprover.search.annealing import AnnealingConfig, SimulatedAnnealingBackend
     from qprover.search.qubo import QuboStrategy
@@ -92,16 +55,16 @@ def _make_qubo_strategy():
                 bqm,
                 config=AnnealingConfig(
                     seed=int(overrides.get("seed", 0)),
-                    reads=int(overrides.get("reads", 6)),
-                    sweeps=32,
+                    reads=int(overrides.get("reads", 8)),
+                    sweeps=64,
                 ),
             )
 
     return QuboStrategy(
         backend=_Track04AnnealingBackend(),
-        reads=6,
+        reads=8,
         feedback_batch_size=1,
-        resample_attempts=0,
+        resample_attempts=1,
         max_exact_fallback_sequences=0,
     )
 
@@ -134,10 +97,9 @@ def _deterministic_note(verification: VerificationResult) -> str:
     return _safe_note(verification.note)
 
 
-def _run_stage(
+def _run_search(
     *,
-    stage: str,
-    blueprint: Track04SearchBlueprint,
+    model: Track04SearchModel,
     target_path: Path,
     invariants_path: Path,
     manifest: Track04Manifest,
@@ -153,12 +115,12 @@ def _run_stage(
     from qprover.search.base import Evaluation, candidate_is_valid
     from qprover.search.controller import SearchController
 
-    problem = to_qprover_problem(blueprint)
+    problem = to_qprover_problem(model)
     strategy = _make_qubo_strategy()
 
     class Evaluator:
         def evaluate(self, candidate):
-            code = render_candidate(blueprint, candidate)
+            code = render_candidate(model, candidate)
             ledger.last_code = code
             ledger.codes[candidate.canonical_id] = code
             remaining_wall = deadline - clock()
@@ -168,14 +130,13 @@ def _run_stage(
                     transaction_count=0,
                     metadata={"note": "timeout"},
                 )
-            remaining = math.ceil(remaining_wall)
             verification = verifier(
                 harness_dir,
                 target_path,
                 invariants_path,
                 code,
                 manifest,
-                timeout_seconds=remaining,
+                timeout_seconds=max(1, math.ceil(remaining_wall)),
             )
             ledger.attempts += 1
             result_name = {
@@ -191,7 +152,7 @@ def _run_stage(
                 "\t".join(
                     (
                         f"attempt={ledger.attempts}",
-                        f"stage={stage}",
+                        "stage=search",
                         "strategy=qubo",
                         f"result={result_name}",
                         f"violated={verification.violated_predicate}",
@@ -214,11 +175,12 @@ def _run_stage(
                 return Evaluation(
                     outcome=Outcome.PASS,
                     transaction_count=len(candidate.steps),
+                    metadata={"note": verification.note},
                 )
             if verification.category == "forge_error":
                 return Evaluation(
                     outcome=Outcome.REVERT,
-                    transaction_count=1,
+                    transaction_count=max(1, len(candidate.steps)),
                     metadata={"note": verification.note},
                 )
             if verification.category == "timeout":
@@ -244,7 +206,7 @@ def _run_stage(
         wall_seconds=max(1, remaining_wall),
     )
     controller = SearchController(
-        candidate_validator=lambda c: candidate_is_valid(problem, c)
+        candidate_validator=lambda candidate: candidate_is_valid(problem, candidate)
     )
     run = controller.run(
         strategy,
@@ -284,11 +246,9 @@ def run_track04(
     if not invariants.is_file():
         raise FileNotFoundError(f"invariants not found: {invariants}")
     manifest = Track04Manifest.load(manifest_path)
-    target_source = contract.read_text(encoding="utf-8")
-    invariants_source = invariants.read_text(encoding="utf-8")
-    blueprint = build_search_blueprint(target_source, invariants_source, manifest)
-    if not blueprint.actions:
-        ledger = _AttemptLedger(lines=[], codes={})
+    model = build_search_model(contract, invariants, manifest)
+    ledger = _AttemptLedger(lines=[], codes={})
+    if not model.actions:
         _write_outputs(output, ledger)
         return EXIT_NOT_FOUND
 
@@ -297,55 +257,24 @@ def run_track04(
         if harness_dir is not None
         else _default_harness_dir()
     )
-    ledger = _AttemptLedger(lines=[], codes={})
     deadline = clock() + timeout_seconds
-
-    macro = _subset_blueprint(blueprint, macro_only=True)
-    if macro is not None and ledger.attempts < max_attempts:
-        if _run_stage(
-            stage="macro",
-            blueprint=macro,
-            target_path=contract,
-            invariants_path=invariants,
-            manifest=manifest,
-            harness_dir=hdir,
-            seed=seed,
-            attempt_budget=max_attempts - ledger.attempts,
-            deadline=deadline,
-            ledger=ledger,
-            verifier=verifier,
-            clock=clock,
-        ):
-            _write_outputs(output, ledger)
-            return EXIT_FOUND
-        if ledger.fatal_error:
-            _write_outputs(output, ledger)
-            return EXIT_ERROR
-
-    direct = _subset_blueprint(blueprint, macro_only=False)
-    if direct is not None and ledger.attempts < max_attempts and clock() < deadline:
-        if _run_stage(
-            stage="direct",
-            blueprint=direct,
-            target_path=contract,
-            invariants_path=invariants,
-            manifest=manifest,
-            harness_dir=hdir,
-            seed=seed + 1,
-            attempt_budget=max_attempts - ledger.attempts,
-            deadline=deadline,
-            ledger=ledger,
-            verifier=verifier,
-            clock=clock,
-        ):
-            _write_outputs(output, ledger)
-            return EXIT_FOUND
-        if ledger.fatal_error:
-            _write_outputs(output, ledger)
-            return EXIT_ERROR
-
+    if _run_search(
+        model=model,
+        target_path=contract,
+        invariants_path=invariants,
+        manifest=manifest,
+        harness_dir=hdir,
+        seed=seed,
+        attempt_budget=max_attempts,
+        deadline=deadline,
+        ledger=ledger,
+        verifier=verifier,
+        clock=clock,
+    ):
+        _write_outputs(output, ledger)
+        return EXIT_FOUND
     _write_outputs(output, ledger)
-    return EXIT_NOT_FOUND
+    return EXIT_ERROR if ledger.fatal_error else EXIT_NOT_FOUND
 
 
 def _parser() -> argparse.ArgumentParser:
