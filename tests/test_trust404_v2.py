@@ -12,6 +12,7 @@ import qprover.trust404 as trust404
 from qprover.trust404 import (
     ADDRESS_REF_PREFIX,
     SELF_ADDRESS,
+    UINT_REF_PREFIX,
     Track04Manifest,
     build_search_model,
     render_candidate,
@@ -152,6 +153,13 @@ def _analysis() -> SimpleNamespace:
             external_call_before_write=True,
         ),
         _function(
+            "creditOf(address)",
+            parameters=("address",),
+            returns=("uint256",),
+            mutability="view",
+            reads=("storage:credit",),
+        ),
+        _function(
             "consume()",
             calls=(_call(peer_read),),
             reads=(),
@@ -163,7 +171,7 @@ def _analysis() -> SimpleNamespace:
         source_name="src/Demo.sol",
         functions=root_functions,
         storage=(_storage("peer", "contract Peer"),),
-        abi_signatures=("peer()",),
+        abi_signatures=("peer()", "creditOf(address)"),
     )
     peer = SimpleNamespace(
         name="Peer",
@@ -260,6 +268,7 @@ def test_v2_discovers_reachable_contract_actions_and_cross_contract_dependencies
     assert action.target_path == ("peer()",)
     assert action.id == "call:peer():configure(address,uint256)"
     assert (action.id, "call:consume()") in model.transitions
+    assert model.max_sequence_length >= 6
 
     dynamic_addresses = {
         argument
@@ -268,6 +277,37 @@ def test_v2_discovers_reachable_contract_actions_and_cross_contract_dependencies
         if isinstance(argument, str) and argument.startswith(ADDRESS_REF_PREFIX)
     }
     assert dynamic_addresses
+
+
+def test_v2_runtime_uint_sources_are_generic_and_renderable(tmp_path: Path) -> None:
+    target, invariants = _sources(tmp_path)
+    model = build_search_model(target, invariants, _manifest(tmp_path))
+    action = next(
+        item for item in model.actions if item.signature == "configure(address,uint256)"
+    )
+    variants = [variant for variant in model.variants if variant.action_id == action.id]
+    runtime_values = [
+        variant.args[1]
+        for variant in variants
+        if len(variant.args) == 2
+        and isinstance(variant.args[1], str)
+        and variant.args[1].startswith(UINT_REF_PREFIX)
+    ]
+    assert runtime_values
+
+    candidate = _Candidate(
+        (
+            _Step(
+                action.id,
+                action.signature,
+                (SELF_ADDRESS, runtime_values[0]),
+            ),
+        )
+    )
+    code = render_candidate(model, candidate)
+    assert "_readUint(" in code
+    assert "_scale(" in code
+    assert "balanceOf(address)" in code or "creditOf(address)" in code
 
 
 def test_v2_callback_mode_is_generic_search_action(tmp_path: Path) -> None:
