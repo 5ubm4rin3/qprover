@@ -187,8 +187,7 @@ def _analysis() -> SimpleNamespace:
         matches = [
             item
             for item in contracts
-            if item.name == name
-            and (source is None or item.source_name == source)
+            if item.name == name and (source is None or item.source_name == source)
         ]
         if len(matches) != 1:
             raise KeyError(identity)
@@ -255,17 +254,12 @@ def test_v2_discovers_reachable_contract_actions_and_cross_contract_dependencies
     model = build_search_model(target, invariants, _manifest(tmp_path))
 
     action = next(
-        item
-        for item in model.actions
-        if item.signature == "configure(address,uint256)"
+        item for item in model.actions if item.signature == "configure(address,uint256)"
     )
     assert action.kind == "call"
     assert action.target_path == ("peer()",)
     assert action.id == "call:peer():configure(address,uint256)"
-    assert (
-        action.id,
-        "call:consume()",
-    ) in model.transitions
+    assert (action.id, "call:consume()") in model.transitions
 
     dynamic_addresses = {
         argument
@@ -323,9 +317,7 @@ def test_v2_renderer_resolves_reachable_contract_target(tmp_path: Path) -> None:
     target, invariants = _sources(tmp_path)
     model = build_search_model(target, invariants, _manifest(tmp_path))
     action = next(
-        item
-        for item in model.actions
-        if item.signature == "configure(address,uint256)"
+        item for item in model.actions if item.signature == "configure(address,uint256)"
     )
     candidate = _Candidate(
         (
