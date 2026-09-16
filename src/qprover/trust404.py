@@ -353,7 +353,9 @@ def _reachable_contracts(
     return tuple(result)
 
 
-def _function_effects(report: Any) -> Mapping[str, tuple[frozenset[str], frozenset[str]]]:
+def _function_effects(
+    report: Any,
+) -> Mapping[str, tuple[frozenset[str], frozenset[str]]]:
     functions = {
         function.canonical_id: function
         for contract in report.contracts
@@ -446,9 +448,7 @@ def build_search_model(
                     function.signature,
                     callback_enabled=callback_enabled,
                 )
-                utility = _function_utility(
-                    function, callback_enabled=callback_enabled
-                )
+                utility = _function_utility(function, callback_enabled=callback_enabled)
                 action_variants = _variants(
                     action_id,
                     function.signature,
@@ -510,9 +510,7 @@ def build_search_model(
 def _address_expression(root: str, path: tuple[str, ...]) -> str:
     expression = root
     for getter in path:
-        expression = (
-            f'_readAddress({expression}, abi.encodeWithSignature("{getter}"))'
-        )
+        expression = f'_readAddress({expression}, abi.encodeWithSignature("{getter}"))'
     return expression
 
 
