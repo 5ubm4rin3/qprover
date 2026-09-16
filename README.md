@@ -254,7 +254,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 QProver strongly matches the public Track 04 semantics: derive an attack, generate a runnable PoC, execute it, repeat when the invariant is not violated, and return reproducible evidence.
 
-The organizer's exact participant-package schemas/runner were not publicly available during development. QProver therefore does **not** claim exact grader-schema compatibility yet. The intended integration is a fail-closed adapter that preserves the core search and proof engine. See [`docs/TRUST404_SUBMISSION.md`](docs/TRUST404_SUBMISSION.md).
+QProver has been integrated and verified against the official TRUST404 Track 04 participant package. The standard CLI, manifest v0.1 adapter, Exploit.sol interface, organizer Harness semantics, exit codes, and deterministic artifacts were exercised in the pinned Docker environment. All four public vulnerable targets were proven, both public negative controls returned NOT_FOUND without false positives, and repeated network-disabled runs produced deterministic outputs. See [`docs/TRUST404_SUBMISSION.md`](docs/TRUST404_SUBMISSION.md).
 
 ## Safety boundary
 

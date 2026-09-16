@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 qprover = "qprover.cli:main"
+qprover-trust404 = "qprover.trust404_runner:main"
 
 [dependency-groups]
 dev = [

@@ -75,4 +75,4 @@ Interpretation: QUBO improved search yield/candidate efficiency on this small sy
 - An executed invariant violation is required; static/model output alone is unconfirmed.
 - Solver exhaustion does not prove target safety.
 - Benchmark labels/witnesses are scorer-only and not strategy inputs.
-- Exact TRUST404 grader-schema compatibility remains unverified until the participant package is available.
+- TRUST404 Track 04 participant-package compatibility is verified against the official package: standard CLI/manifest handling, organizer Harness execution, public 6-target behavior, Docker `--network=none`, and deterministic N=10 artifact reproduction were validated.

@@ -43,7 +43,7 @@ Secondary message:
 
 ## Compatibility boundary
 
-The public TRUST404 website describes target/invariant/environment inputs and behavioral requirements, but the exact participant-package schemas, sample runner and scorer were not publicly available during development.
+The official TRUST404 Track 04 participant package has now been integrated and used for compatibility validation. QProver implements the required CLI and manifest contract, generates the required Exploit.sol and attempts.log artifacts, and validates candidates using the organizer Harness semantics.
 
 Therefore the current repository makes two separate claims:
 
