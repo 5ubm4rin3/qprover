@@ -1,158 +1,103 @@
-# TRUST404 Track 04 Submission Package — QProver
+# TRUST404 Track 04 Submission Package — QProver v2
 
-## Public submission requirements snapshot
-
-Based on the repository research snapshot of the public TRUST404 pages, the submission requires a **public repository**, a **pitch deck PDF**, and a **demo video no longer than five minutes**. The recorded deadline is **2026-09-20 23:59 KST**. Re-check the official portal immediately before submission in case organizer instructions change.
-
-## Submission title
+## 제출 제목
 
 **QProver — Optimization-Guided Autonomous Exploit Prover**
 
-## One-line description
+## 한 줄 설명
 
-QProver searches for a smart-contract attack, executes it on a controlled EVM, minimizes the successful counterexample, and returns a runnable PoC plus replay-verified proof evidence.
+QProver는 주최 측 Solidity target과 invariant를 compiler-backed 방식으로 분석하고, 취약점별 전용 macro 없이 generic 공격 경로를 탐색한 뒤 실제 Harness 실행으로 exploit 가능성을 증명합니다.
 
-## Short submission description
+## 핵심 메시지
 
-QProver is an autonomous smart-contract exploit prover built around an explicit search/optimization loop. It compiles and analyzes the target, constructs execution/value-flow evidence and exploit hypotheses, then compares search strategies including random, coverage-guided, risk-guided and QUBO-guided sequence planning. Candidates are executed on fresh local Anvil instances; unsuccessful candidates feed back into search. A result is only `CONFIRMED` after a supplied invariant is actually violated, the violating prefix is revalidated and minimized, a Foundry PoC is generated, and the proof succeeds in three independent cold replays.
+> **QProver는 취약해 보인다는 예측에서 멈추지 않고, 실제 실행 가능한 PoC를 만들고 invariant violation으로 검증합니다.**
 
-The main technical differentiator is treating exploit-path exploration as a formal prioritization problem rather than relying entirely on random mutation or model intuition. In a 480-cell paired MicroBench experiment, QUBO-guided search confirmed 45/60 vulnerable runs (75.0%) compared with Random 21/60 (35.0%), Risk 20/60 (33.3%) and Coverage 12/60 (20.0%). No false confirmations were observed in 60 negative runs per strategy. These are synthetic white-box benchmark results and are not presented as quantum advantage or universal real-world superiority.
+QProver v2는 공개 타깃에 맞춘 reentrancy/access-control/oracle/accounting exploit template를 사용하지 않습니다. `solc` AST에서 storage read/write, calls, value-flow와 dependency를 추출하고, 이를 generic action search 문제로 변환합니다. QUBO는 어떤 call sequence를 먼저 검증할지 정하는 prioritization backend이며 proof oracle이 아닙니다.
 
-## Core message
+## Track 04 요구사항 대응
 
-> **QProver does not merely predict vulnerabilities. It searches for an attack, executes it, and returns reproducible evidence.**
+| 요구사항 | QProver v2 |
+|---|---|
+| 입력 | 공식 `--contract`, `--invariants`, `--manifest`를 그대로 사용 |
+| 분석 | `solc` compiler AST / ABI / storage layout 기반 semantic analysis |
+| 탐색 | vulnerability macro가 아닌 generic ABI actions와 state dependency 탐색 |
+| 생성 | generic call trace를 standalone `Exploit.sol`로 lowering |
+| Self-validation | 후보를 organizer Harness에서 실제 실행하고 실패 결과를 search feedback으로 사용 |
+| 출력 | `Exploit.sol`, `attempts.log`, exit 0/1/2 |
+| 결정론 | stable ordering, bounded parameter domains, seeded search, timestamp 없는 log |
+| 정상 타깃 | 실제 invariant violation이 없으면 `PROVEN`으로 처리하지 않음 |
+| 미공개 타깃 | 공개 exploit class를 production macro로 하드코딩하지 않음 |
 
-Secondary message:
+## 실행
 
-> **QProver makes exploit-path exploration an explicit search/optimization problem.**
+Docker image는 한 번만 빌드합니다.
 
-## Public Track 04 requirement mapping
-
-| Public requirement | QProver implementation | Evidence |
-|---|---|---|
-| Analyze target | compiler-backed Foundry artifacts, storage/call/value-flow analysis | `analysis.py`, `graph.py` |
-| Derive attack candidates | hypotheses + Random/Coverage/Risk/QUBO search | `hypotheses.py`, `search/` |
-| Generate executable PoC | generated Foundry replay test | `replay.py`, `certificate.py` |
-| Execute and validate | fresh local Anvil + invariant evaluator | `evm.py`, `evaluator.py` |
-| Repeat when candidate fails | strategy `observe` feedback + `SearchController` loop | `search/controller.py` |
-| Return violated invariant/how | certificate binds selected invariant, state and transactions | `certificate.json` |
-| Deterministic reproducibility | minimized proof + exactly 3 cold replays | demo / replay records |
-| Avoid unnecessary exploit on sound target | paired B twins, zero observed false-confirmations in MicroBench | `docs/BENCHMARK.md` |
-| Autonomous path discovery | benchmark runner cannot access supplied labels/witnesses | `benchmark.py` |
-| Minimal proof | execution-backed transaction deletion/minimization | `minimizer.py` |
-
-## Compatibility boundary
-
-The official TRUST404 Track 04 participant package has now been integrated and used for compatibility validation. QProver implements the required CLI and manifest contract, generates the required Exploit.sol and attempts.log artifacts, and validates candidates using the organizer Harness semantics.
-
-Therefore the current repository makes two separate claims:
-
-**Implemented and verified:**
-
-- internal strict target manifests;
-- supplied-invariant evaluation;
-- autonomous attack search;
-- executable PoC generation;
-- deterministic evidence/replay;
-- vulnerable/sound paired evaluation.
-
-**Not yet claimed:**
-
-- byte-for-byte compatibility with the organizer's unpublished manifest/invariant/result schemas;
-- exact acceptance by an unpublished scorer.
-
-When the participant package is available, integration should be a thin fail-closed adapter. Unsupported organizer semantics must not be guessed.
-
-## Technical novelty
-
-QProver's novelty is not "putting blockchain on a quantum computer." It is the decomposition:
-
-```text
-Exploit discovery
-= semantic lead generation
-+ explicit transaction-sequence optimization
-+ concrete local execution
-+ replay-backed proof
+```bash
+docker build --platform=linux/amd64 -f agent/Dockerfile -t qprover-track04 .
 ```
 
-The QUBO formulation provides a common optimization boundary. Today it runs with simulated annealing; exact classical and future quantum annealing/QAOA backends can be compared without changing the EVM proof semantics.
+그 뒤 주최 측 runner는 공식 인자만 전달하면 됩니다.
 
-## Benchmark headline
-
-Full MicroBench:
-
-```text
-12 targets × 10 seeds × 4 strategies = 480 cells
+```bash
+docker run --rm --network=none \
+  -v /path/to/target:/target:ro \
+  -v /path/to/output:/out \
+  qprover-track04 \
+  --contract /target/src/Target.sol \
+  --invariants /target/Invariants.sol \
+  --manifest /target/manifest.json \
+  --out /out \
+  --timeout 300 \
+  --seed 42 \
+  --max-attempts 5
 ```
 
-| Strategy | Vulnerable confirmed | Negative false-confirmed |
-|---|---:|---:|
-| Coverage | 12/60 (20.0%) | 0/60 |
-| Random | 21/60 (35.0%) | 0/60 |
-| Risk | 20/60 (33.3%) | 0/60 |
-| **QUBO** | **45/60 (75.0%)** | **0/60** |
+## Proof boundary
 
-QUBO candidates per confirmation: **15.6**, vs 41.9 Random, 41.0 Risk and 73.6 Coverage.
+QProver가 내부적으로 사용하는 다음 정보는 **proof가 아닙니다.**
 
-Limitations must be shown with the result: synthetic/public/white-box paired fixtures, related twins, bounded domains, no hidden-target claim, no quantum-advantage claim.
+- AST/graph analysis 결과
+- utility score
+- QUBO energy
+- candidate priority
+- static dependency hypothesis
 
-## Verified engineering gates
+최종 성공은 organizer Harness에서 `Exploit.run(target)` 실행 후 supplied invariant가 실제로 깨졌을 때만 인정합니다.
 
-Pre-submission local verification recorded:
+## v1 benchmark와 v2의 구분
 
-- `uv lock --check` — pass
-- Ruff format — pass
-- Ruff lint — pass
-- Python tests — **1,237 passed**
-- Foundry fixtures — **12/12 passed**
-- `qprover doctor --json` — `ok: true`
-- autonomous demo — `CONFIRMED`
-- demo cold replay — **3/3 successful**
-- demo QUBO objective — non-flat
-- full benchmark — **480/480 cells completed**
+저장소에 남아 있는 MicroBench 수치는 기존 QProver core/search backend를 비교한 **v1 synthetic benchmark**입니다. 해당 수치를 v2의 hidden-target 일반화 성능으로 주장하지 않습니다.
 
-## Five-minute demo-video structure
+v2의 평가에서 특히 중요한 항목은 다음입니다.
 
-See `docs/VIDEO_STORYBOARD.md`.
+- macro-free hidden-target generalization
+- false `PROVEN` 방지
+- deterministic replay
+- attempt/time budget 내 success rate
+- 성공 PoC의 최소성
 
-1. Problem (20 s)
-2. Architecture/search loop (35 s)
-3. `doctor` (15 s)
-4. one-command exploit demo (90 s)
-5. certificate + generated PoC + 3 replay evidence (60 s)
-6. 480-cell benchmark (45 s)
-7. limitations/future work (25 s)
+## 현재 v2 한계
 
-## Pitch deck structure
+- 초기 v2 Track04 search는 target contract의 public/external state-changing ABI를 중심으로 탐색합니다.
+- generic cross-contract address discovery/action expansion과 programmable callback runtime은 추가 일반화 대상입니다.
+- 복잡한 dynamic ABI type은 현재 bounded parameter domain에서 제외될 수 있습니다.
+- QUBO가 다른 classical search보다 우수하다는 주장은 별도 ablation 없이는 하지 않습니다.
 
-See `docs/PRESENTATION.md` for ready-to-use slide copy.
+이 한계를 해결할 때도 공개 취약점별 macro를 다시 도입하지 않습니다.
 
-## AI assistance disclosure
+## 안전/권한 범위
 
-Suggested disclosure text:
+QProver는 organizer-provided, owned 또는 명시적으로 허가된 target을 위한 도구입니다. 기본 제출 경로는 로컬 Foundry/Harness에서 동작하며 public-chain transaction broadcast workflow를 제공하지 않습니다.
 
-> **AI Assistance Disclosure:** Material AI assistance was used throughout QProver for literature research, architecture exploration, implementation, test generation, adversarial code review, debugging and documentation. The project does not rely on AI-generated claims as proof: security findings are accepted only after controlled EVM execution, and benchmark/proof claims are backed by machine-readable evidence and deterministic replay. Final integration, local verification and submission decisions were performed by the project author.
+## 제출 전 검증 체크리스트
 
-Adjust the final sentence to match the team structure before submission.
-
-## Safety / authorization statement
-
-Suggested statement:
-
-> QProver is designed for organizer-provided, owned or explicitly authorized targets. The bundled release executes offensive tests on fresh local Anvil chains and contains no public-chain broadcast workflow. Static hypotheses are never treated as confirmed exploits without controlled execution.
-
-## Submission checklist
-
-Before the form is submitted:
-
-- [ ] repository visibility changed from private to **public**;
-- [ ] README renders correctly from the default branch;
-- [ ] CI is green on the exact submission commit;
-- [ ] full benchmark summary is committed/documented;
-- [ ] demo video is ≤5 minutes;
-- [ ] pitch deck exported to PDF;
-- [ ] AI assistance disclosed;
-- [ ] Apache-2.0 license retained;
-- [ ] no keys/tokens/RPC secrets committed;
-- [ ] participant-package adapter tested if official package becomes available;
-- [ ] release candidate tagged after final verification.
+- [ ] CI가 exact submission commit에서 green
+- [ ] official participant-package validator 통과
+- [ ] Docker linux/amd64 build 통과
+- [ ] `--network=none` 실행 경로 확인
+- [ ] production Track04 code에 vulnerability macro identifier가 없음
+- [ ] public target name / expected witness hardcoding 없음
+- [ ] 동일 seed 반복 실행 결과 deterministic
+- [ ] README의 실행 예시와 실제 entrypoint가 일치
+- [ ] `Exploit.sol` / `attempts.log` / exit code 계약 유지
+- [ ] AI assistance disclosure와 라이선스 확인
