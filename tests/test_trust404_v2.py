@@ -4,7 +4,11 @@ import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import qprover.trust404 as trust404
 from qprover.trust404 import (
     SELF_ADDRESS,
     Track04Manifest,
@@ -48,40 +52,79 @@ def _sources(tmp_path: Path) -> tuple[Path, Path]:
     src = tmp_path / "src"
     src.mkdir()
     target = src / "Demo.sol"
-    target.write_text(
-        """
-pragma solidity 0.8.24;
-contract Demo {
-    address public owner;
-    mapping(address => uint256) public credit;
-    function deposit() external payable { credit[msg.sender] += msg.value; }
-    function setOwner(address next) external { owner = next; }
-    function move(address to, uint256 amount) external {
-        unchecked { credit[msg.sender] -= amount; credit[to] += amount; }
-    }
-    function withdraw(uint256 amount) external {
-        require(credit[msg.sender] >= amount, "credit");
-        credit[msg.sender] -= amount;
-        (bool ok,) = msg.sender.call{value: amount}("");
-        require(ok, "send");
-    }
-}
-""",
-        encoding="utf-8",
-    )
+    target.write_text("pragma solidity 0.8.24; contract Demo {}", encoding="utf-8")
     invariants = tmp_path / "Invariants.sol"
-    invariants.write_text(
-        """
-pragma solidity 0.8.24;
-contract Invariants {
-    function checkAll(address) external pure returns (bool, string memory) {
-        return (true, "");
-    }
-}
-""",
-        encoding="utf-8",
-    )
+    invariants.write_text("pragma solidity 0.8.24; contract Invariants {}", encoding="utf-8")
     return target, invariants
+
+
+def _function(
+    signature: str,
+    *,
+    parameters: tuple[str, ...] = (),
+    mutability: str = "nonpayable",
+    reads: tuple[str, ...] = (),
+    writes: tuple[str, ...] = (),
+    calls: tuple[object, ...] = (),
+    value_flows: tuple[object, ...] = (),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        signature=signature,
+        visibility="external",
+        state_mutability=mutability,
+        function_selector="0x12345678",
+        parameters=parameters,
+        canonical_id=f"function:src/Demo.sol:Demo:{signature}",
+        transitive_storage_reads=reads,
+        transitive_storage_writes=writes,
+        calls=calls,
+        value_flows=value_flows,
+        external_call_before_write=False,
+        source_name="src/Demo.sol",
+        source_span="0:1:0",
+    )
+
+
+def _analysis() -> SimpleNamespace:
+    functions = (
+        _function(
+            "deposit()",
+            mutability="payable",
+            writes=("storage:credit",),
+        ),
+        _function(
+            "setOwner(address)",
+            parameters=("address",),
+            writes=("storage:owner",),
+        ),
+        _function(
+            "move(address,uint256)",
+            parameters=("address", "uint256"),
+            reads=("storage:credit",),
+            writes=("storage:credit",),
+        ),
+        _function(
+            "withdraw(uint256)",
+            parameters=("uint256",),
+            reads=("storage:credit",),
+            writes=("storage:credit",),
+            calls=(object(),),
+            value_flows=(object(),),
+        ),
+    )
+    contract = SimpleNamespace(functions=functions)
+    report = SimpleNamespace(contract=lambda *_args: contract)
+    return SimpleNamespace(
+        report=report,
+        graph=SimpleNamespace(),
+        source_name="src/Demo.sol",
+        contract_name="Demo",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _compiler_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(trust404, "compile_track04_target", lambda *_a, **_kw: _analysis())
 
 
 def test_v2_search_model_contains_only_generic_call_actions(tmp_path: Path) -> None:
@@ -158,9 +201,7 @@ def test_v2_renderer_is_generic_and_has_no_vulnerability_specific_branch(
 
 
 def test_track04_production_module_contains_no_macro_generators() -> None:
-    import qprover.trust404 as module
-
-    source = inspect.getsource(module)
+    source = inspect.getsource(trust404)
     forbidden = (
         "_reentrancy_macros",
         "_access_control_macros",
