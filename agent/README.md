@@ -1,11 +1,8 @@
 # QProver TRUST404 Track 04 Agent
 
-QProver's submission adapter reads the organizer target, invariants, and manifest,
-builds label-free structural attack hypotheses, uses QUBO-guided prioritization,
-renders an executable `Exploit.sol`, and validates every candidate with the official
-`Harness._prove()` semantics before reporting success.
+QProver v2는 주최 측이 제공하는 target, invariants, manifest를 읽고 Solidity compiler 기반 의미 분석을 수행한 뒤, 취약점별 전용 macro 없이 generic ABI call sequence를 탐색합니다. 생성된 모든 후보는 공식 Harness에서 실제 invariant violation이 발생하는지 검증됩니다.
 
-## Standard CLI
+## 실행
 
 ```bash
 python agent/agent.py \
@@ -18,57 +15,77 @@ python agent/agent.py \
   --max-attempts <int>
 ```
 
-The CLI arguments are exactly `--contract`, `--invariants`, `--manifest`, `--out`,
-`--timeout`, `--seed`, and `--max-attempts`.
+공식 인자는 정확히 다음 7개입니다.
 
-## Outputs
-
-`--out` always contains:
-
-- `Exploit.sol` — the proven candidate when exit code 0 is returned; otherwise the
-  best/last deterministic candidate available.
-- `attempts.log` — one deterministic line per concrete proof attempt with the search
-  stage, QUBO strategy, result, candidate id, action sequence, and violated predicate.
-
-## Exit codes
-
-- **exit code 0** — a candidate was executed by the organizer harness and an invariant
-  was actually violated (`PROVEN`).
-- **exit code 1** — no candidate was proven within the supplied time/attempt budget.
-- **exit code 2** — CLI usage, input-contract, or internal/infrastructure error.
-
-## Search and validation
-
-The adapter does not trust static pattern matches as proof. Static analysis only builds
-candidate actions and higher-level motifs (for example reentrancy, unguarded authority
-writes, unchecked accounting, and manipulable spot-price flows). QProver's existing
-binary quadratic model (BQM/QUBO) machinery prioritizes candidates. Every candidate is
-then compiled and executed against the supplied target and `Invariants.sol` through the
-official Foundry harness. Failed candidates feed back into the next search attempt.
-
-No LLM is required and no network access is used at runtime.
-
-## Local execution
-
-From the repository root, after installing QProver and Foundry dependencies:
-
-```bash
-export TRUST404_HARNESS_DIR="$PWD/trust404/harness"
-python agent/agent.py \
-  --contract /path/to/target/src/Target.sol \
-  --invariants /path/to/target/Invariants.sol \
-  --manifest /path/to/target/manifest.json \
-  --out /tmp/qprover-track04 \
-  --timeout 300 --seed 42 --max-attempts 5
+```text
+--contract
+--invariants
+--manifest
+--out
+--timeout
+--seed
+--max-attempts
 ```
+
+## 출력
+
+`--out`에는 항상 다음 파일이 생성됩니다.
+
+- `Exploit.sol`
+- `attempts.log`
+
+Exit code:
+
+- `0`: 실제 invariant violation 확인
+- `1`: 제한 내에서 exploit을 찾지 못함
+- `2`: 입력 또는 infrastructure 오류
 
 ## Docker
 
-Build from the repository root (the Dockerfile needs the root build context):
+저장소 루트에서 한 번 빌드합니다.
 
 ```bash
 docker build --platform=linux/amd64 -f agent/Dockerfile -t qprover-track04 .
 ```
 
-At runtime mount one organizer target read-only and one output directory writable.
-The intended scoring mode is `--network=none`.
+주최 측 runner는 컨테이너 ENTRYPOINT에 공식 CLI 인자만 전달하면 됩니다. QProver 내부 Python module이나 별도 환경변수를 알 필요가 없습니다.
+
+예시:
+
+```bash
+docker run --rm --network=none \
+  -v /path/to/target:/target:ro \
+  -v /path/to/output:/out \
+  qprover-track04 \
+  --contract /target/src/Target.sol \
+  --invariants /target/Invariants.sol \
+  --manifest /target/manifest.json \
+  --out /out \
+  --timeout 300 \
+  --seed 42 \
+  --max-attempts 5
+```
+
+## 내부 흐름
+
+```text
+공식 입력
+  ↓
+compiler-backed AST 분석
+  ↓
+storage / call / value dependency
+  ↓
+generic ABI actions
+  ↓
+QUBO 기반 후보 우선순위
+  ↓
+Exploit.sol 생성
+  ↓
+공식 Harness 실행
+  ↓
+실패 시 feedback 후 재탐색 / 성공 시 PROVEN
+```
+
+QProver v2에는 reentrancy, access-control, oracle, unchecked-accounting 같은 취약점 클래스별 exploit macro가 없습니다. 탐색기는 취약점 이름을 정답으로 넣지 않고 compiler facts와 실제 실행 결과를 이용합니다.
+
+런타임 네트워크 접근은 필요하지 않습니다.
