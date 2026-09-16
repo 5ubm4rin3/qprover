@@ -1,85 +1,106 @@
-# METHOD — QProver
+# METHOD — QProver v2
 
 ## 1. 접근 방식
 
-QProver는 취약점 분류 결과를 곧바로 exploit이라고 주장하지 않는다. 입력으로 주어진
-Solidity target, `Invariants.sol`, Track 04 manifest만 읽어 label-free 정적 구조를 추출하고,
-공격 후보를 명시적인 search/optimization 문제로 만든다. 후보는 실행 가능한
-`contract Exploit { function run(address target) external payable { ... } }` 형태로 생성되며,
-성공 여부는 오직 organizer Foundry harness가 공격 전에는 `checkAll(target)==true`, 공격
-후에는 `checkAll(target)==false`임을 실제 실행으로 확인했을 때만 인정한다.
+QProver는 정적 분석 결과를 exploit 성공으로 취급하지 않는다. 주최 측이 제공하는 `Target.sol`, `Invariants.sol`, Track 04 manifest를 그대로 입력받아 compiler-backed 프로그램 모델을 만들고, 공격자가 실행할 수 있는 일반적인 ABI call sequence를 탐색한다. 후보는 실행 가능한 `Exploit.sol`로 변환하며, 성공 여부는 오직 organizer Foundry Harness가 실제 invariant violation을 확인했을 때만 인정한다.
 
-## 2. 에이전트 아키텍처
+QProver v2의 기본 원칙은 **취약점 클래스별 macro를 사용하지 않는 것**이다. reentrancy, access control, oracle manipulation, unchecked accounting 등의 공격 종류를 planner의 정답 후보로 미리 넣지 않는다.
+
+## 2. 입력과 프로그램 모델
 
 데이터 흐름은 다음과 같다.
 
-`contract + invariants + manifest → Solidity scanner → structural attack hypotheses → QUBO search → Exploit.sol renderer → official Harness._prove() → feedback → next candidate`
+```text
+contract + invariants + manifest
+        ↓
+Solidity compiler
+        ↓
+compact AST / ABI / storage layout
+        ↓
+AnalysisReport
+        ↓
+ProgramGraph
+        ↓
+generic attacker actions
+```
 
-scanner는 target contract의 public/external state-changing 함수, state writes, external value
-calls, sender guards, unchecked arithmetic, 그리고 source 내부의 local price-source 관계를
-추출한다. 이 구조에서 direct transaction actions와 고수준 attack motif를 만든다. 현재
-고신뢰 motif는 state update 이후 external call인 reentrancy shape, guard 없는 owner/admin
-state write, unchecked credit underflow 후 redemption, 그리고 manipulable constant-product
-spot price에 의존하는 collateral borrowing 흐름이다. 특정 public target의 파일명이나
-취약/정상 label은 production search logic에 입력되지 않는다.
+기존 QProver core의 `analysis.py`와 `graph.py`를 재사용한다. 분석기는 함수 visibility/mutability, storage read/write, internal/external call, value flow, guard, call/write ordering과 transitive dependency를 compiler evidence에서 추출한다.
 
-QProver core의 `SearchProblem`, BQM/QUBO builder, seeded simulated-annealing backend,
-`SearchController`를 재사용한다. 높은 신뢰도의 multi-transaction motif는 하나의 abstract
-search action으로 압축해 제한된 Track 04 시간/attempt budget에서 먼저 QUBO로 순위를
-정한다. motif가 증명되지 않으면 public/external call의 bounded concrete variants를 이용한
-direct QUBO search로 넘어간다.
+Track 04 adapter는 주최 측 원본 Solidity를 수정하지 않는다. 분석을 위해 임시 compiler workspace를 만들지만, 최종 exploit 검증은 원본 target/invariants와 organizer Harness에서 수행한다.
 
 ## 3. 탐색 전략
 
-`--max-attempts`와 `--timeout`은 hard budget이다. 첫 단계에서는 source-derived macro
-hypotheses만 horizon 1 QUBO로 최적화한다. 이 압축은 transaction sequence 내부의 의미를
-숨기는 것이 아니라, 이미 정적으로 식별된 multi-call exploit motif를 하나의 candidate
-PoC로 렌더링하기 위한 것이다. 후보가 harness에서 실패하면 그 결과는 search feedback으로
-돌아간다. 남은 budget에서는 direct actions를 최대 길이 3의 QUBO sequence로 탐색한다.
+공격 action은 다음과 같은 일반적인 형태다.
 
-정수/주소/bool 인자는 작은 결정론적 finite domain으로 확장한다. 주소에는 `address(this)`와
-고정된 다른 주소, 정수에는 0/1/1 ether/manifest seed value/경계값 등을 사용한다. QUBO는
-공격 성공 oracle이 아니라 후보 우선순위 결정기다. 최종 truth oracle은 언제나 실제 EVM
-실행과 supplied invariant violation이다.
+```text
+call:deposit()
+call:transfer(address,uint256)
+call:borrow(uint256)
+call:withdraw(uint256)
+```
 
-## 4. LLM 사용 여부와 프롬프트 개요
+각 action의 utility와 action 사이 transition은 취약점 이름이 아니라 compiler-backed semantic facts에서 만든다. 예를 들어 한 함수가 storage를 write하고 다른 함수가 동일 storage를 read/write하면 sequence dependency 후보가 된다.
 
-**LLM을 사용하지 않는다.** 네트워크가 차단된 scoring sandbox에서도 동일한 경로가
-동작하도록 static analysis, deterministic templates, QUBO-guided search, local Foundry
-execution만 사용한다. 따라서 API key가 있거나 없을 때의 동작 차이가 없다.
+현재 Track 04 v2 adapter는 기존 `SearchProblem`과 BQM/QUBO infrastructure를 재사용한다. QUBO는 exploit oracle이 아니라 제한된 budget에서 어떤 generic call sequence를 먼저 실제 실행할지 정하는 prioritization backend다.
 
-또한 현재 QUBO backend는 classical seeded simulated annealing이다. quantum advantage를
-주장하지 않는다. QUBO는 future annealing/QAOA backend와 비교 가능한 optimization
-boundary이지만, 제출물의 exploit 증명 의미는 backend와 무관하게 organizer harness 실행에
-의해 결정된다.
+정수, 주소, bool, bytes 등의 인자는 ABI type에서 결정론적인 bounded domain을 만든다. 정수는 0/1/경계값과 manifest deploy value에서 유도한 값을 사용하고, 주소는 attacker/self, target, 고정된 다른 actor 같은 generic role을 사용한다. 지원하지 않는 ABI type은 값을 임의로 추측하지 않고 해당 concrete action을 fail closed로 제외한다.
 
-## 5. 결정론 보장 방법
+## 4. 생성
 
-**재현 방법:** 동일 Docker image에서 동일 target/manifest, `--seed`, `--timeout`, `--max-attempts`로 agent를 다시 실행하고 생성된 `Exploit.sol`을 organizer Foundry harness로 재검증한다.
+탐색 결과는 취약점별 renderer가 아니라 하나의 generic lowering 경로로 `Exploit.sol`이 된다.
 
-동일한 source/manifest/CLI seed에 대해 scanner ordering, action ids, parameter domains,
-macro construction, BQM construction, tie-breaking, output formatting을 모두 안정적으로
-고정한다. simulated annealing에는 CLI `--seed`에서 유도한 exact integer seed를 전달한다.
-`attempts.log`에는 wall-clock timestamp를 넣지 않고 attempt number, stage, strategy,
-candidate hash, action sequence, result, violated predicate만 기록한다.
+```solidity
+contract Exploit {
+    function run(address target) external payable {
+        // generic ABI calls selected by search
+    }
+}
+```
 
-manifest의 `block_number`와 `block_timestamp`는 organizer `Harness._prove()` 호출에 그대로
-전달한다. candidate proof마다 fresh Foundry test deployment를 사용하며, output success는
-`AGENT_RESULT PROVEN <predicate>`가 실제 forge execution에서 관측된 경우에만 가능하다.
-최종 제출 전에 organizer `DETERMINISM.md` 절차대로 fixed Docker image에서 동일 seed를
-반복 실행해 `Exploit.sol`, exit code, violated predicate의 반복 일치성을 검증한다.
+현재 생성기는 `abi.encodeWithSignature`와 low-level call을 이용해 candidate trace를 그대로 실행 가능한 Solidity로 변환한다.
 
-## 6. 한계
+## 5. Self-validation Loop
 
-- Solidity 전체 문법을 compiler AST로 재구성하는 것이 아니라 brace-aware source scanner와
-  bounded structural recognizers를 사용하므로, 복잡한 inheritance/dynamic dispatch/assembly에
-  숨은 공격 surface는 놓칠 수 있다.
-- 고신뢰 macro가 없는 새로운 hidden-target exploit class는 길이 3 direct search의 제한을
-  받는다.
-- dynamic arrays/structs 등 복잡한 ABI argument domain은 현재 direct variant 생성에서
-  지원하지 않으며 해당 함수는 generic direct search에서 제외될 수 있다.
-- organizer harness 자체가 명시한 것처럼 constructor arguments가 있는데 `deploy.setup`이
-  없는 배포는 일반 ABI 타입 추론 없이 fail closed 한다.
-- candidate verifier는 supplied target/invariants/optional setup을 격리된 Foundry harness로 복사한다. 별도 auxiliary Solidity 파일에 대한 추가 상대 import가 필요한 비표준 타깃은 현재 자동 mirror하지 않으며 compile failure로 fail closed 할 수 있다.
-- QUBO-guided search는 public synthetic targets와 내부 MicroBench에서 유용성을 평가했지만,
-  quantum advantage 또는 모든 real-world contract에서의 우월성을 의미하지 않는다.
+`--max-attempts`와 `--timeout`은 hard budget이다. runner는 macro/direct로 나누지 않고 하나의 generic search/validation loop를 사용한다.
+
+```text
+search
+  → candidate
+  → Exploit.sol
+  → organizer Harness
+  → invariant check
+      ├─ violated: PROVEN
+      └─ not violated/revert: feedback 후 다음 candidate
+```
+
+정적 분석이나 QUBO score만으로 exit code 0을 반환하지 않는다. Harness가 invariant violation을 보고하지 않으면 결과는 `NOT_FOUND` 또는 오류다.
+
+## 6. LLM과 QUBO
+
+런타임 exploit search에는 LLM이 필요하지 않는다. scoring sandbox의 네트워크가 차단되어 있어도 동일한 deterministic path를 실행할 수 있도록 compiler analysis, generic search, local Foundry execution으로 구성한다.
+
+현재 QUBO backend는 classical seeded simulated annealing이다. quantum advantage를 주장하지 않는다. QUBO는 향후 다른 optimization backend와 비교할 수 있는 search boundary이며 proof 의미는 backend와 무관하게 실제 EVM 실행에서 나온다.
+
+## 7. 결정론
+
+동일 source/manifest/CLI seed와 동일 toolchain에 대해 다음을 안정적으로 고정한다.
+
+- compiler-derived action ordering
+- action identifiers
+- parameter domains
+- transition construction
+- BQM/QUBO construction
+- seeded annealing
+- candidate/log formatting
+
+`attempts.log`에는 wall-clock timestamp를 넣지 않는다. candidate proof마다 organizer Harness의 fresh deployment를 사용하며 proof parser는 최종 `AGENT_RESULT`만 신뢰하도록 방어한다.
+
+## 8. 현재 한계
+
+- v2 초기 generic search는 target contract의 public/external state-changing ABI actions를 중심으로 한다. reachable auxiliary contract의 주소 discovery와 cross-contract action expansion은 추가 일반화 대상이다.
+- callback을 요구하는 경로를 특정 취약점 macro 없이 일반적으로 표현하는 programmable attacker runtime은 추가 확장 대상이다.
+- dynamic arrays/structs 등 복잡한 ABI domain은 bounded generic parameter 생성에서 제외될 수 있다.
+- compiler가 지원하지 못하는 source/build 환경은 fail closed 한다.
+- QUBO의 유용성은 별도로 ablation해야 하며, 기존 v1 MicroBench 결과는 v2 hidden-target 일반화 성능을 증명하지 않는다.
+
+이러한 한계를 해결할 때도 공개 타깃의 알려진 취약점별 macro를 다시 도입하지 않는 것을 설계 제약으로 둔다.
