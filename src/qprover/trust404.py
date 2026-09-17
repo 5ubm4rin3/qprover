@@ -399,6 +399,27 @@ def _function_utility(function: Any, *, callback_enabled: bool = False) -> float
     return round(min(1.0, score), 6)
 
 
+def _callback_capable(function: Any) -> bool:
+    """Require generic evidence of a native low-level value callback path."""
+
+    if not bool(getattr(function, "external_call_before_write", False)):
+        return False
+    calls = tuple(getattr(function, "calls", ()))
+    flows = tuple(getattr(function, "value_flows", ()))
+    has_typed_facts = any(getattr(call, "kind", None) is not None for call in calls) or any(
+        getattr(flow, "asset", None) is not None for flow in flows
+    )
+    if not has_typed_facts:
+        return True
+    low_level = any(getattr(call, "kind", None) == "low_level" for call in calls)
+    native_out = any(
+        getattr(flow, "asset", None) == "native"
+        and getattr(flow, "direction", None) == "out"
+        for flow in flows
+    )
+    return low_level and native_out
+
+
 def _contract_identity(contract: Any) -> tuple[str, str]:
     return str(contract.source_name), str(contract.name)
 
@@ -635,7 +656,7 @@ def build_search_model(
                 action_writes=writes,
                 action_path=target_path,
             )
-            modes = (False, True) if function.external_call_before_write else (False,)
+            modes = (False, True) if _callback_capable(function) else (False,)
             for callback_enabled in modes:
                 action_id = _action_id(
                     target_path,
