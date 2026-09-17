@@ -406,9 +406,9 @@ def _callback_capable(function: Any) -> bool:
         return False
     calls = tuple(getattr(function, "calls", ()))
     flows = tuple(getattr(function, "value_flows", ()))
-    has_typed_facts = any(getattr(call, "kind", None) is not None for call in calls) or any(
-        getattr(flow, "asset", None) is not None for flow in flows
-    )
+    has_typed_facts = any(
+        getattr(call, "kind", None) is not None for call in calls
+    ) or any(getattr(flow, "asset", None) is not None for flow in flows)
     if not has_typed_facts:
         return True
     low_level = any(getattr(call, "kind", None) == "low_level" for call in calls)
