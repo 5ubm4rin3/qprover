@@ -215,12 +215,13 @@ def verify_exploit(
                 violated,
                 "proven" if proven else "not_proven",
             )
-        return VerificationResult(
-            False,
-            "",
-            "forge_error",
-            _tail(output) or f"forge exited {completed.returncode}",
+        revert_step = re.search(r"QProverFailure\((\d+)\)", output)
+        note = (
+            f"revert_step={revert_step.group(1)}"
+            if revert_step is not None
+            else (_tail(output) or f"forge exited {completed.returncode}")
         )
+        return VerificationResult(False, "", "forge_error", note)
     finally:
         for path in generated:
             with suppress(OSError):
