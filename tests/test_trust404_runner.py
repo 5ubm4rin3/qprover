@@ -27,6 +27,7 @@ def _function(
         state_mutability=mutability,
         function_selector="0x12345678",
         parameters=parameters,
+        returns=(),
         canonical_id=f"function:Demo:{signature}",
         transitive_storage_reads=reads,
         transitive_storage_writes=writes,
@@ -40,14 +41,22 @@ def _function(
 
 def _analysis() -> SimpleNamespace:
     contract = SimpleNamespace(
+        name="Demo",
+        source_name="Demo.sol",
         functions=(
             _function("setOwner(address)", parameters=("address",), writes=("owner",)),
             _function("deposit()", mutability="payable", writes=("balances",)),
             _function("withdraw()", reads=("balances",), writes=("balances",)),
-        )
+        ),
+        storage=(),
+        abi_signatures=(),
+    )
+    report = SimpleNamespace(
+        contract=lambda *_args: contract,
+        contracts=(contract,),
     )
     return SimpleNamespace(
-        report=SimpleNamespace(contract=lambda *_args: contract),
+        report=report,
         graph=SimpleNamespace(),
         source_name="Demo.sol",
         contract_name="Demo",
