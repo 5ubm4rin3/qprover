@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-import qprover.trust404_harness as harness
+from qprover import trust404_harness as harness
 from qprover.trust404 import Track04Manifest
 
 
