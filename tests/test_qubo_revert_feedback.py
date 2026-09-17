@@ -36,8 +36,7 @@ def test_qubo_revert_feedback_penalizes_only_failed_prefix_action() -> None:
     strategy.initialize(problem, seed=7)
     candidate = Candidate(
         tuple(
-            ActionStep(action, "target", f"{action}()", 0, (), 0)
-            for action in actions
+            ActionStep(action, "target", f"{action}()", 0, (), 0) for action in actions
         )
     )
 
