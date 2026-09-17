@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import qprover.trust404_analysis as trust404_analysis
+from qprover import trust404_analysis
 from qprover.trust404_analysis import compile_track04_target
 
 
