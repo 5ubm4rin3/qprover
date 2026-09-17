@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import qprover.trust404_analysis as trust404_analysis
 from qprover.trust404_analysis import compile_track04_target
 
 
@@ -39,3 +41,20 @@ contract Target {
 
     token = analysis.report.contract("src/Target.sol", "Token")
     assert "balanceOf(address)" in token.abi_signatures
+
+
+def test_track04_compiler_run_uses_global_analysis_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("QPROVER_ANALYSIS_TIMEOUT", "7")
+    monkeypatch.setattr(trust404_analysis.subprocess, "run", fake_run)
+
+    trust404_analysis._run(("forge", "build"), tmp_path)
+
+    assert seen["timeout"] == 7
