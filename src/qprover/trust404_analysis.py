@@ -222,7 +222,10 @@ def _contract_artifacts(
             build_info_id,
         )
         existing = artifacts.get(artifact.compilation_target)
-        if existing is not None and existing.artifact_sha256 != artifact.artifact_sha256:
+        if (
+            existing is not None
+            and existing.artifact_sha256 != artifact.artifact_sha256
+        ):
             raise Track04AnalysisError(
                 f"compiler artifact ambiguity for {artifact.compilation_target}"
             )
