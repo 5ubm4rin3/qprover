@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -56,6 +57,41 @@ def _tail(text: str, count: int = 20) -> str:
 def _rewrite_setup_import(source: str, target_name: str) -> str:
     pattern = re.compile(r'(["\'])[^"\']*src/' + re.escape(target_name) + r"\.sol\1")
     return pattern.sub('"./_qprover_target.sol"', source)
+
+
+def _local_solc(solc_version: str) -> str | None:
+    """Return an exact local solc path when available for offline verification."""
+
+    candidates = tuple(
+        dict.fromkeys(
+            item
+            for item in (
+                os.environ.get("QPROVER_SOLC"),
+                "/usr/local/bin/solc",
+                shutil.which("solc"),
+            )
+            if item
+        )
+    )
+    for candidate in candidates:
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                (str(path), "--version"),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        version_text = f"{result.stdout}\n{result.stderr}"
+        match = re.search(r"Version:\s*(\d+\.\d+\.\d+)", version_text)
+        if result.returncode == 0 and match and match.group(1) == solc_version:
+            return str(path)
+    return None
 
 
 def verify_exploit(
@@ -137,6 +173,10 @@ def verify_exploit(
             ),
             encoding="utf-8",
         )
+        compiler_args: list[str] = []
+        local_solc = _local_solc(manifest.solc)
+        if local_solc is not None:
+            compiler_args = ["--use", local_solc, "--offline"]
         try:
             completed = runner(
                 [
@@ -145,6 +185,7 @@ def verify_exploit(
                     "--match-path",
                     "test/_qprover_attempt.t.sol",
                     "-vv",
+                    *compiler_args,
                 ],
                 cwd=hdir,
                 capture_output=True,
