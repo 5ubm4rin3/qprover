@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from qprover.trust404_property import extract_property_analysis
-
 from qprover.artifacts import SourceUnitArtifact
+from qprover.trust404_property import extract_property_analysis
 
 
 def _identifier(name: str, declaration: int, node_id: int) -> dict[str, object]:
