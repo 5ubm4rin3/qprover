@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from typing import Any
 from qprover.analysis import AnalysisReport, analyze
 from qprover.artifacts import ContractArtifact, SourceUnitArtifact
 from qprover.graph import ProgramGraph, build_program_graph
+from qprover.trust404_property import PropertyAnalysis, extract_property_analysis
 
 
 class Track04AnalysisError(ValueError):
@@ -255,12 +257,21 @@ def _contract_artifacts(
     return tuple(artifacts[key] for key in sorted(artifacts))
 
 
+def _relative_source(path: Path, root: Path, label: str) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as error:
+        raise Track04AnalysisError(f"{label} is outside target root: {path}") from error
+
+
 @dataclass(frozen=True, slots=True)
 class Track04Analysis:
     report: AnalysisReport
     graph: ProgramGraph
     source_name: str
     contract_name: str
+    source_units: tuple[SourceUnitArtifact, ...] = ()
+    property_analysis: PropertyAnalysis | None = None
 
 
 def compile_track04_target(
@@ -270,6 +281,8 @@ def compile_track04_target(
     target_src: str,
     solc_version: str,
     evm_version: str,
+    invariants_path: Path | str | None = None,
+    predicates: Sequence[str] = (),
 ) -> Track04Analysis:
     """Compile one organizer target and reuse QProver's AST/graph analysis core."""
 
@@ -285,6 +298,13 @@ def compile_track04_target(
         raise Track04AnalysisError(
             f"contract path does not match manifest target.src: {target_src}"
         )
+
+    invariants_source: str | None = None
+    if invariants_path is not None:
+        invariants = Path(invariants_path).resolve()
+        if not invariants.is_file():
+            raise FileNotFoundError(f"invariants not found: {invariants}")
+        invariants_source = _relative_source(invariants, target_root, "invariants path")
 
     with tempfile.TemporaryDirectory(prefix="qprover-track04-analysis-") as temporary:
         workspace = Path(temporary) / "target"
@@ -312,10 +332,17 @@ def compile_track04_target(
             if local_solc is not None
             else ("--use", solc_version)
         )
+        build_sources = tuple(
+            dict.fromkeys(
+                source
+                for source in (target_src, invariants_source)
+                if source is not None
+            )
+        )
         command = (
             "forge",
             "build",
-            target_src,
+            *build_sources,
             "--root",
             str(workspace),
             "--skip",
@@ -355,17 +382,29 @@ def compile_track04_target(
         input_sources = build_info.get("input", {}).get("sources")
         if not isinstance(input_sources, dict):
             raise Track04AnalysisError("build-info is missing input sources")
+        source_units = _source_units(build_info)
         bundle = SimpleNamespace(
             source_sha256=_hash_sources(input_sources),
-            source_units=_source_units(build_info),
+            source_units=source_units,
             artifacts=artifacts,
         )
         report = analyze(bundle)  # analyze() only consumes compiler evidence fields.
         graph = build_program_graph(report)
         report.contract(target_src, target_name)
+        property_analysis = (
+            extract_property_analysis(
+                source_units,
+                invariants_source_name=invariants_source,
+                predicates=predicates,
+            )
+            if invariants_source is not None
+            else None
+        )
         return Track04Analysis(
             report=report,
             graph=graph,
             source_name=target_src,
             contract_name=target_name,
+            source_units=source_units,
+            property_analysis=property_analysis,
         )
