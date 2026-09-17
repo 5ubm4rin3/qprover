@@ -20,7 +20,6 @@ from qprover.trust404 import (
     Track04SearchModel,
     build_search_model,
     render_candidate,
-    to_qprover_problem,
 )
 from qprover.trust404_harness import VerificationResult, verify_exploit
 
@@ -97,6 +96,161 @@ def _deterministic_note(verification: VerificationResult) -> str:
     return _safe_note(verification.note)
 
 
+def _variant_rank(variant) -> tuple[object, ...]:
+    dynamic = sum(
+        isinstance(argument, str) and argument.startswith("__QPROVER_")
+        for argument in variant.args
+    )
+    self_refs = sum(argument == "__QPROVER_SELF__" for argument in variant.args)
+    nonzero_integers = sum(type(argument) is int and argument != 0 for argument in variant.args)
+    funded = int(variant.value_wei > 0)
+    return (
+        -dynamic,
+        -self_refs,
+        -funded,
+        -nonzero_integers,
+        repr(variant.args),
+        variant.value_wei,
+    )
+
+
+def _variants_by_action(model: Track04SearchModel) -> dict[str, tuple[object, ...]]:
+    grouped: dict[str, list[object]] = {action.id: [] for action in model.actions}
+    for variant in model.variants:
+        grouped[variant.action_id].append(variant)
+    return {
+        action_id: tuple(sorted(items, key=_variant_rank))
+        for action_id, items in grouped.items()
+    }
+
+
+def _skeleton_problem(model: Track04SearchModel):
+    """Build an action-level QUBO problem; parameters are completed later."""
+
+    from qprover.parameters import ActionVariant
+    from qprover.search.bqm import SearchProblem
+
+    grouped = _variants_by_action(model)
+    representatives = []
+    for action in model.actions:
+        choices = grouped[action.id]
+        if not choices:
+            raise ValueError(f"action has no Track04 variants: {action.id}")
+        variant = choices[0]
+        representatives.append(
+            ActionVariant(
+                action_id=variant.action_id,
+                target_id="target",
+                signature=variant.signature,
+                sender_slot=0,
+                args=variant.args,
+                value_wei=variant.value_wei,
+                max_repetitions=variant.max_repetitions,
+                argument_provenance=tuple(
+                    ("track04-skeleton",) for _ in variant.args
+                ),
+                value_provenance=("track04-skeleton",),
+            )
+        )
+    repetition_limits = {action.id: 2 for action in model.actions}
+    discounts = tuple(1.0 / (index + 1) for index in range(model.max_sequence_length))
+    return SearchProblem(
+        actions=tuple(action.id for action in model.actions),
+        max_sequence_length=model.max_sequence_length,
+        utilities=model.utilities,
+        transitions=model.transitions,
+        repetition_limits=repetition_limits,
+        discounts=discounts,
+        variants=tuple(representatives),
+        hypothesis_sequences=(),
+        length_weight=0.15,
+    )
+
+
+def _concrete_candidates(model: Track04SearchModel, skeleton, limit: int):
+    """Complete one action skeleton with a bounded deterministic parameter frontier."""
+
+    from qprover.models import ActionStep, Candidate
+
+    if type(limit) is not int or limit <= 0:
+        return ()
+    grouped = _variants_by_action(model)
+    domains = tuple(grouped[step.action_id] for step in skeleton.steps)
+    if any(not domain for domain in domains):
+        return ()
+
+    candidates: list[Candidate] = []
+    seen: set[str] = set()
+
+    def add(selected: tuple[object, ...]) -> bool:
+        candidate = Candidate(
+            tuple(
+                ActionStep(
+                    action_id=variant.action_id,
+                    target_id="target",
+                    signature=variant.signature,
+                    sender_slot=0,
+                    args=variant.args,
+                    value_wei=variant.value_wei,
+                )
+                for variant in selected
+            )
+        )
+        if candidate.canonical_id in seen:
+            return False
+        seen.add(candidate.canonical_id)
+        candidates.append(candidate)
+        return len(candidates) >= limit
+
+    baseline = tuple(domain[0] for domain in domains)
+    if add(baseline):
+        return tuple(candidates)
+
+    max_rank = max(len(domain) for domain in domains)
+    for rank in range(1, max_rank):
+        selected = tuple(domain[min(rank, len(domain) - 1)] for domain in domains)
+        if add(selected):
+            return tuple(candidates)
+
+    for index, domain in enumerate(domains):
+        for variant in domain[1:]:
+            selected = list(baseline)
+            selected[index] = variant
+            if add(tuple(selected)):
+                return tuple(candidates)
+    return tuple(candidates)
+
+
+def _record_attempt(
+    ledger: _AttemptLedger,
+    candidate,
+    verification: VerificationResult,
+) -> None:
+    result_name = {
+        "proven": "PROVEN",
+        "not_proven": "NOT_PROVEN",
+        "forge_error": "REVERT",
+        "timeout": "TIMEOUT",
+        "infrastructure": "ERROR",
+        "unsupported_deploy": "ERROR",
+    }.get(verification.category, verification.category.upper())
+    actions = ",".join(step.action_id for step in candidate.steps)
+    ledger.lines.append(
+        "\t".join(
+            (
+                f"attempt={ledger.attempts}",
+                "stage=search",
+                "strategy=qubo",
+                f"result={result_name}",
+                f"violated={verification.violated_predicate}",
+                f"candidate={candidate.canonical_id}",
+                f"actions={actions}",
+                f"note={_deterministic_note(verification)}",
+            )
+        )
+    )
+
+
 def _run_search(
     *,
     model: Track04SearchModel,
@@ -115,84 +269,93 @@ def _run_search(
     from qprover.search.base import Evaluation, candidate_is_valid
     from qprover.search.controller import SearchController
 
-    problem = to_qprover_problem(model)
+    problem = _skeleton_problem(model)
     strategy = _make_qubo_strategy()
 
     class Evaluator:
-        def evaluate(self, candidate):
-            code = render_candidate(model, candidate)
-            ledger.last_code = code
-            ledger.codes[candidate.canonical_id] = code
+        def evaluate(self, skeleton):
+            remaining_attempts = attempt_budget - ledger.attempts
             remaining_wall = deadline - clock()
-            if remaining_wall <= 0:
+            if remaining_attempts <= 0 or remaining_wall <= 0:
+                return Evaluation(
+                    outcome=Outcome.INCONCLUSIVE,
+                    transaction_count=0,
+                    metadata={"note": "budget"},
+                )
+
+            quota = min(2, remaining_attempts)
+            candidates = _concrete_candidates(model, skeleton, quota)
+            saw_pass = False
+            saw_revert = False
+            saw_timeout = False
+            last_note = ""
+            for candidate in candidates:
+                remaining_wall = deadline - clock()
+                if remaining_wall <= 0 or ledger.attempts >= attempt_budget:
+                    saw_timeout = True
+                    break
+                code = render_candidate(model, candidate)
+                ledger.last_code = code
+                ledger.codes[candidate.canonical_id] = code
+                verification = verifier(
+                    harness_dir,
+                    target_path,
+                    invariants_path,
+                    code,
+                    manifest,
+                    timeout_seconds=max(1, math.ceil(remaining_wall)),
+                )
+                ledger.attempts += 1
+                _record_attempt(ledger, candidate, verification)
+                last_note = verification.note
+                if verification.category in {
+                    "infrastructure",
+                    "unsupported_deploy",
+                }:
+                    ledger.fatal_error = True
+                    return Evaluation(
+                        outcome=Outcome.INFRA_ERROR,
+                        transaction_count=0,
+                        metadata={"note": verification.note},
+                    )
+                if verification.proven:
+                    ledger.winner_code = code
+                    return Evaluation(
+                        outcome=Outcome.VIOLATION,
+                        transaction_count=len(skeleton.steps),
+                        metadata={
+                            "violated_predicate": verification.violated_predicate
+                        },
+                    )
+                if verification.category == "not_proven":
+                    saw_pass = True
+                elif verification.category == "forge_error":
+                    saw_revert = True
+                elif verification.category == "timeout":
+                    saw_timeout = True
+
+            if saw_pass:
+                return Evaluation(
+                    outcome=Outcome.PASS,
+                    transaction_count=len(skeleton.steps),
+                    metadata={"note": last_note},
+                )
+            if saw_revert:
+                return Evaluation(
+                    outcome=Outcome.REVERT,
+                    transaction_count=max(1, len(skeleton.steps)),
+                    metadata={"note": last_note},
+                )
+            if saw_timeout:
                 return Evaluation(
                     outcome=Outcome.INCONCLUSIVE,
                     transaction_count=0,
                     metadata={"note": "timeout"},
                 )
-            verification = verifier(
-                harness_dir,
-                target_path,
-                invariants_path,
-                code,
-                manifest,
-                timeout_seconds=max(1, math.ceil(remaining_wall)),
-            )
-            ledger.attempts += 1
-            result_name = {
-                "proven": "PROVEN",
-                "not_proven": "NOT_PROVEN",
-                "forge_error": "REVERT",
-                "timeout": "TIMEOUT",
-                "infrastructure": "ERROR",
-                "unsupported_deploy": "ERROR",
-            }.get(verification.category, verification.category.upper())
-            actions = ",".join(step.action_id for step in candidate.steps)
-            ledger.lines.append(
-                "\t".join(
-                    (
-                        f"attempt={ledger.attempts}",
-                        "stage=search",
-                        "strategy=qubo",
-                        f"result={result_name}",
-                        f"violated={verification.violated_predicate}",
-                        f"candidate={candidate.canonical_id}",
-                        f"actions={actions}",
-                        f"note={_deterministic_note(verification)}",
-                    )
-                )
-            )
-            if verification.category in {"infrastructure", "unsupported_deploy"}:
-                ledger.fatal_error = True
-            if verification.proven:
-                ledger.winner_code = code
-                return Evaluation(
-                    outcome=Outcome.VIOLATION,
-                    transaction_count=len(candidate.steps),
-                    metadata={"violated_predicate": verification.violated_predicate},
-                )
-            if verification.category == "not_proven":
-                return Evaluation(
-                    outcome=Outcome.PASS,
-                    transaction_count=len(candidate.steps),
-                    metadata={"note": verification.note},
-                )
-            if verification.category == "forge_error":
-                return Evaluation(
-                    outcome=Outcome.REVERT,
-                    transaction_count=max(1, len(candidate.steps)),
-                    metadata={"note": verification.note},
-                )
-            if verification.category == "timeout":
-                return Evaluation(
-                    outcome=Outcome.INCONCLUSIVE,
-                    transaction_count=0,
-                    metadata={"note": verification.note},
-                )
             return Evaluation(
-                outcome=Outcome.INFRA_ERROR,
+                outcome=Outcome.INCONCLUSIVE,
                 transaction_count=0,
-                metadata={"note": verification.note},
+                metadata={"note": "no-concrete-candidate"},
             )
 
     remaining_wall = math.floor(deadline - clock())
