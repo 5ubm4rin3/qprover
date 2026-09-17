@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV FOUNDRY_DIR=/root/.foundry
 ENV PATH="${FOUNDRY_DIR}/bin:${PATH}"
+ENV QPROVER_SOLC=/usr/local/bin/solc
 
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && foundryup --install "${FOUNDRY_VERSION}" \
@@ -35,7 +36,7 @@ RUN cd /opt/qprover/trust404/harness \
     && cd lib/forge-std \
     && git checkout "${FORGE_STD_REV}" \
     && cd /opt/qprover/trust404/harness \
-    && forge build
+    && forge build --use /usr/local/bin/solc --offline
 
 ENV TRUST404_HARNESS_DIR=/opt/qprover/trust404/harness
 ENTRYPOINT ["python", "/opt/qprover/agent/agent.py"]
