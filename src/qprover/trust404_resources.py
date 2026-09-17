@@ -146,16 +146,16 @@ def score_function_relevance(
         has_native_balance = any(
             resource.kind == "native_balance" for resource in resources
         )
-        if has_native_balance:
-            if (
+        if has_native_balance and (
+            (
                 property_slice.direction_hint == _DIRECTION_DECREASE
                 and "out" in native_directions
-            ):
-                score += 1.0
-            elif (
+            )
+            or (
                 property_slice.direction_hint == _DIRECTION_INCREASE
                 and "in" in native_directions
-            ):
-                score += 1.0
+            )
+        ):
+            score += 1.0
         score += _storage_relevance(function, resources)
     return round(score, 6)
