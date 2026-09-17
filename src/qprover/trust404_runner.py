@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Callable
@@ -88,8 +89,22 @@ def _safe_note(note: str) -> str:
     return compact[:240].replace("\t", " ")
 
 
+def _revert_transaction_count(note: str, candidate_length: int) -> int:
+    if type(candidate_length) is not int or candidate_length <= 0:
+        raise ValueError("candidate_length must be a positive integer")
+    match = re.fullmatch(r"revert_step=(\d+)", note)
+    if match is None:
+        return candidate_length
+    step = int(match.group(1))
+    if step >= candidate_length:
+        return candidate_length
+    return step + 1
+
+
 def _deterministic_note(verification: VerificationResult) -> str:
     if verification.category == "forge_error":
+        if re.fullmatch(r"revert_step=\d+", verification.note):
+            return verification.note
         return "forge_error"
     if verification.category == "timeout":
         return "timeout"
@@ -289,6 +304,7 @@ def _run_search(
             saw_revert = False
             saw_timeout = False
             last_note = ""
+            revert_count = len(skeleton.steps)
             for candidate in candidates:
                 remaining_wall = deadline - clock()
                 if remaining_wall <= 0 or ledger.attempts >= attempt_budget:
@@ -331,6 +347,9 @@ def _run_search(
                     saw_pass = True
                 elif verification.category == "forge_error":
                     saw_revert = True
+                    revert_count = _revert_transaction_count(
+                        verification.note, len(skeleton.steps)
+                    )
                 elif verification.category == "timeout":
                     saw_timeout = True
 
@@ -343,7 +362,7 @@ def _run_search(
             if saw_revert:
                 return Evaluation(
                     outcome=Outcome.REVERT,
-                    transaction_count=max(1, len(skeleton.steps)),
+                    transaction_count=revert_count,
                     metadata={"note": last_note},
                 )
             if saw_timeout:
