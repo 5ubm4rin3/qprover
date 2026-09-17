@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from qprover.artifacts import SourceUnitArtifact
-from qprover.trust404_property import extract_property_analysis
+from qprover.trust404_property import PropertyAnalysis, PropertyFact, extract_property_analysis
+from qprover.trust404_resources import build_property_slices, score_function_relevance
 
 
 def _identifier(name: str, declaration: int, node_id: int) -> dict[str, object]:
@@ -205,3 +208,52 @@ def test_predicate_not_called_from_check_all_is_unknown() -> None:
 
     assert fact.bound_from_check_all is False
     assert fact.known is False
+
+
+def test_balance_property_slice_prioritizes_native_value_out() -> None:
+    properties = PropertyAnalysis(
+        invariants_source_name="Invariants.sol",
+        contract_name="Invariants",
+        facts=(
+            PropertyFact(
+                predicate_name="vaultSolvent",
+                function_id="function:Invariants.sol:Invariants:20:vaultSolvent(address)",
+                target_parameter_index=0,
+                target_balance_read=True,
+                target_calls=(),
+                constants=(10 * 10**18,),
+                comparison_hints=((">=", "target.balance", "constant"),),
+                source_span="20:20:0",
+                bound_from_check_all=True,
+                known=True,
+            ),
+        ),
+    )
+
+    slices = build_property_slices(properties, root_target_identity="root")
+    property_slice = slices[0]
+
+    assert property_slice.property_id == "vaultSolvent"
+    assert property_slice.direction_hint == "decrease"
+    assert tuple((item.kind, item.identity) for item in property_slice.resources) == (
+        ("native_balance", "root"),
+    )
+
+    native_out = SimpleNamespace(
+        canonical_id="function:Target.sol:Target:1:withdraw()",
+        transitive_storage_reads=(),
+        transitive_storage_writes=(),
+        value_flows=(SimpleNamespace(asset="native", direction="out"),),
+        calls=(),
+    )
+    unrelated = SimpleNamespace(
+        canonical_id="function:Target.sol:Target:2:setFlag()",
+        transitive_storage_reads=(),
+        transitive_storage_writes=("storage:Target.sol:Target:3:flag",),
+        value_flows=(),
+        calls=(),
+    )
+
+    assert score_function_relevance(native_out, slices) > score_function_relevance(
+        unrelated, slices
+    )
