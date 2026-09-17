@@ -43,6 +43,64 @@ contract Target {
     assert "balanceOf(address)" in token.abi_signatures
 
 
+def test_track04_compiler_includes_invariants_property_analysis(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    src = root / "src"
+    src.mkdir(parents=True)
+    target = src / "Target.sol"
+    target.write_text(
+        """// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+contract Target {
+    constructor() payable {}
+}
+""",
+        encoding="utf-8",
+    )
+    invariants = root / "Invariants.sol"
+    invariants.write_text(
+        """// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+contract Invariants {
+    uint256 internal constant SEED = 10 ether;
+
+    function vaultSolvent(address target) public view returns (bool) {
+        return target.balance >= SEED;
+    }
+
+    function checkAll(address target)
+        external
+        view
+        returns (bool allHold, string memory firstViolated)
+    {
+        if (!vaultSolvent(target)) return (false, "vaultSolvent");
+        return (true, "");
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    analysis = compile_track04_target(
+        target,
+        target_name="Target",
+        target_src="src/Target.sol",
+        solc_version="0.8.24",
+        evm_version="cancun",
+        invariants_path=invariants,
+        predicates=("vaultSolvent",),
+    )
+
+    assert "Invariants.sol" in {item.source_name for item in analysis.source_units}
+    fact = analysis.property_analysis.fact("vaultSolvent")
+    assert fact.known is True
+    assert fact.target_balance_read is True
+    assert fact.constants == (10 * 10**18,)
+    assert fact.bound_from_check_all is True
+
+
 def test_track04_compiler_run_uses_global_analysis_timeout(
     tmp_path: Path, monkeypatch
 ) -> None:
