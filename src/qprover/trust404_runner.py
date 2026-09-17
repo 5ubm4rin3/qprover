@@ -238,6 +238,7 @@ def run_track04(
     if type(max_attempts) is not int or max_attempts <= 0:
         raise ValueError("max_attempts must be a positive integer")
 
+    deadline = clock() + timeout_seconds
     contract = Path(contract_path).resolve()
     invariants = Path(invariants_path).resolve()
     output = Path(out_dir).resolve()
@@ -246,9 +247,24 @@ def run_track04(
     if not invariants.is_file():
         raise FileNotFoundError(f"invariants not found: {invariants}")
     manifest = Track04Manifest.load(manifest_path)
-    model = build_search_model(contract, invariants, manifest)
+
+    remaining_analysis = math.ceil(deadline - clock())
+    if remaining_analysis <= 0:
+        ledger = _AttemptLedger(lines=[], codes={})
+        _write_outputs(output, ledger)
+        return EXIT_NOT_FOUND
+    previous_analysis_timeout = os.environ.get("QPROVER_ANALYSIS_TIMEOUT")
+    os.environ["QPROVER_ANALYSIS_TIMEOUT"] = str(remaining_analysis)
+    try:
+        model = build_search_model(contract, invariants, manifest)
+    finally:
+        if previous_analysis_timeout is None:
+            os.environ.pop("QPROVER_ANALYSIS_TIMEOUT", None)
+        else:
+            os.environ["QPROVER_ANALYSIS_TIMEOUT"] = previous_analysis_timeout
+
     ledger = _AttemptLedger(lines=[], codes={})
-    if not model.actions:
+    if not model.actions or deadline - clock() <= 0:
         _write_outputs(output, ledger)
         return EXIT_NOT_FOUND
 
@@ -257,7 +273,6 @@ def run_track04(
         if harness_dir is not None
         else _default_harness_dir()
     )
-    deadline = clock() + timeout_seconds
     if _run_search(
         model=model,
         target_path=contract,
