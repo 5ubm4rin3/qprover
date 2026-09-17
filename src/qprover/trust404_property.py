@@ -367,7 +367,9 @@ def extract_property_analysis(
             target_declaration=target_declaration,
             constant_values=constants,
         )
-        bound = isinstance(function_declaration, int) and function_declaration in bound_ids
+        bound = (
+            isinstance(function_declaration, int) and function_declaration in bound_ids
+        )
         semantics_known = balance_read or bool(target_calls)
         function_id = (
             f"function:{invariants_source_name}:{contract_name}:"
