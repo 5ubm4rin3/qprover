@@ -102,7 +102,9 @@ def _variant_rank(variant) -> tuple[object, ...]:
         for argument in variant.args
     )
     self_refs = sum(argument == "__QPROVER_SELF__" for argument in variant.args)
-    nonzero_integers = sum(type(argument) is int and argument != 0 for argument in variant.args)
+    nonzero_integers = sum(
+        type(argument) is int and argument != 0 for argument in variant.args
+    )
     funded = int(variant.value_wei > 0)
     return (
         -dynamic,
@@ -146,9 +148,7 @@ def _skeleton_problem(model: Track04SearchModel):
                 args=variant.args,
                 value_wei=variant.value_wei,
                 max_repetitions=variant.max_repetitions,
-                argument_provenance=tuple(
-                    ("track04-skeleton",) for _ in variant.args
-                ),
+                argument_provenance=tuple(("track04-skeleton",) for _ in variant.args),
                 value_provenance=("track04-skeleton",),
             )
         )
