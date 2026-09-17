@@ -49,13 +49,11 @@ class AnnealingConfig:
 
 def _flip_delta(bqm: BinaryQuadraticModel, bits: list[int], index: int) -> float:
     terms = [bqm.linear.get(index, 0.0)]
-    for (first, second), coefficient in bqm.quadratic.items():
-        if first == second == index:
+    for neighbor, coefficient in bqm.quadratic_adjacency[index]:
+        if neighbor == index:
             terms.append(coefficient)
-        elif first == index:
-            terms.append(coefficient * bits[second])
-        elif second == index:
-            terms.append(coefficient * bits[first])
+        else:
+            terms.append(coefficient * bits[neighbor])
     try:
         field = math.fsum(terms)
     except OverflowError as error:

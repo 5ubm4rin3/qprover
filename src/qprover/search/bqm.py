@@ -7,7 +7,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from qprover.parameters import ActionVariant
@@ -373,6 +373,11 @@ class BinaryQuadraticModel:
     constraint_penalty: float
     problem: SearchProblem
     feedback: SearchFeedback
+    quadratic_adjacency: tuple[tuple[tuple[int, float], ...], ...] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         size = len(self.variables)
@@ -410,8 +415,25 @@ class BinaryQuadraticModel:
         )
         if penalty <= 0:
             raise ValueError("constraint penalty must be positive")
+        adjacency: list[list[tuple[int, float]]] = [[] for _ in range(size)]
+        for (first, second), coefficient in self.quadratic.items():
+            numeric = float(coefficient)
+            if first == second:
+                adjacency[first].append((first, numeric))
+            else:
+                adjacency[first].append((second, numeric))
+                adjacency[second].append((first, numeric))
+
         object.__setattr__(self, "linear", _frozen_mapping(self.linear))
         object.__setattr__(self, "quadratic", _frozen_mapping(self.quadratic))
+        object.__setattr__(
+            self,
+            "quadratic_adjacency",
+            tuple(
+                tuple(sorted(neighbors, key=lambda item: item[0]))
+                for neighbors in adjacency
+            ),
+        )
         object.__setattr__(
             self,
             "non_constraint_linear",
@@ -734,21 +756,19 @@ class SequenceBQMBuilder:
                 )
                 _finite_derived(coefficient, "objective coefficient")
                 _add_linear(non_linear, index(position, action), coefficient)
+        transition_edges = tuple(problem.transitions.items())
         for position in range(problem.max_sequence_length - 1):
-            for first in problem.actions:
-                for second in problem.actions:
-                    coefficient = -problem.transition_weight * problem.transitions.get(
-                        (first, second), 0.0
+            for (first, second), benefit in transition_edges:
+                coefficient = -problem.transition_weight * benefit
+                _finite_derived(coefficient, "transition coefficient")
+                if coefficient:
+                    _add_quadratic(
+                        non_linear,
+                        non_quadratic,
+                        index(position, first),
+                        index(position + 1, second),
+                        coefficient,
                     )
-                    _finite_derived(coefficient, "transition coefficient")
-                    if coefficient:
-                        _add_quadratic(
-                            non_linear,
-                            non_quadratic,
-                            index(position, first),
-                            index(position + 1, second),
-                            coefficient,
-                        )
         bound = _finite_sum(
             tuple(abs(value) for value in non_linear.values())
             + tuple(abs(value) for value in non_quadratic.values()),
