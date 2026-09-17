@@ -8,6 +8,12 @@ import qprover.trust404_harness as harness
 from qprover.trust404 import Track04Manifest
 
 
+EXPLOIT_SOURCE = (
+    "pragma solidity 0.8.24; contract Exploit { "
+    "function run(address) external payable {} }"
+)
+
+
 def _manifest(tmp_path: Path) -> Track04Manifest:
     path = tmp_path / "manifest.json"
     path.write_text(
@@ -66,7 +72,7 @@ def test_verify_exploit_uses_exact_local_solc_offline(
         hdir,
         target,
         invariants,
-        "pragma solidity 0.8.24; contract Exploit { function run(address) external payable {} }",
+        EXPLOIT_SOURCE,
         _manifest(tmp_path),
         timeout_seconds=12,
         runner=runner,
