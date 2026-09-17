@@ -3,7 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from qprover.artifacts import SourceUnitArtifact
-from qprover.trust404_property import PropertyAnalysis, PropertyFact, extract_property_analysis
+from qprover.trust404_property import (
+    PropertyAnalysis,
+    PropertyFact,
+    extract_property_analysis,
+)
 from qprover.trust404_resources import build_property_slices, score_function_relevance
 
 
