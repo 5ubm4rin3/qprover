@@ -111,34 +111,14 @@ def _hash_sources(sources: dict[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def _find_target_artifact(
-    output_root: Path, source_name: str, contract_name: str
-) -> tuple[Path, dict[str, Any]]:
-    matches: list[tuple[Path, dict[str, Any]]] = []
-    for path in output_root.rglob(f"{contract_name}.json"):
-        raw = _load_json(path)
-        metadata = raw.get("metadata")
-        settings = metadata.get("settings") if isinstance(metadata, dict) else None
-        target = (
-            settings.get("compilationTarget") if isinstance(settings, dict) else None
-        )
-        if target == {source_name: contract_name}:
-            matches.append((path, raw))
-    if len(matches) != 1:
-        raise Track04AnalysisError(
-            f"compiler artifact ambiguity for {source_name}:{contract_name}"
-        )
-    return matches[0]
-
-
 def _method_identifiers(raw: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     methods = raw.get("methodIdentifiers")
     if not isinstance(methods, dict):
-        raise Track04AnalysisError("target artifact is missing method identifiers")
+        raise Track04AnalysisError("contract artifact is missing method identifiers")
     pairs: list[tuple[str, str]] = []
     for signature, selector in methods.items():
         if not isinstance(signature, str) or not isinstance(selector, str):
-            raise Track04AnalysisError("invalid target method identifier")
+            raise Track04AnalysisError("invalid contract method identifier")
         pairs.append((signature, selector.lower()))
     return tuple(sorted(pairs))
 
@@ -170,7 +150,19 @@ def _source_units(build_info: dict[str, Any]) -> tuple[SourceUnitArtifact, ...]:
     return tuple(units)
 
 
-def _target_artifact(
+def _artifact_identity(raw: dict[str, Any]) -> tuple[str, str] | None:
+    metadata = raw.get("metadata")
+    settings = metadata.get("settings") if isinstance(metadata, dict) else None
+    target = settings.get("compilationTarget") if isinstance(settings, dict) else None
+    if not isinstance(target, dict) or len(target) != 1:
+        return None
+    source_name, contract_name = next(iter(target.items()))
+    if not isinstance(source_name, str) or not isinstance(contract_name, str):
+        return None
+    return source_name, contract_name
+
+
+def _contract_artifact(
     path: Path,
     raw: dict[str, Any],
     source_name: str,
@@ -185,13 +177,13 @@ def _target_artifact(
     ast = raw.get("ast")
     layout = raw.get("storageLayout")
     if not isinstance(abi, list):
-        raise Track04AnalysisError("target artifact is missing ABI")
+        raise Track04AnalysisError("contract artifact is missing ABI")
     if not isinstance(bytecode, str):
-        raise Track04AnalysisError("target artifact is missing bytecode")
+        raise Track04AnalysisError("contract artifact is missing bytecode")
     if not isinstance(ast, dict):
-        raise Track04AnalysisError("target artifact is missing AST")
+        raise Track04AnalysisError("contract artifact is missing AST")
     if not isinstance(layout, dict):
-        raise Track04AnalysisError("target artifact is missing storage layout")
+        raise Track04AnalysisError("contract artifact is missing storage layout")
     encoded = json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
     return ContractArtifact(
         source_name=source_name,
@@ -207,6 +199,37 @@ def _target_artifact(
         ast=ast,
         storage_layout=layout,
     )
+
+
+def _contract_artifacts(
+    output_root: Path,
+    build_info_id: str,
+) -> tuple[ContractArtifact, ...]:
+    artifacts: dict[str, ContractArtifact] = {}
+    for path in sorted(output_root.rglob("*.json")):
+        if "build-info" in path.parts:
+            continue
+        raw = _load_json(path)
+        identity = _artifact_identity(raw)
+        if identity is None:
+            continue
+        source_name, contract_name = identity
+        artifact = _contract_artifact(
+            path,
+            raw,
+            source_name,
+            contract_name,
+            build_info_id,
+        )
+        existing = artifacts.get(artifact.compilation_target)
+        if existing is not None and existing.artifact_sha256 != artifact.artifact_sha256:
+            raise Track04AnalysisError(
+                f"compiler artifact ambiguity for {artifact.compilation_target}"
+            )
+        artifacts[artifact.compilation_target] = artifact
+    if not artifacts:
+        raise Track04AnalysisError("compiler emitted no contract artifacts")
+    return tuple(artifacts[key] for key in sorted(artifacts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,34 +321,28 @@ def compile_track04_target(
                 f"EVM version drift: expected {evm_version}, got {input_evm}"
             )
 
-        source_name = target_src
-        artifact_path, artifact_raw = _find_target_artifact(
-            workspace / "out", source_name, target_name
-        )
         build_info_id = str(
             build_info.get("id") or _sha256(build_info_paths[0].read_bytes())[:16]
         )
-        target_artifact = _target_artifact(
-            artifact_path,
-            artifact_raw,
-            source_name,
-            target_name,
-            build_info_id,
-        )
+        artifacts = _contract_artifacts(workspace / "out", build_info_id)
+        target_key = f"{target_src}:{target_name}"
+        if target_key not in {item.compilation_target for item in artifacts}:
+            raise Track04AnalysisError(f"target artifact not found: {target_key}")
+
         input_sources = build_info.get("input", {}).get("sources")
         if not isinstance(input_sources, dict):
             raise Track04AnalysisError("build-info is missing input sources")
         bundle = SimpleNamespace(
             source_sha256=_hash_sources(input_sources),
             source_units=_source_units(build_info),
-            artifacts=(target_artifact,),
+            artifacts=artifacts,
         )
         report = analyze(bundle)  # analyze() only consumes compiler evidence fields.
         graph = build_program_graph(report)
-        report.contract(source_name, target_name)
+        report.contract(target_src, target_name)
         return Track04Analysis(
             report=report,
             graph=graph,
-            source_name=source_name,
+            source_name=target_src,
             contract_name=target_name,
         )
