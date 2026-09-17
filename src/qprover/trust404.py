@@ -281,9 +281,9 @@ def _abi_values(
         return tuple(
             dict.fromkeys(
                 (
-                    *address_refs,
                     SELF_ADDRESS,
                     TARGET_ADDRESS,
+                    *address_refs,
                     OTHER_ADDRESS,
                 )
             )
@@ -758,10 +758,11 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
     actions = {action.id: action for action in model.actions}
     lines: list[str] = []
     callback_needed = False
-    for step in steps:
+    for index, step in enumerate(steps):
         action = actions.get(step.action_id)
         if action is None:
             raise ValueError(f"unknown action {step.action_id!r}")
+        lines.append(f"_qproverStep = {index};")
         action_target = _address_expression("target", action.target_path)
         call_data = _encode_signature(action.signature, tuple(step.args))
         if action.callback_enabled:
@@ -782,6 +783,10 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
                 f"_mustCall({action_target}, {int(step.value_wei)}, {call_data});"
             )
 
+    common_fields = """
+    error QProverFailure(uint256 step);
+    uint256 private _qproverStep;
+"""
     callback_fields = ""
     receive_block = "\n    receive() external payable {}\n"
     if callback_needed:
@@ -795,7 +800,7 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
         if (_callbackTarget != address(0) && _callbackBudget > 0) {
             _callbackBudget -= 1;
             (bool ok,) = _callbackTarget.call(_callbackData);
-            require(ok, "qprover-callback");
+            if (!ok) revert QProverFailure(_qproverStep);
         }
     }
 """
@@ -804,25 +809,25 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
     return f"""// SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-contract Exploit {{{callback_fields}
+contract Exploit {{{common_fields}{callback_fields}
     function run(address target) external payable {{
 {body}
     }}
 
     function _mustCall(address target, uint256 value, bytes memory data) private {{
         (bool ok,) = target.call{{value: value}}(data);
-        require(ok, "qprover-call");
+        if (!ok) revert QProverFailure(_qproverStep);
     }}
 
     function _readAddress(address target, bytes memory data) private view returns (address value) {{
         (bool ok, bytes memory result) = target.staticcall(data);
-        require(ok && result.length >= 32, "qprover-address");
+        if (!ok || result.length < 32) revert QProverFailure(_qproverStep);
         value = abi.decode(result, (address));
     }}
 
     function _readUint(address target, bytes memory data) private view returns (uint256 value) {{
         (bool ok, bytes memory result) = target.staticcall(data);
-        require(ok && result.length >= 32, "qprover-uint");
+        if (!ok || result.length < 32) revert QProverFailure(_qproverStep);
         value = abi.decode(result, (uint256));
     }}
 
