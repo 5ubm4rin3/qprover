@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from qprover.trust404_analysis import Track04Analysis, compile_track04_target
+from qprover.trust404_resources import (
+    build_property_slices,
+    score_function_relevance,
+)
 
 OFFICIAL_SCHEMA = "trust404.track04.manifest/0.1"
 SELF_ADDRESS = "__QPROVER_SELF__"
@@ -624,6 +628,17 @@ def build_search_model(
         target_src=manifest.target_src,
         solc_version=manifest.solc,
         evm_version=manifest.evm_version,
+        invariants_path=invariants,
+        predicates=manifest.predicates,
+    )
+    property_analysis = getattr(analysis, "property_analysis", None)
+    property_slices = (
+        build_property_slices(
+            property_analysis,
+            root_target_identity="root",
+        )
+        if property_analysis is not None
+        else ()
     )
     reachable = _reachable_contracts(analysis)
     address_refs = tuple(_address_ref(path) for path, _ in reachable if path)
@@ -663,7 +678,22 @@ def build_search_model(
                     function.signature,
                     callback_enabled=callback_enabled,
                 )
-                utility = _function_utility(function, callback_enabled=callback_enabled)
+                base_utility = _function_utility(
+                    function,
+                    callback_enabled=callback_enabled,
+                )
+                property_relevance = (
+                    score_function_relevance(function, property_slices)
+                    if not target_path
+                    else 0.0
+                )
+                utility = round(
+                    min(
+                        1.0,
+                        base_utility + 0.5 * min(1.0, property_relevance),
+                    ),
+                    6,
+                )
                 action_variants = _variants(
                     action_id,
                     function.signature,
