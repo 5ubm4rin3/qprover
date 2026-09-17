@@ -455,7 +455,9 @@ class QuboStrategy:
         self._feedback_since_build += 1
         actions = tuple(step.action_id for step in candidate.steps)
         if result.outcome is Outcome.REVERT:
-            self._revert_counts.update(actions)
+            count = result.transaction_count
+            if 1 <= count <= len(actions):
+                self._revert_counts.update((actions[count - 1],))
         elif result.outcome in {Outcome.PASS, Outcome.VIOLATION}:
             self._successful_transitions.update(zip(actions, actions[1:], strict=False))
 
