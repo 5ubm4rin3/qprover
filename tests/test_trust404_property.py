@@ -14,7 +14,9 @@ def _identifier(name: str, declaration: int, node_id: int) -> dict[str, object]:
     }
 
 
-def _parameter(name: str, node_id: int, type_string: str = "address") -> dict[str, object]:
+def _parameter(
+    name: str, node_id: int, type_string: str = "address"
+) -> dict[str, object]:
     return {
         "nodeType": "VariableDeclaration",
         "id": node_id,
