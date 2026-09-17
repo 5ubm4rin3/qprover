@@ -163,7 +163,7 @@ def _skeleton_problem(model: Track04SearchModel):
         discounts=discounts,
         variants=tuple(representatives),
         hypothesis_sequences=(),
-        length_weight=0.15,
+        length_weight=0.30,
     )
 
 
