@@ -27,6 +27,23 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _analysis_timeout() -> int | None:
+    raw = os.environ.get("QPROVER_ANALYSIS_TIMEOUT")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise Track04AnalysisError(
+            "QPROVER_ANALYSIS_TIMEOUT must be a positive integer"
+        ) from error
+    if value <= 0:
+        raise Track04AnalysisError(
+            "QPROVER_ANALYSIS_TIMEOUT must be a positive integer"
+        )
+    return value
+
+
 def _run(command: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str]:
     environment = {
         key: os.environ[key]
@@ -41,7 +58,10 @@ def _run(command: tuple[str, ...], cwd: Path) -> subprocess.CompletedProcess[str
             capture_output=True,
             text=True,
             check=False,
+            timeout=_analysis_timeout(),
         )
+    except subprocess.TimeoutExpired as error:
+        raise Track04AnalysisError("compiler build timed out") from error
     except OSError as error:
         raise Track04AnalysisError(f"cannot execute {command[0]}: {error}") from error
     if result.returncode:
