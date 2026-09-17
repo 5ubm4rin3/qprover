@@ -60,9 +60,7 @@ def test_verify_exploit_uses_exact_local_solc_offline(
 
     def runner(command, **kwargs):
         seen.extend(command)
-        return subprocess.CompletedProcess(
-            command, 0, "AGENT_RESULT NOT_PROVEN\n", ""
-        )
+        return subprocess.CompletedProcess(command, 0, "AGENT_RESULT NOT_PROVEN\n", "")
 
     result = harness.verify_exploit(
         hdir,
