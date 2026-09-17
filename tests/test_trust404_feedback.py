@@ -12,6 +12,11 @@ import qprover.trust404_runner as runner
 from qprover.trust404 import Track04Manifest, build_search_model
 from qprover.trust404_harness import VerificationResult, verify_exploit
 
+EXPLOIT_SOURCE = (
+    "pragma solidity 0.8.24; contract Exploit { "
+    "function run(address) external payable {} }"
+)
+
 
 def _manifest(tmp_path: Path) -> Track04Manifest:
     path = tmp_path / "manifest.json"
@@ -70,7 +75,7 @@ def test_harness_extracts_generated_revert_step(tmp_path: Path) -> None:
         hdir,
         target,
         invariants,
-        "pragma solidity 0.8.24; contract Exploit { function run(address) external payable {} }",
+        EXPLOIT_SOURCE,
         manifest,
         timeout_seconds=10,
         runner=fake_runner,
