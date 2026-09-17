@@ -4,7 +4,6 @@ import json
 import subprocess
 from pathlib import Path
 
-from qprover import trust404_harness as harness
 from qprover.trust404 import Track04Manifest
 
 
@@ -51,6 +50,8 @@ def _manifest(tmp_path: Path) -> Track04Manifest:
 def test_verify_exploit_uses_exact_local_solc_offline(
     tmp_path: Path, monkeypatch
 ) -> None:
+    from qprover import trust404_harness as harness
+
     hdir = tmp_path / "harness"
     (hdir / "src").mkdir(parents=True)
     (hdir / "test").mkdir()
