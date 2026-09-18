@@ -17,8 +17,8 @@ def _files(tmp_path: Path) -> tuple[Path, Path, Path]:
     target.write_text("pragma solidity 0.8.24; contract Demo {}", encoding="utf-8")
     invariants = tmp_path / "Invariants.sol"
     invariants.write_text(
-        'pragma solidity 0.8.24; contract Invariants {'
-        'function checkAll(address) external pure returns(bool,string memory){'
+        "pragma solidity 0.8.24; contract Invariants {"
+        "function checkAll(address) external pure returns(bool,string memory){"
         'return (true, "");}}',
         encoding="utf-8",
     )
