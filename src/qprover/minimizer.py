@@ -488,8 +488,8 @@ def minimize_track04_candidate(
 
     # Deterministic contiguous-chunk deletion.
     granularity = 2
-    while len(getattr(current, "steps")) > 1 and evaluations < max_evaluations:
-        current_steps = tuple(getattr(current, "steps"))
+    while len(current.steps) > 1 and evaluations < max_evaluations:
+        current_steps = tuple(current.steps)
         chunk = math.ceil(len(current_steps) / granularity)
         changed = False
         for start in range(0, len(current_steps), chunk):
@@ -510,11 +510,11 @@ def minimize_track04_candidate(
 
     # One-step deletion fixed point.
     changed = True
-    while changed and len(getattr(current, "steps")) > 1:
+    while changed and len(current.steps) > 1:
         if evaluations >= max_evaluations:
             break
         changed = False
-        current_steps = tuple(getattr(current, "steps"))
+        current_steps = tuple(current.steps)
         for index in range(len(current_steps)):
             proposed = rebuild(current_steps[:index] + current_steps[index + 1 :])
             if probe(proposed):
@@ -527,7 +527,7 @@ def minimize_track04_candidate(
     return Track04MinimizationResult(
         candidate=current,
         original_step_count=len(steps),
-        minimized_step_count=len(tuple(getattr(current, "steps"))),
+        minimized_step_count=len(tuple(current.steps)),
         evaluation_count=evaluations,
         attempted_candidates=tuple(attempted),
     )
