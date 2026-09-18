@@ -273,6 +273,7 @@ class Track04Analysis:
     source_units: tuple[SourceUnitArtifact, ...] = ()
     property_analysis: PropertyAnalysis | None = None
     artifacts: tuple[ContractArtifact, ...] = ()
+    setup_source: str | None = None
 
 
 def compile_track04_target(
@@ -283,6 +284,7 @@ def compile_track04_target(
     solc_version: str,
     evm_version: str,
     invariants_path: Path | str | None = None,
+    setup_path: Path | str | None = None,
     predicates: Sequence[str] = (),
 ) -> Track04Analysis:
     """Compile one organizer target and reuse QProver's AST/graph analysis core."""
@@ -306,6 +308,13 @@ def compile_track04_target(
         if not invariants.is_file():
             raise FileNotFoundError(f"invariants not found: {invariants}")
         invariants_source = _relative_source(invariants, target_root, "invariants path")
+
+    setup_source: str | None = None
+    if setup_path is not None:
+        setup = Path(setup_path).resolve()
+        if not setup.is_file():
+            raise FileNotFoundError(f"setup not found: {setup}")
+        setup_source = _relative_source(setup, target_root, "setup path")
 
     with tempfile.TemporaryDirectory(prefix="qprover-track04-analysis-") as temporary:
         workspace = Path(temporary) / "target"
@@ -336,7 +345,7 @@ def compile_track04_target(
         build_sources = tuple(
             dict.fromkeys(
                 source
-                for source in (target_src, invariants_source)
+                for source in (target_src, invariants_source, setup_source)
                 if source is not None
             )
         )
@@ -388,6 +397,7 @@ def compile_track04_target(
             source_sha256=_hash_sources(input_sources),
             source_units=source_units,
             artifacts=artifacts,
+            setup_source=setup_source,
         )
         report = analyze(bundle)  # analyze() only consumes compiler evidence fields.
         graph = build_program_graph(report)
