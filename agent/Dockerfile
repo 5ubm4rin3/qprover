@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV FOUNDRY_DIR=/root/.foundry
 ENV PATH="${FOUNDRY_DIR}/bin:${PATH}"
 ENV QPROVER_SOLC=/usr/local/bin/solc
+ENV FOUNDRY_SOLC_VERSION=/usr/local/bin/solc
 
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && foundryup --install "${FOUNDRY_VERSION}" \
