@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from qprover.evm import LocalAnvil
+from qprover.minimizer import MinimizationError, minimize_track04_candidate
 from qprover.trust404 import (
     ADDRESS_REF_PREFIX,
     EXIT_ERROR,
@@ -68,6 +69,7 @@ class _AttemptLedger:
     codes: dict[str, str]
     last_code: str = _NOOP_EXPLOIT
     winner_code: str | None = None
+    winner_candidate: object | None = None
     attempts: int = 0
     fatal_error: bool = False
 
@@ -537,7 +539,7 @@ def _record_attempt(
             (
                 f"attempt={ledger.attempts}",
                 "stage=search",
-                "strategy=qubo",
+                "strategy=portfolio",
                 f"result={result_name}",
                 f"violated={verification.violated_predicate}",
                 f"candidate={candidate.canonical_id}",
@@ -679,6 +681,7 @@ def _run_search(
                 )
             if verification.proven:
                 ledger.winner_code = code
+                ledger.winner_candidate = candidate
                 return Evaluation(
                     outcome=Outcome.VIOLATION,
                     transaction_count=len(candidate.steps),
@@ -867,6 +870,32 @@ def run_track04(
                 clock=clock,
                 runtime=runtime,
             )
+            if found and ledger.winner_candidate is not None and deadline - clock() > 0:
+                def still_violates(proposed: object) -> bool:
+                    if deadline - clock() <= 0:
+                        return False
+                    try:
+                        result = runtime.execute(
+                            _runtime_calls(model, proposed, runtime)
+                        )
+                    except RuntimeCandidateRevert:
+                        return False
+                    return not result.all_hold
+
+                try:
+                    minimized = minimize_track04_candidate(
+                        ledger.winner_candidate,
+                        still_violates,
+                        max_evaluations=max(1, min(32, max_attempts * 4)),
+                    )
+                except MinimizationError:
+                    pass
+                else:
+                    ledger.winner_candidate = minimized.candidate
+                    ledger.winner_code = render_candidate(
+                        model,
+                        minimized.candidate,
+                    )
         if found and ledger.winner_code is not None:
             remaining_wall = deadline - clock()
             if remaining_wall > 0:
