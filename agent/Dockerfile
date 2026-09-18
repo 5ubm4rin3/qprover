@@ -1,6 +1,6 @@
 FROM ethereum/solc:0.8.24@sha256:e56ef5e376ae846f06b919d7ca4ed0c271f7fb0900daa6c660d53451f5bfd9db AS solc024
 
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
+FROM python:3.12.14-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 ARG FOUNDRY_VERSION=v1.7.1
 ARG FORGE_STD_REV=bf647bd6046f2f7da30d0c2bf435e5c76a780c1b
@@ -25,7 +25,10 @@ RUN chmod 0755 /usr/local/bin/solc \
 WORKDIR /opt/qprover
 COPY pyproject.toml uv.lock ./
 COPY src ./src
-RUN python -m pip install --no-cache-dir .
+RUN python -m pip install --no-cache-dir uv==0.12.11 \
+    && uv sync --frozen --no-dev
+
+ENV PATH="/opt/qprover/.venv/bin:${FOUNDRY_DIR}/bin:${PATH}"
 
 COPY trust404 ./trust404
 COPY agent ./agent
