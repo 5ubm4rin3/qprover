@@ -120,3 +120,45 @@ def test_track04_compiler_run_uses_global_analysis_timeout(
     trust404_analysis._run(("forge", "build"), tmp_path)
 
     assert seen["timeout"] == 7
+
+
+
+def test_track04_compiler_extracts_bounded_parameter_constraint(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    src = root / "src"
+    src.mkdir(parents=True)
+    target = src / "Target.sol"
+    target.write_text(
+        """// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+contract Target {
+    uint256 public last;
+
+    function alpha(uint256 amount) external {
+        require(amount >= 7);
+        last = amount;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    analysis = compile_track04_target(
+        target,
+        target_name="Target",
+        target_src="src/Target.sol",
+        solc_version="0.8.24",
+        evm_version="cancun",
+    )
+
+    function = analysis.report.function(
+        "src/Target.sol",
+        "Target",
+        "alpha(uint256)",
+    )
+    assert len(function.parameter_constraints) == 1
+    fact = function.parameter_constraints[0]
+    assert fact.parameter_index == 0
+    assert fact.operator == ">="
+    assert fact.constant == 7
