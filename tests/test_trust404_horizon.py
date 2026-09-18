@@ -77,3 +77,43 @@ def test_skeleton_problem_rejects_invalid_horizon() -> None:
         runner._skeleton_problem(model, horizon=0)
     with pytest.raises(ValueError, match="horizon"):
         runner._skeleton_problem(model, horizon=7)
+
+
+def test_run_search_deepens_horizons_with_one_global_attempt_budget(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qprover.search.controller as controller_module
+
+    ledger = runner._AttemptLedger(lines=[], codes={})
+    observed: list[tuple[int, int]] = []
+
+    class FakeController:
+        def __init__(self, *, candidate_validator) -> None:
+            self.candidate_validator = candidate_validator
+
+        def run(self, strategy, evaluator, limits, *, problem, seed):
+            del strategy, evaluator, seed
+            observed.append((problem.max_sequence_length, limits.candidate_budget))
+            ledger.attempts += 1
+            return SimpleNamespace(violation=None)
+
+    monkeypatch.setattr(controller_module, "SearchController", FakeController)
+    monkeypatch.setattr(runner, "_make_qubo_strategy", lambda: object())
+
+    found = runner._run_search(
+        model=_model(3),
+        target_path=tmp_path / "Target.sol",
+        invariants_path=tmp_path / "Invariants.sol",
+        manifest=SimpleNamespace(),
+        harness_dir=tmp_path,
+        seed=7,
+        attempt_budget=2,
+        deadline=100.0,
+        ledger=ledger,
+        verifier=lambda *_args, **_kwargs: None,
+        clock=lambda: 0.0,
+    )
+
+    assert found is False
+    assert observed == [(1, 2), (2, 1)]
+    assert ledger.attempts == 2
