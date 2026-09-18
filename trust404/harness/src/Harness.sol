@@ -98,7 +98,7 @@ abstract contract Harness is Test {
     ///
     /// targetDir: 이 매니페스트가 있는 디렉터리를, **컴파일에 쓰이는 foundry.toml
     /// 의 src 루트 기준** 상대경로로 넘긴다(예: 타깃 하나만 compile 하는 프로젝트라면
-    /// ""; 여러 타깃을 한 프로젝트에 같이 컴파일한다면 "targets/ReentrantVault").
+    /// ""; 여러 타깃을 한 프로젝트에 같이 컴파일한다면 "targets/ExampleTarget").
     /// vm.deployCode 의 아티팩트 선택자를 "<targetDir>/<파일명>:<계약명>" 처럼
     /// 이 경로로 항상 한정(qualify)한다 — 그렇지 않으면 여러 타깃을 같은
     /// 프로젝트에서 컴파일할 때 "Setup.s.sol:Setup" 같은 이름이 타깃마다 겹쳐
