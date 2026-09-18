@@ -10,7 +10,6 @@ import qprover.trust404_runner as runner
 from qprover.models import ActionStep, Candidate, Outcome
 from qprover.trust404 import Track04Action, Track04SearchModel, Track04Variant
 
-
 TARGET = "0x00000000000000000000000000000000000000a1"
 
 
