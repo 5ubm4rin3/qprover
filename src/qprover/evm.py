@@ -135,6 +135,8 @@ class LocalAnvil:
         self._readiness_timeout = timeout
         self._port_allocator = _port_allocator
         self._startup_attempts = _startup_attempts
+        self._genesis_timestamp = _GENESIS_TIMESTAMP
+        self._genesis_block_number = 0
         self._port: int | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._rpc_id = 0
@@ -169,6 +171,10 @@ class LocalAnvil:
     @property
     def genesis_timestamp(self) -> int:
         return int(self._metadata["genesis_timestamp"])
+
+    @property
+    def genesis_block_number(self) -> int:
+        return int(self._metadata["genesis_block_number"])
 
     @property
     def base_fee_wei(self) -> int:
@@ -210,7 +216,9 @@ class LocalAnvil:
             "--chain-id",
             str(_CHAIN_ID),
             "--timestamp",
-            str(_GENESIS_TIMESTAMP),
+            str(self._genesis_timestamp),
+            "--number",
+            str(self._genesis_block_number),
             "--block-base-fee-per-gas",
             "0",
             "--gas-price",
@@ -385,7 +393,10 @@ class LocalAnvil:
 
     def _load_metadata(self) -> None:
         accounts = self._request("eth_accounts")
-        genesis = self._request("eth_getBlockByNumber", ["0x0", False])
+        genesis = self._request(
+            "eth_getBlockByNumber",
+            [hex(self._genesis_block_number), False],
+        )
         latest = self._request("eth_getBlockByNumber", ["latest", False])
         if type(accounts) is not list:
             raise EVMError("local RPC returned invalid account list")
@@ -406,7 +417,7 @@ class LocalAnvil:
         chain_id = self._read_chain_id()
         if (
             chain_id != _CHAIN_ID
-            or timestamp != _GENESIS_TIMESTAMP
+            or timestamp != self._genesis_timestamp
             or base_fee != 0
             or gas_price != 0
         ):
@@ -418,11 +429,47 @@ class LocalAnvil:
                 "chain_id": chain_id,
                 "accounts": self._accounts,
                 "genesis_timestamp": timestamp,
+                "genesis_block_number": self._genesis_block_number,
                 "base_fee_wei": base_fee,
                 "gas_price_wei": gas_price,
                 "steps_tracing": True,
             }
         )
+
+    def configure_block_context(
+        self,
+        block_number: int,
+        block_timestamp: int,
+    ) -> None:
+        """Configure deterministic genesis block metadata before startup."""
+
+        if self._process is not None:
+            raise EVMError("block context must be configured before Anvil starts")
+        if type(block_number) is not int or not 0 <= block_number <= _MAX_UINT256:
+            raise ValueError("block_number must be a nonnegative integer")
+        if (
+            type(block_timestamp) is not int
+            or not 0 <= block_timestamp <= _MAX_UINT256
+        ):
+            raise ValueError("block_timestamp must be a nonnegative integer")
+        self._genesis_block_number = block_number
+        self._genesis_timestamp = block_timestamp
+
+    def set_block_context(
+        self,
+        block_number: int,
+        block_timestamp: int,
+    ) -> None:
+        """Assert that the running node uses the configured block context."""
+
+        if not self.running:
+            self.configure_block_context(block_number, block_timestamp)
+            return
+        if (
+            self.genesis_block_number != block_number
+            or self.genesis_timestamp != block_timestamp
+        ):
+            raise EVMError("running Anvil block context does not match manifest")
 
     def create_baseline(self) -> str:
         snapshot_id = self._request("evm_snapshot")
