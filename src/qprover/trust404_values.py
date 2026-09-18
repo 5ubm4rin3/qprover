@@ -288,8 +288,7 @@ def _constraint_models(
         item
         for item in constraints
         if getattr(item, "parameter_index", None) == parameter_index
-        and getattr(item, "operator", None)
-        in {"<", "<=", ">", ">=", "==", "!="}
+        and getattr(item, "operator", None) in {"<", "<=", ">", ">=", "==", "!="}
         and type(getattr(item, "constant", None)) is int
     )
     if not relevant:
