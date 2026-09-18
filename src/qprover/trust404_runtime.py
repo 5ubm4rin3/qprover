@@ -408,6 +408,8 @@ class Track04Runtime:
         truth = self._check_all()
         features: set[str] = set()
         for transaction_hash in transaction_hashes:
+            if not hasattr(self.anvil, "transaction_trace"):
+                continue
             trace = self.anvil.transaction_trace(transaction_hash)
             if trace is None:
                 continue
