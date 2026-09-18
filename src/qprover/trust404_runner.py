@@ -13,6 +13,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from qprover.evm import LocalAnvil
 from qprover.trust404 import (
@@ -30,8 +31,27 @@ from qprover.trust404 import (
     build_search_model,
     render_candidate,
 )
+from qprover.trust404_frontier import PortfolioStrategy
 from qprover.trust404_harness import VerificationResult, verify_exploit
-from qprover.trust404_runtime import deploy_runtime_from_artifacts
+from qprover.trust404_runtime import (
+    RuntimeCall,
+    RuntimeCandidateRevert,
+    deploy_runtime_from_artifacts,
+)
+from qprover.trust404_values import (
+    Add,
+    Const,
+    ContractAddress,
+    Max,
+    Min,
+    PreviousReturn,
+    ReadUint,
+    Scale,
+    SelfAddress,
+    Sub,
+    TargetAddress,
+    complete_parameters,
+)
 
 _NOOP_EXPLOIT = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
@@ -75,6 +95,20 @@ def _make_qubo_strategy():
         feedback_batch_size=1,
         resample_attempts=1,
         max_exact_fallback_sequences=0,
+    )
+
+
+def _make_portfolio_strategy(seed: int):
+    from qprover.search.coverage import CoverageGuidedStrategy
+    from qprover.search.risk import RiskGuidedStrategy
+
+    return PortfolioStrategy(
+        {
+            "best_first": RiskGuidedStrategy(beam_width=24),
+            "qubo": _make_qubo_strategy(),
+            "coverage": CoverageGuidedStrategy(proposal_attempts=96),
+        },
+        seed=seed,
     )
 
 
@@ -167,7 +201,7 @@ def _revert_transaction_count(note: str, candidate_length: int) -> int:
 
 
 def _deterministic_note(verification: VerificationResult) -> str:
-    if verification.category == "forge_error":
+    if verification.category in {"forge_error", "runtime_revert"}:
         if re.fullmatch(r"revert_step=\d+", verification.note):
             return verification.note
         return "forge_error"
@@ -212,6 +246,12 @@ def _search_horizons(model: Track04SearchModel) -> tuple[int, ...]:
     return tuple(range(1, model.max_sequence_length + 1))
 
 
+def _instance_id_for_path(path: tuple[str, ...]) -> str:
+    if not path:
+        return "instance:root"
+    return "instance:path:" + "|".join(path)
+
+
 def _skeleton_problem(
     model: Track04SearchModel,
     *,
@@ -240,7 +280,7 @@ def _skeleton_problem(
         representatives.append(
             ActionVariant(
                 action_id=variant.action_id,
-                target_id="target",
+                target_id=_instance_id_for_path(action.target_path),
                 signature=variant.signature,
                 sender_slot=0,
                 args=variant.args,
@@ -265,13 +305,23 @@ def _skeleton_problem(
     )
 
 
-def _concrete_candidates(model: Track04SearchModel, skeleton, limit: int):
-    """Complete one action skeleton with a bounded deterministic parameter frontier."""
+def _concrete_candidates(
+    model: Track04SearchModel,
+    skeleton,
+    limit: int,
+    *,
+    state: object | None = None,
+):
+    """Complete one skeleton with contextual expressions or legacy bounded values."""
 
     from qprover.models import ActionStep, Candidate
 
     if type(limit) is not int or limit <= 0:
         return ()
+    if state is not None:
+        contextual = complete_parameters(skeleton, state, model, limit)
+        if contextual:
+            return contextual
     grouped = _variants_by_action(model)
     domains = tuple(grouped[step.action_id] for step in skeleton.steps)
     if any(not domain for domain in domains):
@@ -319,11 +369,67 @@ def _concrete_candidates(model: Track04SearchModel, skeleton, limit: int):
     return tuple(candidates)
 
 
+def _resolve_value_expr(value: object, runtime: object) -> object:
+    if isinstance(value, Const):
+        return value.value
+    if isinstance(value, SelfAddress):
+        return runtime.attacker_address
+    if isinstance(value, TargetAddress):
+        return runtime.target_address
+    if isinstance(value, ContractAddress):
+        return runtime.instance_address(value.instance_id)
+    if isinstance(value, ReadUint):
+        arguments = tuple(_resolve_value_expr(item, runtime) for item in value.args)
+        return runtime.read_uint(value.instance_id, value.signature, arguments)
+    if isinstance(value, Scale):
+        resolved = int(_resolve_value_expr(value.value, runtime))
+        if resolved == 0 or value.numerator == 0:
+            return 0
+        maximum = (1 << 256) - 1
+        if resolved > maximum // value.numerator:
+            return maximum
+        return (resolved * value.numerator) // value.denominator
+    if isinstance(value, Add):
+        return int(_resolve_value_expr(value.left, runtime)) + int(
+            _resolve_value_expr(value.right, runtime)
+        )
+    if isinstance(value, Sub):
+        left = int(_resolve_value_expr(value.left, runtime))
+        right = int(_resolve_value_expr(value.right, runtime))
+        if right > left:
+            raise ValueError("contextual subtraction would underflow")
+        return left - right
+    if isinstance(value, Min):
+        return min(
+            int(_resolve_value_expr(value.left, runtime)),
+            int(_resolve_value_expr(value.right, runtime)),
+        )
+    if isinstance(value, Max):
+        return max(
+            int(_resolve_value_expr(value.left, runtime)),
+            int(_resolve_value_expr(value.right, runtime)),
+        )
+    if isinstance(value, PreviousReturn):
+        raise ValueError("PreviousReturn is unavailable without a runtime observation")
+    return value
+
+
+def _signature_types(signature: str) -> tuple[str, ...]:
+    opening = signature.find("(")
+    if opening < 0 or not signature.endswith(")"):
+        raise ValueError("invalid ABI signature")
+    encoded = signature[opening + 1 : -1]
+    if not encoded:
+        return ()
+    return tuple(part.strip() for part in encoded.split(","))
+
+
 def _runtime_argument(value: object, abi_type: str, runtime: object) -> object:
-    """Resolve only concrete/root-runtime values supported before ValueExpr lands."""
+    """Resolve one contextual or legacy ABI argument."""
 
     from web3 import Web3
 
+    value = _resolve_value_expr(value, runtime)
     if abi_type == "address":
         if value == SELF_ADDRESS:
             value = runtime.attacker_address
@@ -351,35 +457,65 @@ def _runtime_argument(value: object, abi_type: str, runtime: object) -> object:
 def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
     from web3 import Web3
 
-    from qprover.trust404_runtime import RuntimeCall
-
     actions = {action.id: action for action in model.actions}
-    calls = []
+    calls: list[RuntimeCall] = []
+
+    def encode_call(
+        target_instance_id: str,
+        signature: str,
+        args: tuple[object, ...],
+        value_wei: int,
+    ) -> RuntimeCall:
+        abi_types = _signature_types(signature)
+        if len(args) != len(abi_types):
+            raise ValueError("runtime argument count does not match action ABI")
+        concrete = tuple(
+            _runtime_argument(value, abi_type, runtime)
+            for value, abi_type in zip(args, abi_types, strict=True)
+        )
+        selector = bytes(Web3.keccak(text=signature)[:4])
+        encoded = Web3().codec.encode(list(abi_types), list(concrete))
+        return RuntimeCall(
+            target=runtime.instance_address(target_instance_id),
+            value_wei=value_wei,
+            calldata="0x" + (selector + encoded).hex(),
+        )
+
     for step in candidate.steps:
         action = actions[step.action_id]
-        if action.target_path:
-            raise ValueError(
-                "runtime contract aliases require instance canonicalization"
-            )
-        if action.callback_enabled:
-            raise ValueError("callback runtime program is not available yet")
-        if len(step.args) != len(action.param_types):
-            raise ValueError("runtime argument count does not match action ABI")
-        arguments = tuple(
-            _runtime_argument(value, abi_type, runtime)
-            for value, abi_type in zip(step.args, action.param_types, strict=True)
+        target_instance_id = getattr(
+            step,
+            "target_instance_id",
+            _instance_id_for_path(action.target_path),
         )
-        selector = bytes(Web3.keccak(text=action.signature)[:4])
-        encoded = Web3().codec.encode(list(action.param_types), list(arguments))
-        calls.append(
-            RuntimeCall(
-                target=runtime.target_address,
-                value_wei=step.value_wei,
-                calldata="0x" + (selector + encoded).hex(),
-            )
+        primary = encode_call(
+            target_instance_id,
+            action.signature,
+            tuple(step.args),
+            int(step.value_wei),
         )
+        callback = getattr(step, "callback_program", None)
+        if callback is not None:
+            nested = tuple(
+                encode_call(
+                    instruction.target.instance_id
+                    if isinstance(instruction.target, ContractAddress)
+                    else "instance:root",
+                    instruction.signature,
+                    instruction.args,
+                    int(_resolve_value_expr(instruction.value, runtime)),
+                )
+                for instruction in callback.instructions
+            )
+            primary = RuntimeCall(
+                target=primary.target,
+                value_wei=primary.value_wei,
+                calldata=primary.calldata,
+                callback_program=nested,
+                callback_depth_budget=callback.depth_budget,
+            )
+        calls.append(primary)
     return tuple(calls)
-
 
 def _record_attempt(
     ledger: _AttemptLedger,
@@ -390,6 +526,7 @@ def _record_attempt(
         "proven": "PROVEN",
         "not_proven": "NOT_PROVEN",
         "forge_error": "REVERT",
+        "runtime_revert": "REVERT",
         "timeout": "TIMEOUT",
         "infrastructure": "ERROR",
         "unsupported_deploy": "ERROR",
@@ -430,7 +567,7 @@ def _run_search(
     from qprover.search.base import Evaluation, candidate_is_valid
     from qprover.search.controller import SearchController
 
-    strategy = _make_qubo_strategy()
+    strategy = _make_portfolio_strategy(seed)
 
     class Evaluator:
         def evaluate(self, skeleton):
@@ -443,7 +580,23 @@ def _run_search(
                     metadata={"note": "budget"},
                 )
 
-            candidates = _concrete_candidates(model, skeleton, 1)
+            contextual_state = (
+                SimpleNamespace(
+                    runtime_uint_sources=model.runtime_uint_sources,
+                    previous_returns=(),
+                    runtime_instances=tuple(
+                        getattr(runtime, "instances", ())
+                    ),
+                )
+                if runtime is not None
+                else None
+            )
+            candidates = _concrete_candidates(
+                model,
+                skeleton,
+                1,
+                state=contextual_state,
+            )
             if not candidates:
                 return Evaluation(
                     outcome=Outcome.INCONCLUSIVE,
@@ -478,6 +631,24 @@ def _run_search(
                     runtime_result = runtime.execute(
                         _runtime_calls(model, candidate, runtime)
                     )
+                except RuntimeCandidateRevert as error:
+                    ledger.attempts += 1
+                    verification = VerificationResult(
+                        False,
+                        "",
+                        "runtime_revert",
+                        f"revert_step={error.step}",
+                    )
+                    _record_attempt(ledger, candidate, verification)
+                    return Evaluation(
+                        outcome=Outcome.REVERT,
+                        transaction_count=error.step + 1,
+                        metadata={
+                            "revert_step": error.step,
+                            "revert_selector": error.revert_selector or "",
+                            "raw_revert_hash": error.raw_revert_hash or "",
+                        },
+                    )
                 except ValueError as error:
                     return Evaluation(
                         outcome=Outcome.INCONCLUSIVE,
@@ -511,12 +682,32 @@ def _run_search(
                 return Evaluation(
                     outcome=Outcome.VIOLATION,
                     transaction_count=len(candidate.steps),
+                    trace_features=frozenset(
+                        getattr(runtime_result, "trace_features", ())
+                    )
+                    if runtime is not None
+                    else frozenset(),
+                    state_fingerprint=(
+                        getattr(runtime_result, "state_fingerprint", None)
+                        if runtime is not None
+                        else None
+                    ),
                     metadata={"violated_predicate": verification.violated_predicate},
                 )
             if verification.category == "not_proven":
                 return Evaluation(
                     outcome=Outcome.PASS,
                     transaction_count=len(candidate.steps),
+                    trace_features=frozenset(
+                        getattr(runtime_result, "trace_features", ())
+                    )
+                    if runtime is not None
+                    else frozenset(),
+                    state_fingerprint=(
+                        getattr(runtime_result, "state_fingerprint", None)
+                        if runtime is not None
+                        else None
+                    ),
                     metadata={"note": verification.note},
                 )
             if verification.category == "forge_error":
