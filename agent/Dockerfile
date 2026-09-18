@@ -34,6 +34,10 @@ RUN python -m pip install --no-cache-dir uv==0.12.11 \
 
 ENV PATH="/opt/qprover/.venv/bin:${FOUNDRY_DIR}/bin:${PATH}"
 
+RUN printf '%s\n' \
+      'export PATH="/opt/qprover/.venv/bin:/root/.foundry/bin:$PATH"' \
+      > /etc/profile.d/qprover-path.sh
+
 COPY trust404 ./trust404
 COPY agent ./agent
 
