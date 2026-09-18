@@ -98,4 +98,6 @@ jobs:
             forge --version | head -n1 | grep -F "1.7.1"
             solc --version | grep -F "0.8.24"
             test -f /opt/qprover/trust404/harness/out/SearchAttacker.sol/SearchAttacker.json
+            python -c "import qprover.trust404_runner; print(\"OFFLINE_IMPORT_OK\")"
+            forge test --root /opt/qprover/trust404/harness -q
           '
