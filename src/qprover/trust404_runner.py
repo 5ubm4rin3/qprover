@@ -531,6 +531,31 @@ def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
     return tuple(calls)
 
 
+def _record_final_proof(
+    ledger: _AttemptLedger,
+    verification: VerificationResult,
+) -> None:
+    result = (
+        "PROVEN"
+        if verification.proven
+        else "ERROR"
+        if verification.category in {"infrastructure", "unsupported_deploy"}
+        else "NOT_PROVEN"
+    )
+    ledger.lines.append(
+        "\t".join(
+            (
+                f"attempt={ledger.attempts}",
+                "stage=final-proof",
+                "strategy=organizer",
+                f"result={result}",
+                f"violated={verification.violated_predicate}",
+                f"note={_deterministic_note(verification)}",
+            )
+        )
+    )
+
+
 def _record_attempt(
     ledger: _AttemptLedger,
     candidate,
@@ -952,6 +977,7 @@ def run_track04(
                     manifest,
                     timeout_seconds=max(1, math.ceil(remaining_wall)),
                 )
+                _record_final_proof(ledger, final_proof)
                 if final_proof.category in {
                     "infrastructure",
                     "unsupported_deploy",
