@@ -320,7 +320,10 @@ class Track04Runtime:
         if callable(storage_reader):
             for slot in self.storage_slots:
                 observations.append(
-                    (f"target_storage:{slot}", storage_reader(self.target_address, slot))
+                    (
+                        f"target_storage:{slot}",
+                        storage_reader(self.target_address, slot),
+                    )
                 )
 
         for source in sorted(
