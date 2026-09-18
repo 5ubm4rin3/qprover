@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 import qprover.search.controller as controller_module
 import qprover.trust404_runner as runner
 from qprover.models import ActionStep, Candidate, Outcome
