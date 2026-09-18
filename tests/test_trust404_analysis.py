@@ -94,9 +94,7 @@ contract Invariants {
     )
 
     assert "Invariants.sol" in {item.source_name for item in analysis.source_units}
-    assert {
-        artifact.compilation_target for artifact in analysis.artifacts
-    } >= {
+    assert {artifact.compilation_target for artifact in analysis.artifacts} >= {
         "src/Target.sol:Target",
         "Invariants.sol:Invariants",
     }
