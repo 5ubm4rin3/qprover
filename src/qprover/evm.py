@@ -448,10 +448,7 @@ class LocalAnvil:
             raise EVMError("block context must be configured before Anvil starts")
         if type(block_number) is not int or not 0 <= block_number <= _MAX_UINT64:
             raise ValueError("block_number must be a nonnegative integer")
-        if (
-            type(block_timestamp) is not int
-            or not 0 <= block_timestamp <= _MAX_UINT64
-        ):
+        if type(block_timestamp) is not int or not 0 <= block_timestamp <= _MAX_UINT64:
             raise ValueError("block_timestamp must be a nonnegative integer")
         self._genesis_block_number = block_number
         self._genesis_timestamp = block_timestamp
