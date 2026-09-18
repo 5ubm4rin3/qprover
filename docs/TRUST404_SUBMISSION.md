@@ -25,7 +25,7 @@ QProver v2.5는 공개 타깃에 맞춘 reentrancy/access-control/oracle/account
 | 실행 | persistent SearchAttacker + Anvil snapshot/revert, original `Invariants.checkAll(target)` 직접 호출 |
 | 생성 | 최소화된 generic IR/callback program을 standalone `Exploit.sol`로 lowering |
 | Self-validation | fast runtime violation을 최소화한 뒤 organizer Harness에서 fresh final proof |
-| 출력 | `Exploit.sol`, `attempts.log`, exit 0/1/2 |
+| 출력 | `Exploit.sol`, `result.json`, `attempts.log`, exit 0/1/2 |
 | 결정론 | stable ordering, bounded parameter domains, seeded search, timestamp 없는 log |
 | 정상 타깃 | 실제 invariant violation이 없으면 `PROVEN`으로 처리하지 않음 |
 | 미공개 타깃 | 공개 exploit class를 production macro로 하드코딩하지 않음 |
@@ -53,6 +53,10 @@ docker run --rm --network=none \
   --seed 42 \
   --max-attempts 5
 ```
+
+## 출력 설명
+
+성공 시 `result.json`은 organizer Harness가 실제로 재현한 invariant만 기록합니다. 또한 최종 PoC의 action sequence와 설명을 함께 남겨, 어느 invariant가 어떤 실행 경로로 깨졌는지 제출 결과만으로 확인할 수 있습니다. 정적 분석이나 search score만으로 이 파일의 상태를 `PROVEN`으로 만들지 않습니다.
 
 ## Proof boundary
 
@@ -101,5 +105,5 @@ QProver는 organizer-provided, owned 또는 명시적으로 허가된 target을 
 - [ ] public target name / expected witness hardcoding 없음
 - [ ] 동일 seed 반복 실행 결과 deterministic
 - [ ] README의 실행 예시와 실제 entrypoint가 일치
-- [ ] `Exploit.sol` / `attempts.log` / exit code 계약 유지
+- [ ] `Exploit.sol` / `result.json` / `attempts.log` / exit code 계약 유지
 - [ ] AI assistance disclosure와 라이선스 확인
