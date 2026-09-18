@@ -636,6 +636,11 @@ def build_search_model(
         solc_version=manifest.solc,
         evm_version=manifest.evm_version,
         invariants_path=invariants,
+        setup_path=(
+            manifest.path.parent / manifest.setup
+            if manifest.setup is not None
+            else None
+        ),
         predicates=manifest.predicates,
     )
     property_analysis = getattr(analysis, "property_analysis", None)
