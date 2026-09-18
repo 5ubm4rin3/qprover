@@ -123,6 +123,12 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
             encoded = Web3().codec.encode(["address"], [target])
             return {"returnValue": "0x" + encoded.hex()}
 
+    target_artifact = _Artifact(
+        compilation_target="src/Target.sol:Target",
+        bytecode="0x6001600055",
+        abi=(),
+        storage_layout={"storage": ()},
+    )
     setup_artifact = _Artifact(
         compilation_target="Setup.s.sol:Setup",
         bytecode="0x6004600055",
@@ -134,7 +140,7 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
         abi=(),
     )
     analysis = SimpleNamespace(
-        artifacts=(setup_artifact, invariants_artifact),
+        artifacts=(target_artifact, setup_artifact, invariants_artifact),
         setup_source="Setup.s.sol",
     )
     manifest = SimpleNamespace(
