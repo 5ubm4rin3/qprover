@@ -93,7 +93,6 @@ class StateLocalFeedback:
         )
 
 
-
 @dataclass(frozen=True, slots=True)
 class SearchState:
     state_id: str
