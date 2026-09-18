@@ -217,8 +217,6 @@ class LocalAnvil:
             "--steps-tracing",
             "--chain-id",
             str(_CHAIN_ID),
-            "--hardfork",
-            "cancun",
             "--timestamp",
             str(self._genesis_timestamp),
             "--number",
