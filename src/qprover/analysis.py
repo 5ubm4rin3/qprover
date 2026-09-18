@@ -138,6 +138,14 @@ class OrderedCallWriteFact:
 
 
 @dataclass(frozen=True, slots=True)
+class ParameterConstraintFact:
+    parameter_index: int
+    operator: str
+    constant: int
+    source_span: str
+
+
+@dataclass(frozen=True, slots=True)
 class FunctionFacts:
     source_name: str
     contract: str
@@ -163,6 +171,7 @@ class FunctionFacts:
     transitive_storage_reads: tuple[str, ...]
     transitive_storage_writes: tuple[str, ...]
     transitive_calls: tuple[str, ...]
+    parameter_constraints: tuple[ParameterConstraintFact, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +414,122 @@ def _value_flow(
     return None
 
 
+def _literal_integer(
+    node: object,
+    declarations: Mapping[int, Mapping[str, Any]],
+) -> int | None:
+    if not isinstance(node, Mapping):
+        return None
+    if node.get("nodeType") == "Literal":
+        value = node.get("value")
+        if isinstance(value, str):
+            cleaned = value.replace("_", "")
+            try:
+                return int(cleaned, 0)
+            except ValueError:
+                try:
+                    return int(cleaned, 10)
+                except ValueError:
+                    return None
+    if node.get("nodeType") == "UnaryOperation" and node.get("operator") == "-":
+        nested = _literal_integer(node.get("subExpression"), declarations)
+        return -nested if nested is not None else None
+    if node.get("nodeType") == "Identifier":
+        reference = node.get("referencedDeclaration")
+        declaration = (
+            declarations.get(reference) if isinstance(reference, int) else None
+        )
+        if (
+            isinstance(declaration, Mapping)
+            and declaration.get("nodeType") == "VariableDeclaration"
+            and declaration.get("constant") is True
+        ):
+            return _literal_integer(declaration.get("value"), declarations)
+    return None
+
+
+def _parameter_constraint_facts(
+    node: Mapping[str, Any],
+    declarations: Mapping[int, Mapping[str, Any]],
+) -> tuple[ParameterConstraintFact, ...]:
+    parameters = tuple(node.get("parameters", {}).get("parameters", ()))
+    parameter_ids = {
+        item.get("id"): index
+        for index, item in enumerate(parameters)
+        if isinstance(item, Mapping) and isinstance(item.get("id"), int)
+    }
+    reverse_operator = {
+        "<": ">",
+        "<=": ">=",
+        ">": "<",
+        ">=": "<=",
+        "==": "==",
+        "!=": "!=",
+    }
+    facts: list[ParameterConstraintFact] = []
+    for candidate in _walk(node.get("body")):
+        if candidate.get("nodeType") != "FunctionCall":
+            continue
+        expression = _call_expression(candidate)
+        if not expression or expression.get("name") not in {"require", "assert"}:
+            continue
+        arguments = candidate.get("arguments", ())
+        if not isinstance(arguments, (tuple, list)) or not arguments:
+            continue
+        condition = arguments[0]
+        if (
+            not isinstance(condition, Mapping)
+            or condition.get("nodeType") != "BinaryOperation"
+            or condition.get("operator") not in reverse_operator
+        ):
+            continue
+        operator = str(condition["operator"])
+        left = condition.get("leftExpression")
+        right = condition.get("rightExpression")
+
+        left_ref = (
+            left.get("referencedDeclaration")
+            if isinstance(left, Mapping) and left.get("nodeType") == "Identifier"
+            else None
+        )
+        right_ref = (
+            right.get("referencedDeclaration")
+            if isinstance(right, Mapping) and right.get("nodeType") == "Identifier"
+            else None
+        )
+        if left_ref in parameter_ids:
+            constant = _literal_integer(right, declarations)
+            parameter_index = parameter_ids[left_ref]
+            normalized = operator
+        elif right_ref in parameter_ids:
+            constant = _literal_integer(left, declarations)
+            parameter_index = parameter_ids[right_ref]
+            normalized = reverse_operator[operator]
+        else:
+            continue
+        if constant is None:
+            continue
+        facts.append(
+            ParameterConstraintFact(
+                parameter_index=parameter_index,
+                operator=normalized,
+                constant=constant,
+                source_span=str(condition.get("src", "unknown")),
+            )
+        )
+    return tuple(
+        sorted(
+            set(facts),
+            key=lambda item: (
+                item.parameter_index,
+                item.operator,
+                item.constant,
+                item.source_span,
+            ),
+        )
+    )
+
+
 def _extract_function(
     source_name: str,
     contract: _ContractIdentity,
@@ -556,6 +681,7 @@ def _extract_function(
         transitive_storage_reads=tuple(sorted(read_ids)),
         transitive_storage_writes=tuple(sorted(write_ids)),
         transitive_calls=(),
+        parameter_constraints=_parameter_constraint_facts(node, declarations),
     )
 
 
