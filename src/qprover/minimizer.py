@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
@@ -432,4 +432,105 @@ def minimize(
         minimality_claim=(
             "Replay-verified local minimum under one-step deletion only."
         ),
+    )
+
+
+
+@dataclass(frozen=True, slots=True)
+class Track04MinimizationResult:
+    candidate: object
+    original_step_count: int
+    minimized_step_count: int
+    evaluation_count: int
+    attempted_candidates: tuple[str, ...]
+
+
+def minimize_track04_candidate(
+    candidate: object,
+    violates: Callable[[object], bool],
+    *,
+    max_evaluations: int = 64,
+) -> Track04MinimizationResult:
+    """Execution-back a generic Track04 witness down to a local trace minimum."""
+
+    if type(max_evaluations) is not int or max_evaluations <= 0:
+        raise ValueError("max_evaluations must be positive")
+    steps = tuple(getattr(candidate, "steps", ()))
+    if not steps:
+        raise MinimizationError("Track04 seed must contain at least one step")
+    candidate_type = type(candidate)
+    evaluations = 0
+    attempted: list[str] = []
+
+    def rebuild(proposed_steps: tuple[object, ...]) -> object:
+        return candidate_type(proposed_steps)
+
+    def probe(proposed: object) -> bool:
+        nonlocal evaluations
+        if evaluations >= max_evaluations:
+            return False
+        evaluations += 1
+        attempted.append(str(getattr(proposed, "canonical_id", repr(proposed))))
+        try:
+            return bool(violates(proposed))
+        except Exception:
+            return False
+
+    if not probe(candidate):
+        raise MinimizationError("Track04 seed no longer violates the invariant")
+    current = candidate
+
+    # Prefer the earliest violating prefix.
+    for length in range(1, len(steps)):
+        proposed = rebuild(steps[:length])
+        if probe(proposed):
+            current = proposed
+            break
+
+    # Deterministic contiguous-chunk deletion.
+    granularity = 2
+    while len(getattr(current, "steps")) > 1 and evaluations < max_evaluations:
+        current_steps = tuple(getattr(current, "steps"))
+        chunk = math.ceil(len(current_steps) / granularity)
+        changed = False
+        for start in range(0, len(current_steps), chunk):
+            proposed_steps = current_steps[:start] + current_steps[start + chunk :]
+            if not proposed_steps:
+                continue
+            proposed = rebuild(proposed_steps)
+            if probe(proposed):
+                current = proposed
+                granularity = max(2, granularity - 1)
+                changed = True
+                break
+        if changed:
+            continue
+        if granularity >= len(current_steps):
+            break
+        granularity = min(len(current_steps), granularity * 2)
+
+    # One-step deletion fixed point.
+    changed = True
+    while changed and len(getattr(current, "steps")) > 1:
+        if evaluations >= max_evaluations:
+            break
+        changed = False
+        current_steps = tuple(getattr(current, "steps"))
+        for index in range(len(current_steps)):
+            proposed = rebuild(
+                current_steps[:index] + current_steps[index + 1 :]
+            )
+            if probe(proposed):
+                current = proposed
+                changed = True
+                break
+
+    if evaluations < max_evaluations and not probe(current):
+        raise MinimizationError("Track04 final minimized witness lost the violation")
+    return Track04MinimizationResult(
+        candidate=current,
+        original_step_count=len(steps),
+        minimized_step_count=len(tuple(getattr(current, "steps"))),
+        evaluation_count=evaluations,
+        attempted_candidates=tuple(attempted),
     )
