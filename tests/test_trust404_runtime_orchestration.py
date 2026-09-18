@@ -141,3 +141,119 @@ def test_run_track04_uses_persistent_runtime_then_final_organizer_proof(
     assert seen_runtime == [fake_runtime]
     assert len(final_proofs) == 1
     assert final_proofs[0] == (out / "Exploit.sol").read_text(encoding="utf-8")
+
+
+
+def test_default_runtime_factory_uses_local_anvil_and_retained_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+    fake_runtime = SimpleNamespace(target_address="0x" + "11" * 20)
+    model = _model()
+    manifest = SimpleNamespace(block_number=12, block_timestamp=34)
+
+    class FakeAnvil:
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, *_exc_info):
+            events.append("exit")
+
+        def set_block_context(self, block_number: int, block_timestamp: int) -> None:
+            events.append(("context", block_number, block_timestamp))
+
+    def fake_deploy(
+        anvil,
+        *,
+        analysis,
+        manifest,
+        search_attacker_bytecode,
+        attacker_funding_wei,
+    ):
+        events.append(
+            (
+                "deploy",
+                anvil,
+                analysis,
+                manifest,
+                search_attacker_bytecode,
+                attacker_funding_wei,
+            )
+        )
+        return fake_runtime
+
+    monkeypatch.setattr(runner, "LocalAnvil", FakeAnvil, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "_search_attacker_bytecode",
+        lambda _harness_dir: "0x60006000",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "deploy_runtime_from_artifacts",
+        fake_deploy,
+        raising=False,
+    )
+
+    with runner._default_runtime_factory(
+        model=model,
+        target_path=tmp_path / "Target.sol",
+        invariants_path=tmp_path / "Invariants.sol",
+        manifest=manifest,
+        harness_dir=tmp_path,
+        deadline=100.0,
+        clock=lambda: 0.0,
+    ) as runtime:
+        assert runtime is fake_runtime
+
+    assert events[0] == "enter"
+    assert events[1] == ("context", 12, 34)
+    assert events[2][0] == "deploy"
+    assert events[2][2] is model.analysis
+    assert events[2][3] is manifest
+    assert events[2][4] == "0x60006000"
+    assert events[-1] == "exit"
+
+
+def test_main_passes_default_persistent_runtime_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+    sentinel = object()
+    monkeypatch.setattr(
+        runner,
+        "_default_runtime_factory",
+        sentinel,
+        raising=False,
+    )
+
+    def fake_run_track04(*_args, **kwargs):
+        seen.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(runner, "run_track04", fake_run_track04)
+
+    exit_code = runner.main(
+        [
+            "--contract",
+            "Target.sol",
+            "--invariants",
+            "Invariants.sol",
+            "--manifest",
+            "manifest.json",
+            "--out",
+            "out",
+            "--timeout",
+            "30",
+            "--seed",
+            "7",
+            "--max-attempts",
+            "2",
+        ]
+    )
+
+    assert exit_code == 1
+    assert seen["runtime_factory"] is sentinel
