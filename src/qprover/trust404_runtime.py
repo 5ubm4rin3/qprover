@@ -451,6 +451,45 @@ def _deploy_contract(
     return _normalize_address(address)
 
 
+def _deploy_target_via_setup(
+    anvil: Any,
+    *,
+    analysis: Any,
+    controller: str,
+) -> str:
+    setup_source = getattr(analysis, "setup_source", None)
+    if not isinstance(setup_source, str) or not setup_source:
+        raise ValueError("setup source is missing from compiler analysis")
+    setup_artifact = _artifact_by_target(analysis, f"{setup_source}:Setup")
+    setup_address = _deploy_contract(
+        anvil,
+        controller_address=controller,
+        bytecode=setup_artifact.bytecode,
+    )
+    transaction_hash = anvil.send_transaction(
+        {
+            "from": controller,
+            "to": setup_address,
+            "data": _encode_abi_call("run()", (), ()),
+        }
+    )
+    receipt = anvil.wait_for_receipt(transaction_hash)
+    if receipt.get("status") != 1:
+        raise RuntimeError("Track04 setup transaction reverted")
+    trace = anvil.debug_trace(transaction_hash)
+    if trace is None:
+        raise RuntimeError("Track04 setup return data is unavailable")
+    returned = trace.get("returnValue")
+    if not isinstance(returned, str):
+        raise RuntimeError("Track04 setup returned invalid data")
+    raw = returned if returned.startswith("0x") else "0x" + returned
+    decoded = Web3().codec.decode(
+        ["address"],
+        _decode_hex(raw, "setup return data"),
+    )
+    return _normalize_address(str(decoded[0]))
+
+
 def deploy_runtime_from_artifacts(
     anvil: Any,
     *,
@@ -461,9 +500,6 @@ def deploy_runtime_from_artifacts(
 ) -> Track04Runtime:
     """Deploy one deterministic Track04 search runtime from retained artifacts."""
 
-    if getattr(manifest, "setup", None) is not None:
-        raise ValueError("deploy.setup requires the setup-aware runtime factory")
-
     accounts = tuple(
         _normalize_address(address) for address in getattr(anvil, "accounts", ())
     )
@@ -471,16 +507,23 @@ def deploy_runtime_from_artifacts(
         raise ValueError("runtime requires one unlocked controller account")
     controller = accounts[0]
 
-    target_key = f"{manifest.target_src}:{manifest.target_name}"
-    target_artifact = _artifact_by_target(analysis, target_key)
-    target_address = _deploy_contract(
-        anvil,
-        controller_address=controller,
-        bytecode=target_artifact.bytecode,
-        constructor_types=_constructor_types(target_artifact),
-        constructor_args=tuple(manifest.constructor_args),
-        value_wei=manifest.deploy_value_wei,
-    )
+    if getattr(manifest, "setup", None) is not None:
+        target_address = _deploy_target_via_setup(
+            anvil,
+            analysis=analysis,
+            controller=controller,
+        )
+    else:
+        target_key = f"{manifest.target_src}:{manifest.target_name}"
+        target_artifact = _artifact_by_target(analysis, target_key)
+        target_address = _deploy_contract(
+            anvil,
+            controller_address=controller,
+            bytecode=target_artifact.bytecode,
+            constructor_types=_constructor_types(target_artifact),
+            constructor_args=tuple(manifest.constructor_args),
+            value_wei=manifest.deploy_value_wei,
+        )
 
     invariants_key = f"{manifest.invariants_contract}:Invariants"
     invariants_artifact = _artifact_by_target(analysis, invariants_key)
