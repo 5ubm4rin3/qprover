@@ -110,7 +110,6 @@ def test_uint_parameter_admits_self_indexed_runtime_read_and_scaled_forms() -> N
     assert Scale(read, 2, 1) in expressions[:4]
 
 
-
 def test_bounded_parameter_constraint_produces_z3_model() -> None:
     action = _action("call:kappa(uint256)", ("uint256",))
     constraint = SimpleNamespace(
