@@ -86,11 +86,7 @@ def canonicalize_instances(
 
 
 def _decode_hex(value: str, label: str) -> bytes:
-    if (
-        not isinstance(value, str)
-        or not value.startswith("0x")
-        or len(value) % 2 != 0
-    ):
+    if not isinstance(value, str) or not value.startswith("0x") or len(value) % 2 != 0:
         raise ValueError(f"{label} must be 0x-prefixed even-length hex")
     try:
         return bytes.fromhex(value[2:])
@@ -139,7 +135,7 @@ class Track04Runtime:
         target_address: str,
         invariants_address: str,
         attacker_address: str,
-    ) -> "Track04Runtime":
+    ) -> Track04Runtime:
         runtime = cls(
             anvil=anvil,
             controller_address=_normalize_address(controller_address),
