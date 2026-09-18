@@ -315,74 +315,72 @@ def _run_search(
                     metadata={"note": "budget"},
                 )
 
-            quota = min(2, remaining_attempts)
-            candidates = _concrete_candidates(model, skeleton, quota)
-            saw_pass = False
-            saw_revert = False
-            saw_timeout = False
-            last_note = ""
-            revert_count = len(skeleton.steps)
-            for candidate in candidates:
-                remaining_wall = deadline - clock()
-                if remaining_wall <= 0 or ledger.attempts >= attempt_budget:
-                    saw_timeout = True
-                    break
-                code = render_candidate(model, candidate)
-                ledger.last_code = code
-                ledger.codes[candidate.canonical_id] = code
-                verification = verifier(
-                    harness_dir,
-                    target_path,
-                    invariants_path,
-                    code,
-                    manifest,
-                    timeout_seconds=max(1, math.ceil(remaining_wall)),
+            candidates = _concrete_candidates(model, skeleton, 1)
+            if not candidates:
+                return Evaluation(
+                    outcome=Outcome.INCONCLUSIVE,
+                    transaction_count=0,
+                    metadata={"note": "no-concrete-candidate"},
                 )
-                ledger.attempts += 1
-                _record_attempt(ledger, candidate, verification)
-                last_note = verification.note
-                if verification.category in {
-                    "infrastructure",
-                    "unsupported_deploy",
-                }:
-                    ledger.fatal_error = True
-                    return Evaluation(
-                        outcome=Outcome.INFRA_ERROR,
-                        transaction_count=0,
-                        metadata={"note": verification.note},
-                    )
-                if verification.proven:
-                    ledger.winner_code = code
-                    return Evaluation(
-                        outcome=Outcome.VIOLATION,
-                        transaction_count=len(skeleton.steps),
-                        metadata={
-                            "violated_predicate": verification.violated_predicate
-                        },
-                    )
-                if verification.category == "not_proven":
-                    saw_pass = True
-                elif verification.category == "forge_error":
-                    saw_revert = True
-                    revert_count = _revert_transaction_count(
-                        verification.note, len(skeleton.steps)
-                    )
-                elif verification.category == "timeout":
-                    saw_timeout = True
 
-            if saw_pass:
+            candidate = candidates[0]
+            remaining_wall = deadline - clock()
+            if remaining_wall <= 0 or ledger.attempts >= attempt_budget:
+                return Evaluation(
+                    outcome=Outcome.INCONCLUSIVE,
+                    transaction_count=0,
+                    metadata={"note": "budget"},
+                )
+
+            code = render_candidate(model, candidate)
+            ledger.last_code = code
+            ledger.codes[candidate.canonical_id] = code
+            verification = verifier(
+                harness_dir,
+                target_path,
+                invariants_path,
+                code,
+                manifest,
+                timeout_seconds=max(1, math.ceil(remaining_wall)),
+            )
+            ledger.attempts += 1
+            _record_attempt(ledger, candidate, verification)
+
+            if verification.category in {
+                "infrastructure",
+                "unsupported_deploy",
+            }:
+                ledger.fatal_error = True
+                return Evaluation(
+                    outcome=Outcome.INFRA_ERROR,
+                    transaction_count=0,
+                    metadata={"note": verification.note},
+                )
+            if verification.proven:
+                ledger.winner_code = code
+                return Evaluation(
+                    outcome=Outcome.VIOLATION,
+                    transaction_count=len(candidate.steps),
+                    metadata={
+                        "violated_predicate": verification.violated_predicate
+                    },
+                )
+            if verification.category == "not_proven":
                 return Evaluation(
                     outcome=Outcome.PASS,
-                    transaction_count=len(skeleton.steps),
-                    metadata={"note": last_note},
+                    transaction_count=len(candidate.steps),
+                    metadata={"note": verification.note},
                 )
-            if saw_revert:
+            if verification.category == "forge_error":
                 return Evaluation(
                     outcome=Outcome.REVERT,
-                    transaction_count=revert_count,
-                    metadata={"note": last_note},
+                    transaction_count=_revert_transaction_count(
+                        verification.note,
+                        len(candidate.steps),
+                    ),
+                    metadata={"note": verification.note},
                 )
-            if saw_timeout:
+            if verification.category == "timeout":
                 return Evaluation(
                     outcome=Outcome.INCONCLUSIVE,
                     transaction_count=0,
@@ -391,7 +389,7 @@ def _run_search(
             return Evaluation(
                 outcome=Outcome.INCONCLUSIVE,
                 transaction_count=0,
-                metadata={"note": "no-concrete-candidate"},
+                metadata={"note": verification.note},
             )
 
     if attempt_budget <= 0:
