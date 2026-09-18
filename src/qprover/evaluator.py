@@ -32,7 +32,6 @@ class EvaluatorError(RuntimeError):
     """The manifest/bundle cannot establish a trustworthy local baseline."""
 
 
-
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
