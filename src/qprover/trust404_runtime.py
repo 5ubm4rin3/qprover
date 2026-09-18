@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -307,10 +307,15 @@ class Track04Runtime:
             raise RuntimeError("SearchAttacker callback cleanup reverted")
 
     def _state_fingerprint(self) -> str:
-        observations: list[tuple[str, object]] = [
-            ("target_balance", self.anvil.balance(self.target_address)),
-            ("attacker_balance", self.anvil.balance(self.attacker_address)),
-        ]
+        observations: list[tuple[str, object]] = []
+        balance_reader = getattr(self.anvil, "balance", None)
+        if callable(balance_reader):
+            observations.extend(
+                (
+                    ("target_balance", balance_reader(self.target_address)),
+                    ("attacker_balance", balance_reader(self.attacker_address)),
+                )
+            )
         storage_reader = getattr(self.anvil, "storage_at", None)
         if callable(storage_reader):
             for slot in self.storage_slots:
@@ -593,12 +598,18 @@ def deploy_runtime_from_artifacts(
     if attacker_funding_wei:
         anvil.set_balance(attacker_address, attacker_funding_wei)
 
+    storage_layout = getattr(target_artifact, "storage_layout", {})
+    storage_records = (
+        storage_layout.get("storage", ())
+        if isinstance(storage_layout, Mapping)
+        else ()
+    )
     storage_slots = tuple(
         sorted(
             {
                 int(str(item.get("slot")), 0)
-                for item in target_artifact.storage_layout.get("storage", ())
-                if isinstance(item, dict) and item.get("slot") is not None
+                for item in storage_records
+                if isinstance(item, Mapping) and item.get("slot") is not None
             }
         )
     )
