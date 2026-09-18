@@ -32,7 +32,7 @@ from qprover.trust404 import (
     build_search_model,
     render_candidate,
 )
-from qprover.trust404_frontier import PortfolioStrategy
+from qprover.trust404_frontier import PortfolioStrategy, SearchState, StateFrontier
 from qprover.trust404_harness import VerificationResult, verify_exploit
 from qprover.trust404_runtime import (
     RuntimeCall,
@@ -530,6 +530,7 @@ def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
         calls.append(primary)
     return tuple(calls)
 
+
 def _record_attempt(
     ledger: _AttemptLedger,
     candidate,
@@ -581,6 +582,34 @@ def _run_search(
     from qprover.search.controller import SearchController
 
     strategy = _make_portfolio_strategy(seed)
+    frontier = StateFrontier()
+
+    def record_state(candidate: object, runtime_result: object) -> None:
+        fingerprint = getattr(runtime_result, "state_fingerprint", None)
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return
+        features = frozenset(getattr(runtime_result, "trace_features", ()))
+        frontier.add(
+            SearchState(
+                state_id=f"state:{fingerprint}",
+                fingerprint=fingerprint,
+                trace_action_ids=tuple(
+                    str(getattr(step, "action_id", ""))
+                    for step in getattr(candidate, "steps", ())
+                ),
+                property_observations=(
+                    ("all_hold", bool(getattr(runtime_result, "all_hold", True))),
+                    (
+                        "violated_predicate",
+                        str(getattr(runtime_result, "violated_predicate", "")),
+                    ),
+                ),
+                runtime_instances=tuple(getattr(runtime, "instances", ()))
+                if runtime is not None
+                else (),
+                novelty=float(len(features)),
+            )
+        )
 
     class Evaluator:
         def evaluate(self, skeleton):
@@ -679,6 +708,8 @@ def _run_search(
 
             ledger.attempts += 1
             _record_attempt(ledger, candidate, verification)
+            if runtime is not None:
+                record_state(candidate, runtime_result)
 
             if verification.category in {
                 "infrastructure",
