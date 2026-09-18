@@ -125,9 +125,11 @@ def _default_runtime_factory(
         raise ValueError("runtime deadline expired before Anvil startup")
 
     manager = LocalAnvil()
-    configure = getattr(manager, "configure_block_context", None)
-    if callable(configure):
-        configure(manifest.block_number, manifest.block_timestamp)
+    if hasattr(manager, "configure_block_context"):
+        manager.configure_block_context(
+            manifest.block_number,
+            manifest.block_timestamp,
+        )
 
     with manager as anvil:
         anvil.set_block_context(manifest.block_number, manifest.block_timestamp)
