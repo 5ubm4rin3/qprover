@@ -260,7 +260,6 @@ def test_main_passes_default_persistent_runtime_factory(
     assert seen["runtime_factory"] is sentinel
 
 
-
 def test_fast_runtime_only_violation_is_not_final_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
