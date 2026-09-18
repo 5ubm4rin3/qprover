@@ -68,9 +68,7 @@ def canonicalize_instances(
             item.artifact_ref for item in items if item.artifact_ref is not None
         }
         artifact_ref = next(iter(artifact_refs)) if len(artifact_refs) == 1 else None
-        discovery_paths = tuple(
-            sorted({tuple(item.discovery_path) for item in items})
-        )
+        discovery_paths = tuple(sorted({tuple(item.discovery_path) for item in items}))
         instances.append(
             ContractInstance(
                 instance_id=f"instance:{address}",
