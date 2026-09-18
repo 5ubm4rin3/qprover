@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from qprover.trust404_runtime import RuntimeCall, Track04Runtime
 from web3 import Web3
+
+from qprover.trust404_runtime import RuntimeCall, Track04Runtime
 
 
 CONTROLLER = "0x00000000000000000000000000000000000000c0"
