@@ -170,6 +170,7 @@ def test_default_runtime_factory_uses_local_anvil_and_retained_artifacts(
         manifest,
         search_attacker_bytecode,
         attacker_funding_wei,
+        observation_sources=(),
     ):
         events.append(
             (
@@ -179,6 +180,7 @@ def test_default_runtime_factory_uses_local_anvil_and_retained_artifacts(
                 manifest,
                 search_attacker_bytecode,
                 attacker_funding_wei,
+                tuple(observation_sources),
             )
         )
         return fake_runtime
