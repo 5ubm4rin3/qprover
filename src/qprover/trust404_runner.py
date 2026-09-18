@@ -371,6 +371,17 @@ def _concrete_candidates(
     return tuple(candidates)
 
 
+def _runtime_instance_address(runtime: object, instance_id: str) -> str:
+    resolver = getattr(runtime, "instance_address", None)
+    if callable(resolver):
+        return resolver(instance_id)
+    if instance_id in {"instance:root", "root", "target"}:
+        target = getattr(runtime, "target_address", None)
+        if isinstance(target, str):
+            return target
+    raise ValueError(f"runtime cannot resolve contract instance {instance_id!r}")
+
+
 def _resolve_value_expr(value: object, runtime: object) -> object:
     if isinstance(value, Const):
         return value.value
@@ -379,7 +390,7 @@ def _resolve_value_expr(value: object, runtime: object) -> object:
     if isinstance(value, TargetAddress):
         return runtime.target_address
     if isinstance(value, ContractAddress):
-        return runtime.instance_address(value.instance_id)
+        return _runtime_instance_address(runtime, value.instance_id)
     if isinstance(value, ReadUint):
         arguments = tuple(_resolve_value_expr(item, runtime) for item in value.args)
         return runtime.read_uint(value.instance_id, value.signature, arguments)
@@ -478,7 +489,7 @@ def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
         selector = bytes(Web3.keccak(text=signature)[:4])
         encoded = Web3().codec.encode(list(abi_types), list(concrete))
         return RuntimeCall(
-            target=runtime.instance_address(target_instance_id),
+            target=_runtime_instance_address(runtime, target_instance_id),
             value_wei=value_wei,
             calldata="0x" + (selector + encoded).hex(),
         )
