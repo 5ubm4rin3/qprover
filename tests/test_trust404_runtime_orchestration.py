@@ -143,7 +143,6 @@ def test_run_track04_uses_persistent_runtime_then_final_organizer_proof(
     assert final_proofs[0] == (out / "Exploit.sol").read_text(encoding="utf-8")
 
 
-
 def test_default_runtime_factory_uses_local_anvil_and_retained_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
