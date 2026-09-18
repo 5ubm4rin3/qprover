@@ -141,11 +141,29 @@ def _variants_by_action(model: Track04SearchModel) -> dict[str, tuple[object, ..
     }
 
 
-def _skeleton_problem(model: Track04SearchModel):
+def _search_horizons(model: Track04SearchModel) -> tuple[int, ...]:
+    """Return deterministic shortest-first horizons with full-length fallback."""
+
+    return tuple(range(1, model.max_sequence_length + 1))
+
+
+def _skeleton_problem(
+    model: Track04SearchModel,
+    *,
+    horizon: int | None = None,
+):
     """Build an action-level QUBO problem; parameters are completed later."""
 
     from qprover.parameters import ActionVariant
     from qprover.search.bqm import SearchProblem
+
+    active_horizon = model.max_sequence_length if horizon is None else horizon
+    if (
+        type(active_horizon) is not int
+        or active_horizon <= 0
+        or active_horizon > model.max_sequence_length
+    ):
+        raise ValueError("horizon must be within the Track04 search model")
 
     grouped = _variants_by_action(model)
     representatives = []
@@ -168,10 +186,10 @@ def _skeleton_problem(model: Track04SearchModel):
             )
         )
     repetition_limits = {action.id: 2 for action in model.actions}
-    discounts = tuple(1.0 / (index + 1) for index in range(model.max_sequence_length))
+    discounts = tuple(1.0 / (index + 1) for index in range(active_horizon))
     return SearchProblem(
         actions=tuple(action.id for action in model.actions),
-        max_sequence_length=model.max_sequence_length,
+        max_sequence_length=active_horizon,
         utilities=model.utilities,
         transitions=model.transitions,
         repetition_limits=repetition_limits,
