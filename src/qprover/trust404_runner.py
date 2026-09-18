@@ -361,9 +361,7 @@ def _run_search(
                 return Evaluation(
                     outcome=Outcome.VIOLATION,
                     transaction_count=len(candidate.steps),
-                    metadata={
-                        "violated_predicate": verification.violated_predicate
-                    },
+                    metadata={"violated_predicate": verification.violated_predicate},
                 )
             if verification.category == "not_proven":
                 return Evaluation(
