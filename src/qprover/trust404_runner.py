@@ -302,7 +302,6 @@ def _run_search(
     from qprover.search.base import Evaluation, candidate_is_valid
     from qprover.search.controller import SearchController
 
-    problem = _skeleton_problem(model)
     strategy = _make_qubo_strategy()
 
     class Evaluator:
@@ -395,27 +394,42 @@ def _run_search(
                 metadata={"note": "no-concrete-candidate"},
             )
 
-    remaining_wall = math.floor(deadline - clock())
-    if remaining_wall <= 0 or attempt_budget <= 0:
+    if attempt_budget <= 0:
         return False
-    limits = SearchLimits(
-        max_sequence_length=problem.max_sequence_length,
-        max_variants=max(1, len(problem.variants)),
-        transaction_budget=max(1, attempt_budget * problem.max_sequence_length),
-        candidate_budget=attempt_budget,
-        wall_seconds=max(1, remaining_wall),
-    )
-    controller = SearchController(
-        candidate_validator=lambda candidate: candidate_is_valid(problem, candidate)
-    )
-    run = controller.run(
-        strategy,
-        Evaluator(),
-        limits,
-        problem=problem,
-        seed=seed,
-    )
-    return run.violation is not None and ledger.winner_code is not None
+
+    for horizon in _search_horizons(model):
+        remaining_attempts = attempt_budget - ledger.attempts
+        remaining_wall = math.floor(deadline - clock())
+        if remaining_attempts <= 0 or remaining_wall <= 0:
+            break
+
+        problem = _skeleton_problem(model, horizon=horizon)
+        limits = SearchLimits(
+            max_sequence_length=problem.max_sequence_length,
+            max_variants=max(1, len(problem.variants)),
+            transaction_budget=max(
+                1,
+                remaining_attempts * problem.max_sequence_length,
+            ),
+            candidate_budget=remaining_attempts,
+            wall_seconds=max(1, remaining_wall),
+        )
+        controller = SearchController(
+            candidate_validator=lambda candidate, problem=problem: candidate_is_valid(
+                problem, candidate
+            )
+        )
+        run = controller.run(
+            strategy,
+            Evaluator(),
+            limits,
+            problem=problem,
+            seed=seed,
+        )
+        if run.violation is not None and ledger.winner_code is not None:
+            return True
+
+    return False
 
 
 def run_track04(
