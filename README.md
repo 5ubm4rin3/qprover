@@ -263,8 +263,6 @@ QProver는 허가된 보안 연구 및 통제된 환경에서 사용하기 위�
 - `docs/ARCHITECTURE.md` — 기존 시스템 구조
 - `docs/TRUST404_SUBMISSION.md` — Track 04 제출 인터페이스
 - `docs/BENCHMARK.md` — 기존 benchmark 결과와 한계
-- `docs/superpowers/specs/2026-09-16-qprover-v2-generalized-search-design.md` — v2 설계
-- `docs/superpowers/plans/2026-09-16-qprover-v2-generalized-search.md` — v2 구현 계획
 
 ## License
 
