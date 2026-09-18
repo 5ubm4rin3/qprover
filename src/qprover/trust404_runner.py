@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from qprover.evm import LocalAnvil
 from qprover.trust404 import (
     ADDRESS_REF_PREFIX,
     EXIT_ERROR,
@@ -29,7 +30,6 @@ from qprover.trust404 import (
     build_search_model,
     render_candidate,
 )
-from qprover.evm import LocalAnvil
 from qprover.trust404_harness import VerificationResult, verify_exploit
 from qprover.trust404_runtime import deploy_runtime_from_artifacts
 
