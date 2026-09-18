@@ -101,7 +101,6 @@ def test_deploy_runtime_uses_retained_compiler_artifacts() -> None:
     assert anvil.baselines == 1
 
 
-
 def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
     target = "0x00000000000000000000000000000000000000a1"
     setup = "0x00000000000000000000000000000000000000e4"
