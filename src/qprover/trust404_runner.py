@@ -70,6 +70,7 @@ class _AttemptLedger:
     last_code: str = _NOOP_EXPLOIT
     winner_code: str | None = None
     winner_candidate: object | None = None
+    proven_predicate: str = ""
     attempts: int = 0
     fatal_error: bool = False
 
@@ -177,12 +178,57 @@ def _default_runtime_factory(
         yield runtime
 
 
+def _result_payload(ledger: _AttemptLedger) -> dict[str, object]:
+    proven = ledger.winner_code is not None and bool(ledger.proven_predicate)
+    status = "PROVEN" if proven else "ERROR" if ledger.fatal_error else "NOT_FOUND"
+    steps = tuple(getattr(ledger.winner_candidate, "steps", ())) if proven else ()
+    exploit_path = [
+        {"step": index, "action": str(getattr(step, "action_id", ""))}
+        for index, step in enumerate(steps)
+    ]
+    if proven:
+        sequence = " -> ".join(item["action"] for item in exploit_path)
+        explanation = (
+            f"Organizer Harness execution reproduced invariant "
+            f"{ledger.proven_predicate!r} after the minimized exploit sequence"
+            + (f": {sequence}." if sequence else ".")
+        )
+    elif ledger.fatal_error:
+        explanation = (
+            "No exploit was reported because the organizer proof boundary "
+            "encountered an infrastructure or unsupported-deployment error."
+        )
+    else:
+        explanation = (
+            "No candidate reproduced an invariant violation within the configured "
+            "time and attempt budgets."
+        )
+    return {
+        "status": status,
+        "violated_invariant": ledger.proven_predicate if proven else None,
+        "exploit_path": exploit_path,
+        "explanation": explanation,
+        "proof": {
+            "organizer_harness_reproduced": proven,
+            "minimized_candidate": proven,
+        },
+        "attempts": ledger.attempts,
+    }
+
+
 def _write_outputs(out_dir: Path, ledger: _AttemptLedger) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     code = ledger.winner_code or ledger.last_code
     (out_dir / "Exploit.sol").write_text(code, encoding="utf-8")
     log = "\n".join(ledger.lines)
     (out_dir / "attempts.log").write_text(log + ("\n" if log else ""), encoding="utf-8")
+    result = json.dumps(
+        _result_payload(ledger),
+        sort_keys=True,
+        indent=2,
+        ensure_ascii=False,
+    )
+    (out_dir / "result.json").write_text(result + "\n", encoding="utf-8")
 
 
 def _safe_note(note: str) -> str:
@@ -554,6 +600,8 @@ def _record_final_proof(
             )
         )
     )
+    if verification.proven:
+        ledger.proven_predicate = verification.violated_predicate
 
 
 def _record_attempt(
@@ -746,6 +794,8 @@ def _run_search(
             if verification.proven:
                 ledger.winner_code = code
                 ledger.winner_candidate = candidate
+                if runtime is None:
+                    ledger.proven_predicate = verification.violated_predicate
                 return Evaluation(
                     outcome=Outcome.VIOLATION,
                     transaction_count=len(candidate.steps),
