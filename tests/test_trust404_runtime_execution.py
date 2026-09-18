@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from web3 import Web3
-
 from qprover.trust404_runtime import RuntimeCall, Track04Runtime
+from web3 import Web3
 
 
 CONTROLLER = "0x00000000000000000000000000000000000000c0"
@@ -84,7 +83,9 @@ def test_runtime_resets_baseline_and_uses_original_check_all() -> None:
     assert anvil.transactions[0]["from"] == CONTROLLER
     assert anvil.transactions[0]["to"] == ATTACKER
 
-    check_all_selector = Web3.keccak(text="checkAll(address)")[:4].hex().removeprefix("0x")
+    check_all_selector = (
+        Web3.keccak(text="checkAll(address)")[:4].hex().removeprefix("0x")
+    )
     assert str(anvil.calls[-1]["data"]).startswith("0x" + check_all_selector)
 
     second = runtime.execute(())
