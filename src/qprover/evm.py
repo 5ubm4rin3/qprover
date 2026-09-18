@@ -498,6 +498,12 @@ class LocalAnvil:
         if result is not None:
             raise EVMError("local RPC returned invalid set-balance result")
 
+    def state_root(self) -> str:
+        block = self._request("eth_getBlockByNumber", ["latest", False])
+        if type(block) is not dict:
+            raise EVMError("local RPC returned invalid latest block")
+        return _read_hash(block.get("stateRoot"), "state root")
+
     def balance(self, address: str) -> int:
         normalized = _read_address(address, "account address")
         return _read_quantity(
