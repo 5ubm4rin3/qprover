@@ -153,9 +153,7 @@ def test_run_track04_writes_proven_exploit_and_deterministic_attempt_log(
     assert result["violated_invariant"] == "ownerUnchanged"
     assert result["proof"]["organizer_harness_reproduced"] is True
     assert result["proof"]["minimized_candidate"] is False
-    assert result["exploit_path"] == [
-        {"step": 0, "action": "call:setOwner(address)"}
-    ]
+    assert result["exploit_path"] == [{"step": 0, "action": "call:setOwner(address)"}]
     assert "ownerUnchanged" in result["explanation"]
     assert "call:setOwner(address)" in result["explanation"]
 
