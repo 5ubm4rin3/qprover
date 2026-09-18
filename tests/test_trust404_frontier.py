@@ -66,7 +66,6 @@ def test_candidate_revert_penalizes_failed_action_and_preserves_prefix() -> None
     assert proposal.raw_revert_hash == "sha256:deadbeef"
 
 
-
 def test_state_frontier_keeps_shortest_trace_for_equal_fingerprint() -> None:
     frontier = StateFrontier()
     long = SearchState(
