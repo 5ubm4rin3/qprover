@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import re
 import sys
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +29,9 @@ from qprover.trust404 import (
     build_search_model,
     render_candidate,
 )
+from qprover.evm import LocalAnvil
 from qprover.trust404_harness import VerificationResult, verify_exploit
+from qprover.trust404_runtime import deploy_runtime_from_artifacts
 
 _NOOP_EXPLOIT = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
@@ -79,6 +83,62 @@ def _default_harness_dir() -> Path:
     if configured:
         return Path(configured).resolve()
     return Path(__file__).resolve().parents[2] / "trust404" / "harness"
+
+
+def _search_attacker_bytecode(harness_dir: Path) -> str:
+    preferred = harness_dir / "out" / "SearchAttacker.sol" / "SearchAttacker.json"
+    candidates = (
+        (preferred,)
+        if preferred.is_file()
+        else tuple(sorted(harness_dir.glob("out/**/SearchAttacker.json")))
+    )
+    if len(candidates) != 1:
+        raise ValueError("SearchAttacker artifact is missing or ambiguous")
+    try:
+        raw = json.loads(candidates[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("SearchAttacker artifact is invalid") from error
+    bytecode_record = raw.get("bytecode") if isinstance(raw, dict) else None
+    bytecode = (
+        bytecode_record.get("object")
+        if isinstance(bytecode_record, dict)
+        else None
+    )
+    if not isinstance(bytecode, str) or not bytecode:
+        raise ValueError("SearchAttacker artifact lacks deployment bytecode")
+    return bytecode if bytecode.startswith("0x") else "0x" + bytecode
+
+
+@contextmanager
+def _default_runtime_factory(
+    *,
+    model: Track04SearchModel,
+    target_path: Path,
+    invariants_path: Path,
+    manifest: Track04Manifest,
+    harness_dir: Path,
+    deadline: float,
+    clock: Callable[[], float],
+):
+    del target_path, invariants_path
+    if deadline - clock() <= 0:
+        raise ValueError("runtime deadline expired before Anvil startup")
+
+    manager = LocalAnvil()
+    configure = getattr(manager, "configure_block_context", None)
+    if callable(configure):
+        configure(manifest.block_number, manifest.block_timestamp)
+
+    with manager as anvil:
+        anvil.set_block_context(manifest.block_number, manifest.block_timestamp)
+        runtime = deploy_runtime_from_artifacts(
+            anvil,
+            analysis=model.analysis,
+            manifest=manifest,
+            search_attacker_bytecode=_search_attacker_bytecode(harness_dir),
+            attacker_funding_wei=10 * 10**18,
+        )
+        yield runtime
 
 
 def _write_outputs(out_dir: Path, ledger: _AttemptLedger) -> None:
@@ -664,6 +724,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout,
             seed=args.seed,
             max_attempts=args.max_attempts,
+            runtime_factory=_default_runtime_factory,
         )
     except (ManifestContractError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
