@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from web3 import Web3
 
 from qprover.trust404_runtime import RuntimeCall, Track04Runtime
@@ -51,7 +49,9 @@ class _FakeAnvil:
     def call(self, transaction: dict[str, object]) -> str:
         self.calls.append(dict(transaction))
         if transaction["to"] == INVARIANTS:
-            return _encode_check_all(self.state == 0, "" if self.state == 0 else "solvent")
+            return _encode_check_all(
+                self.state == 0, "" if self.state == 0 else "solvent"
+            )
         raise AssertionError("runtime must query the deployed Invariants contract")
 
 
