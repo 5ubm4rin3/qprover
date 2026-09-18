@@ -650,9 +650,7 @@ def _run_search(
                 SimpleNamespace(
                     runtime_uint_sources=model.runtime_uint_sources,
                     previous_returns=(),
-                    runtime_instances=tuple(
-                        getattr(runtime, "instances", ())
-                    ),
+                    runtime_instances=tuple(getattr(runtime, "instances", ())),
                 )
                 if runtime is not None
                 else None
@@ -941,6 +939,7 @@ def run_track04(
                 runtime=runtime,
             )
             if found and ledger.winner_candidate is not None and deadline - clock() > 0:
+
                 def still_violates(proposed: object) -> bool:
                     if deadline - clock() <= 0:
                         return False
