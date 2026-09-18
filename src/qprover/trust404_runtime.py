@@ -224,3 +224,133 @@ class Track04Runtime:
             violated_predicate=truth.violated_predicate,
             transaction_hashes=tuple(transaction_hashes),
         )
+
+
+
+def _artifact_by_target(analysis: Any, compilation_target: str) -> Any:
+    matches = tuple(
+        artifact
+        for artifact in getattr(analysis, "artifacts", ())
+        if getattr(artifact, "compilation_target", None) == compilation_target
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            f"runtime artifact not found or ambiguous: {compilation_target}"
+        )
+    return matches[0]
+
+
+def _constructor_types(artifact: Any) -> tuple[str, ...]:
+    constructors = tuple(
+        item
+        for item in getattr(artifact, "abi", ())
+        if isinstance(item, dict) and item.get("type") == "constructor"
+    )
+    if len(constructors) > 1:
+        raise ValueError("runtime artifact contains multiple constructors")
+    if not constructors:
+        return ()
+    inputs = constructors[0].get("inputs", ())
+    if not isinstance(inputs, (tuple, list)):
+        raise ValueError("runtime constructor ABI inputs are invalid")
+    types: list[str] = []
+    for item in inputs:
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+            raise ValueError("runtime constructor ABI input is invalid")
+        types.append(item["type"])
+    return tuple(types)
+
+
+def _deploy_contract(
+    anvil: Any,
+    *,
+    controller_address: str,
+    bytecode: str,
+    constructor_types: tuple[str, ...] = (),
+    constructor_args: tuple[object, ...] = (),
+    value_wei: int = 0,
+) -> str:
+    if not isinstance(bytecode, str) or not bytecode.startswith("0x"):
+        raise ValueError("runtime deployment bytecode must be 0x-prefixed")
+    if len(constructor_types) != len(constructor_args):
+        raise ValueError("runtime constructor argument count mismatch")
+    if type(value_wei) is not int or not 0 <= value_wei < 1 << 256:
+        raise ValueError("runtime deployment value must be a uint256")
+
+    encoded = (
+        Web3().codec.encode(list(constructor_types), list(constructor_args)).hex()
+        if constructor_types
+        else ""
+    )
+    transaction: dict[str, object] = {
+        "from": _normalize_address(controller_address),
+        "data": bytecode + encoded,
+    }
+    if value_wei:
+        transaction["value"] = value_wei
+    transaction_hash = anvil.send_transaction(transaction)
+    receipt = anvil.wait_for_receipt(transaction_hash)
+    if receipt.get("status") != 1:
+        raise RuntimeError("runtime contract deployment reverted")
+    address = receipt.get("contractAddress")
+    if not isinstance(address, str):
+        raise RuntimeError("runtime deployment receipt lacks contract address")
+    return _normalize_address(address)
+
+
+def deploy_runtime_from_artifacts(
+    anvil: Any,
+    *,
+    analysis: Any,
+    manifest: Any,
+    search_attacker_bytecode: str,
+    attacker_funding_wei: int = 10**18,
+) -> Track04Runtime:
+    """Deploy one deterministic Track04 search runtime from retained artifacts."""
+
+    if getattr(manifest, "setup", None) is not None:
+        raise ValueError("deploy.setup requires the setup-aware runtime factory")
+
+    accounts = tuple(
+        _normalize_address(address) for address in getattr(anvil, "accounts", ())
+    )
+    if not accounts:
+        raise ValueError("runtime requires one unlocked controller account")
+    controller = accounts[0]
+
+    target_key = f"{manifest.target_src}:{manifest.target_name}"
+    target_artifact = _artifact_by_target(analysis, target_key)
+    target_address = _deploy_contract(
+        anvil,
+        controller_address=controller,
+        bytecode=target_artifact.bytecode,
+        constructor_types=_constructor_types(target_artifact),
+        constructor_args=tuple(manifest.constructor_args),
+        value_wei=manifest.deploy_value_wei,
+    )
+
+    invariants_key = f"{manifest.invariants_contract}:Invariants"
+    invariants_artifact = _artifact_by_target(analysis, invariants_key)
+    invariants_address = _deploy_contract(
+        anvil,
+        controller_address=controller,
+        bytecode=invariants_artifact.bytecode,
+    )
+
+    attacker_address = _deploy_contract(
+        anvil,
+        controller_address=controller,
+        bytecode=search_attacker_bytecode,
+    )
+    if type(attacker_funding_wei) is not int or attacker_funding_wei < 0:
+        raise ValueError("attacker funding must be a nonnegative integer")
+    if attacker_funding_wei:
+        anvil.set_balance(attacker_address, attacker_funding_wei)
+
+    return Track04Runtime.start(
+        anvil,
+        controller_address=controller,
+        target_address=target_address,
+        invariants_address=invariants_address,
+        attacker_address=attacker_address,
+    )
