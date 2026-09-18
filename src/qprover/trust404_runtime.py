@@ -49,7 +49,7 @@ class ContractInstance:
 def canonicalize_instances(
     discoveries: tuple[RuntimeDiscovery, ...],
 ) -> tuple[ContractInstance, ...]:
-    """Merge discovery aliases by runtime address and retain deterministic provenance."""
+    """Merge aliases by runtime address while retaining deterministic provenance."""
 
     grouped: dict[str, list[RuntimeDiscovery]] = {}
     for discovery in discoveries:
