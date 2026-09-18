@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from web3 import Web3
-
 from qprover.trust404_runtime import deploy_runtime_from_artifacts
+from web3 import Web3
 
 
 CONTROLLER = "0x00000000000000000000000000000000000000c0"
