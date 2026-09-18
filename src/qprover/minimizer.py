@@ -435,7 +435,6 @@ def minimize(
     )
 
 
-
 @dataclass(frozen=True, slots=True)
 class Track04MinimizationResult:
     candidate: object
