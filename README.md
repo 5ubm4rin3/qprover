@@ -1,5 +1,28 @@
 # QProver
 
+
+## TRUST404 Track 04 — QProver v2.5
+
+The Track 04 path is a property-directed counterexample-guided exploit synthesizer. It does not select vulnerability-class macros or known public-target witnesses.
+
+```text
+Target.sol + Invariants.sol + optional Setup
+  -> compiler-backed ProgramFact + PropertyFact
+  -> PropertySlice / resource relevance
+  -> deterministic best-first + QUBO + coverage portfolio
+  -> contextual typed ValueExpr parameter completion
+  -> persistent SearchAttacker on local Anvil snapshots
+  -> original Invariants.checkAll(target)
+  -> execution-backed witness minimization
+  -> standalone Exploit.sol
+  -> organizer Harness fresh proof
+```
+
+Search-time execution and final proof are intentionally separate. A fast-runtime invariant violation is only a candidate witness; exit code `0` is emitted only after the generated standalone exploit reproduces the violation under the organizer Harness. Reverts are learned as state/parameter-local feedback rather than permanent global action bans.
+
+The current bounded scope deliberately excludes proxy/delegatecall implementation recovery, arbitrary CREATE/CREATE2 discovery, arbitrary-selector callbacks, and broad tuple/array ABI synthesis.
+
+
 > **QProver는 취약해 보이는 코드를 보고 끝내지 않고, 실제 공격 후보를 만들고 실행해서 불변식이 깨지는지 검증하는 자동 Exploit Prover입니다.**
 
 QProver는 TRUST404 Track 04 **Autonomous Exploit Prover**를 위해 개발한 스마트 컨트랙트 공격 탐색기입니다. 주최 측이 제공하는 `Target.sol`, `Invariants.sol`, `manifest.json`을 입력으로 받아 Solidity를 컴파일하고 AST 기반 의미 정보를 추출한 뒤, 공격자가 실행할 수 있는 일반적인 ABI call sequence를 탐색합니다. 성공 판정은 정적 분석 결과가 아니라 **주최 측 Harness에서 실제 invariant violation이 재현되는지**로만 결정합니다.
