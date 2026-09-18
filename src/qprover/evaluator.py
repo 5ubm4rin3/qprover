@@ -32,8 +32,6 @@ class EvaluatorError(RuntimeError):
     """The manifest/bundle cannot establish a trustworthy local baseline."""
 
 
-_LOCAL_TX_GAS_LIMIT = 16_000_000
-
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -163,7 +161,7 @@ class ScenarioEvaluator:
                     "from": self.actors[deployment.sender_slot],
                     "data": data,
                     "value": deployment.value_wei,
-                    "gas": _LOCAL_TX_GAS_LIMIT,
+                    "gas": 30_000_000,
                 }
             )
             receipt = self.anvil.wait_for_receipt(transaction_hash)
@@ -552,7 +550,7 @@ class ScenarioEvaluator:
                         "to": self.deployments[step.target_id],
                         "data": calldata,
                         "value": step.value_wei,
-                        "gas": _LOCAL_TX_GAS_LIMIT,
+                        "gas": 30_000_000,
                     }
                 )
             except TransactionRejected:
