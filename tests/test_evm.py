@@ -389,6 +389,34 @@ def test_anvil_retries_a_port_collision_with_a_new_ephemeral_port() -> None:
     assert not _process_exists(pid)
 
 
+def test_transaction_submission_forces_zero_fee_legacy_request() -> None:
+    transaction_hash = "0x" + "33" * 32
+
+    def respond(request: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": request["id"], "result": transaction_hash}
+
+    with _fake_loopback_rpc(respond) as (port, requests):
+        anvil = LocalAnvil()
+        _attach_fake_process(anvil, port)
+        anvil._accounts = ("0x" + "11" * 20,)
+
+        assert (
+            anvil.send_transaction(
+                {
+                    "from": anvil._accounts[0],
+                    "to": "0x" + "22" * 20,
+                    "data": "0x",
+                    "value": 0,
+                    "gas": 21_000,
+                }
+            )
+            == transaction_hash
+        )
+
+    assert requests[-1]["method"] == "eth_sendTransaction"
+    assert requests[-1]["params"][0]["gasPrice"] == "0x0"
+
+
 @pytest.mark.parametrize(
     ("code", "expected"),
     [(-32_003, TransactionRejected), (-32_000, RPCError)],
