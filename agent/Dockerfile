@@ -15,7 +15,11 @@ ENV QPROVER_SOLC=/usr/local/bin/solc
 
 RUN curl -L https://foundry.paradigm.xyz | bash \
     && foundryup --install "${FOUNDRY_VERSION}" \
-    && forge --version
+    && forge --version \
+    && ln -sf "${FOUNDRY_DIR}/bin/forge" /usr/local/bin/forge \
+    && ln -sf "${FOUNDRY_DIR}/bin/anvil" /usr/local/bin/anvil \
+    && ln -sf "${FOUNDRY_DIR}/bin/cast" /usr/local/bin/cast \
+    && ln -sf "${FOUNDRY_DIR}/bin/chisel" /usr/local/bin/chisel
 
 COPY --from=solc024 /usr/bin/solc /usr/local/bin/solc
 
