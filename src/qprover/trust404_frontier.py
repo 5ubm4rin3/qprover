@@ -355,8 +355,7 @@ class PortfolioStrategy:
             },
             metadata={
                 "scheduler": {
-                    key: dict(value)
-                    for key, value in self._scheduler.counters.items()
+                    key: dict(value) for key, value in self._scheduler.counters.items()
                 },
                 "planner_stats": {
                     name: planner.stats.to_dict()
