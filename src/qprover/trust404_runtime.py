@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -143,6 +145,8 @@ class Track04Runtime:
     target_address: str
     invariants_address: str
     attacker_address: str
+    observation_sources: tuple[object, ...] = ()
+    storage_slots: tuple[int, ...] = ()
 
     @classmethod
     def start(
@@ -153,6 +157,8 @@ class Track04Runtime:
         target_address: str,
         invariants_address: str,
         attacker_address: str,
+        observation_sources: tuple[object, ...] = (),
+        storage_slots: tuple[int, ...] = (),
     ) -> Track04Runtime:
         runtime = cls(
             anvil=anvil,
@@ -160,6 +166,8 @@ class Track04Runtime:
             target_address=_normalize_address(target_address),
             invariants_address=_normalize_address(invariants_address),
             attacker_address=_normalize_address(attacker_address),
+            observation_sources=tuple(observation_sources),
+            storage_slots=tuple(sorted(set(storage_slots))),
         )
         accounts = tuple(
             _normalize_address(address) for address in getattr(anvil, "accounts", ())
@@ -298,6 +306,47 @@ class Track04Runtime:
         if receipt.get("status") != 1:
             raise RuntimeError("SearchAttacker callback cleanup reverted")
 
+    def _state_fingerprint(self) -> str:
+        observations: list[tuple[str, object]] = [
+            ("target_balance", self.anvil.balance(self.target_address)),
+            ("attacker_balance", self.anvil.balance(self.attacker_address)),
+        ]
+        storage_reader = getattr(self.anvil, "storage_at", None)
+        if callable(storage_reader):
+            for slot in self.storage_slots:
+                observations.append(
+                    (f"target_storage:{slot}", storage_reader(self.target_address, slot))
+                )
+
+        for source in sorted(
+            self.observation_sources,
+            key=lambda item: (
+                str(getattr(item, "instance_id", "")),
+                str(getattr(item, "signature", "")),
+                str(getattr(item, "argument_mode", "")),
+            ),
+        ):
+            instance_id = str(getattr(source, "instance_id", "instance:root"))
+            signature = str(getattr(source, "signature", ""))
+            mode = str(getattr(source, "argument_mode", "none"))
+            if not signature or mode not in {"none", "self"}:
+                continue
+            args: tuple[object, ...] = (
+                (Web3.to_checksum_address(self.attacker_address),)
+                if mode == "self"
+                else ()
+            )
+            identity = f"view:{instance_id}:{signature}:{mode}"
+            try:
+                value = self.read_uint(instance_id, signature, args)
+            except (RuntimeError, ValueError):
+                observations.append((identity, "unavailable"))
+            else:
+                observations.append((identity, value))
+
+        encoded = repr(tuple(observations)).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
     def execute(
         self,
         calls: tuple[RuntimeCall, ...],
@@ -370,10 +419,7 @@ class Track04Runtime:
                         else "0x"
                     )
                     features.add(f"call:{target.lower()}:{selector.lower()}")
-        fingerprint = None
-        state_root = getattr(self.anvil, "state_root", None)
-        if callable(state_root):
-            fingerprint = state_root()
+        fingerprint = self._state_fingerprint()
         return RuntimeEvaluation(
             all_hold=truth.all_hold,
             violated_predicate=truth.violated_predicate,
@@ -500,6 +546,7 @@ def deploy_runtime_from_artifacts(
     manifest: Any,
     search_attacker_bytecode: str,
     attacker_funding_wei: int = 10**18,
+    observation_sources: tuple[object, ...] = (),
 ) -> Track04Runtime:
     """Deploy one deterministic Track04 search runtime from retained artifacts."""
 
@@ -510,6 +557,8 @@ def deploy_runtime_from_artifacts(
         raise ValueError("runtime requires one unlocked controller account")
     controller = accounts[0]
 
+    target_key = f"{manifest.target_src}:{manifest.target_name}"
+    target_artifact = _artifact_by_target(analysis, target_key)
     if getattr(manifest, "setup", None) is not None:
         target_address = _deploy_target_via_setup(
             anvil,
@@ -517,8 +566,6 @@ def deploy_runtime_from_artifacts(
             controller=controller,
         )
     else:
-        target_key = f"{manifest.target_src}:{manifest.target_name}"
-        target_artifact = _artifact_by_target(analysis, target_key)
         target_address = _deploy_contract(
             anvil,
             controller_address=controller,
@@ -546,10 +593,21 @@ def deploy_runtime_from_artifacts(
     if attacker_funding_wei:
         anvil.set_balance(attacker_address, attacker_funding_wei)
 
+    storage_slots = tuple(
+        sorted(
+            {
+                int(str(item.get("slot")), 0)
+                for item in target_artifact.storage_layout.get("storage", ())
+                if isinstance(item, dict) and item.get("slot") is not None
+            }
+        )
+    )
     return Track04Runtime.start(
         anvil,
         controller_address=controller,
         target_address=target_address,
         invariants_address=invariants_address,
         attacker_address=attacker_address,
+        observation_sources=observation_sources,
+        storage_slots=storage_slots,
     )
