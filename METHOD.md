@@ -1,4 +1,4 @@
-# METHOD — QProver v2
+# METHOD — QProver v2.5
 
 ## 1. 접근 방식
 
@@ -41,9 +41,9 @@ call:withdraw(uint256)
 
 각 action의 utility와 action 사이 transition은 취약점 이름이 아니라 compiler-backed semantic facts에서 만든다. 예를 들어 한 함수가 storage를 write하고 다른 함수가 동일 storage를 read/write하면 sequence dependency 후보가 된다.
 
-현재 Track 04 v2 adapter는 기존 `SearchProblem`과 BQM/QUBO infrastructure를 재사용한다. QUBO는 exploit oracle이 아니라 제한된 budget에서 어떤 generic call sequence를 먼저 실제 실행할지 정하는 prioritization backend다.
+Track 04 v2.5는 supplied invariant에서 PropertySlice를 만들고 관련 resource/action을 우선순위화한다. 탐색 backend는 deterministic portfolio로 best-first(RiskGuided), short-horizon QUBO, coverage/state-novelty search를 같은 SearchProblem과 실행 feedback 위에서 공유한다. QUBO는 exploit oracle이 아니라 실행할 action ordering을 우선순위화하는 backend다.
 
-정수, 주소, bool, bytes 등의 인자는 ABI type에서 결정론적인 bounded domain을 만든다. 정수는 0/1/경계값과 manifest deploy value에서 유도한 값을 사용하고, 주소는 attacker/self, target, 고정된 다른 actor 같은 generic role을 사용한다. 지원하지 않는 ABI type은 값을 임의로 추측하지 않고 해당 concrete action을 fail closed로 제외한다.
+파라미터는 typed ValueExpr IR로 완성한다. 주소는 다음 action의 contract instance, 이전 producer, attacker/self, root target 순으로 sequence context를 반영하고, 정수는 runtime getter(ReadUint), scaled value, previous observations, compiler constant와 ABI boundary를 사용한다. compiler가 안전하게 추출한 require/assert integer constraint는 기존 bounded Z3 solver로 모델을 만들며 모든 모델은 concrete EVM execution으로 다시 검증된다.
 
 ## 4. 생성
 
@@ -65,12 +65,14 @@ contract Exploit {
 
 ```text
 search
-  → candidate
-  → Exploit.sol
-  → organizer Harness
-  → invariant check
-      ├─ violated: PROVEN
-      └─ not violated/revert: feedback 후 다음 candidate
+  → skeleton
+  → contextual ValueExpr completion
+  → persistent SearchAttacker / Anvil snapshot execution
+  → original Invariants.checkAll(target)
+      ├─ violated: runtime witness minimization
+      │              → standalone Exploit.sol
+      │              → organizer Harness fresh proof
+      └─ pass/revert: state-local feedback + shared frontier
 ```
 
 정적 분석이나 QUBO score만으로 exit code 0을 반환하지 않는다. Harness가 invariant violation을 보고하지 않으면 결과는 `NOT_FOUND` 또는 오류다.
@@ -97,10 +99,10 @@ search
 
 ## 8. 현재 한계
 
-- v2 초기 generic search는 target contract의 public/external state-changing ABI actions를 중심으로 한다. reachable auxiliary contract의 주소 discovery와 cross-contract action expansion은 추가 일반화 대상이다.
-- callback을 요구하는 경로를 특정 취약점 macro 없이 일반적으로 표현하는 programmable attacker runtime은 추가 확장 대상이다.
-- dynamic arrays/structs 등 복잡한 ABI domain은 bounded generic parameter 생성에서 제외될 수 있다.
+- proxy/delegatecall implementation recovery와 arbitrary CREATE/CREATE2 discovery는 현재 범위 밖이다.
+- dynamic arrays/structs/tuple-heavy ABI와 arbitrary selector callback은 bounded generic parameter/runtime 범위에서 제외될 수 있다.
+- PreviousReturn은 runtime observation이 실제로 확보된 경우에만 사용하며, 관찰되지 않은 return을 추측하지 않는다.
 - compiler가 지원하지 못하는 source/build 환경은 fail closed 한다.
-- QUBO의 유용성은 별도로 ablation해야 하며, 기존 v1 MicroBench 결과는 v2 hidden-target 일반화 성능을 증명하지 않는다.
+- QUBO의 유용성은 별도 ablation으로 평가해야 하며, 기존 v1 MicroBench 결과는 v2.5 hidden-target 일반화 성능을 증명하지 않는다.
 
 이러한 한계를 해결할 때도 공개 타깃의 알려진 취약점별 macro를 다시 도입하지 않는 것을 설계 제약으로 둔다.
