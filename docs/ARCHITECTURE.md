@@ -216,3 +216,24 @@ Current release scope:
 - no exact TRUST404 grader-schema claim until the participant package is available.
 
 A future TRUST404 adapter should preserve/hashes organizer input bytes, translate only supported semantics and fail closed on unsupported invariants/setup rules.
+
+
+## Track 04 v2.5 property-directed path
+
+The TRUST404 adapter adds a property/state/runtime layer without changing the core proof rule:
+
+```text
+Invariants.sol
+  -> PropertyFact / PropertySlice
+  -> relevant resources/actions
+  -> shared SearchState frontier
+  -> best-first + short-horizon QUBO + coverage portfolio
+  -> contextual ValueExpr completion
+  -> persistent SearchAttacker on deterministic Anvil snapshots
+  -> original Invariants.checkAll(target)
+  -> execution-backed witness minimization
+  -> standalone Exploit.sol
+  -> organizer Harness fresh proof
+```
+
+Runtime contract identities are canonicalized by concrete address. Revert feedback is state-local and parameter-local; infrastructure/compile failures are not learned as action reverts. Generic receive/fallback callback programs contain ordinary call instructions and do not encode vulnerability labels. Only the fresh organizer Harness may produce the final successful Track 04 exit code.
