@@ -217,6 +217,8 @@ class LocalAnvil:
             "--steps-tracing",
             "--chain-id",
             str(_CHAIN_ID),
+            "--hardfork",
+            "cancun",
             "--timestamp",
             str(self._genesis_timestamp),
             "--number",
@@ -531,7 +533,7 @@ class LocalAnvil:
         sender = _read_address(transaction["from"], "transaction sender")
         if sender not in self._accounts:
             raise EVMError("transaction sender is not an unlocked Anvil account")
-        payload: dict[str, object] = {"from": sender}
+        payload: dict[str, object] = {"from": sender, "gasPrice": "0x0"}
         if "to" in transaction:
             payload["to"] = _read_address(transaction["to"], "transaction target")
         payload["data"] = _read_bytes(transaction.get("data", "0x"), "calldata")
