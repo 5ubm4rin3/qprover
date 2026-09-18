@@ -266,9 +266,9 @@ def _runtime_argument(value: object, abi_type: str, runtime: object) -> object:
 
     if abi_type == "address":
         if value == SELF_ADDRESS:
-            value = getattr(runtime, "attacker_address")
+            value = runtime.attacker_address
         elif value == TARGET_ADDRESS:
-            value = getattr(runtime, "target_address")
+            value = runtime.target_address
         elif value == OTHER_ADDRESS:
             value = "0x000000000000000000000000000000000000bEEF"
         elif isinstance(value, str) and value.startswith(ADDRESS_REF_PREFIX):
@@ -279,21 +279,28 @@ def _runtime_argument(value: object, abi_type: str, runtime: object) -> object:
 
     if isinstance(value, str) and value.startswith(UINT_REF_PREFIX):
         raise ValueError("dynamic uint reference requires contextual ValueExpr")
-    if abi_type.startswith("bytes") and isinstance(value, str) and value.startswith("0x"):
+    if (
+        abi_type.startswith("bytes")
+        and isinstance(value, str)
+        and value.startswith("0x")
+    ):
         return bytes.fromhex(value[2:])
     return value
 
 
 def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
-    from qprover.trust404_runtime import RuntimeCall
     from web3 import Web3
+
+    from qprover.trust404_runtime import RuntimeCall
 
     actions = {action.id: action for action in model.actions}
     calls = []
     for step in candidate.steps:
         action = actions[step.action_id]
         if action.target_path:
-            raise ValueError("runtime contract aliases require instance canonicalization")
+            raise ValueError(
+                "runtime contract aliases require instance canonicalization"
+            )
         if action.callback_enabled:
             raise ValueError("callback runtime program is not available yet")
         if len(step.args) != len(action.param_types):
@@ -306,7 +313,7 @@ def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
         encoded = Web3().codec.encode(list(action.param_types), list(arguments))
         calls.append(
             RuntimeCall(
-                target=getattr(runtime, "target_address"),
+                target=runtime.target_address,
                 value_wei=step.value_wei,
                 calldata="0x" + (selector + encoded).hex(),
             )
