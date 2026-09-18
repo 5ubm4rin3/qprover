@@ -7,6 +7,7 @@ import itertools
 import json
 import re
 from dataclasses import dataclass
+
 from qprover.parameters import ParameterError, solve_integer_domain
 
 
@@ -287,15 +288,13 @@ def _constraint_models(
         item
         for item in constraints
         if getattr(item, "parameter_index", None) == parameter_index
-        and getattr(item, "operator", None) in {"<", "<=", ">", ">=", "==", "!="}
+        and getattr(item, "operator", None)
+        in {"<", "<=", ">", ">=", "==", "!="}
         and type(getattr(item, "constant", None)) is int
     )
     if not relevant:
         return ()
-    sources = tuple(
-        f"arg0 {item.operator} {item.constant}"
-        for item in relevant
-    )
+    sources = tuple(f"arg0 {item.operator} {item.constant}" for item in relevant)
     try:
         models = solve_integer_domain(
             names=("arg0",),
@@ -327,7 +326,10 @@ def _address_domain(
     add(TargetAddress())
 
     instances = tuple(getattr(state, "runtime_instances", ()))
-    for item in sorted(instances, key=lambda value: str(getattr(value, "instance_id", value))):
+    for item in sorted(
+        instances,
+        key=lambda value: str(getattr(value, "instance_id", value)),
+    ):
         identity = getattr(item, "instance_id", item)
         if isinstance(identity, str):
             paths = tuple(getattr(item, "discovery_paths", ()))
@@ -441,7 +443,9 @@ def _parameter_domains(
     if action is None:
         return ()
     domains: list[tuple[ValueExpr, ...]] = []
-    for parameter_index, abi_type in enumerate(tuple(getattr(action, "param_types", ()))):
+    for parameter_index, abi_type in enumerate(
+        tuple(getattr(action, "param_types", ()))
+    ):
         if abi_type == "address":
             domain = _address_domain(steps, index, state)
         elif _integer_bounds(abi_type) is not None:
