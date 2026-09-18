@@ -191,6 +191,7 @@ class Track04SearchModel:
     transitions: Mapping[tuple[str, str], float]
     max_sequence_length: int
     analysis: Track04Analysis
+    runtime_uint_sources: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +204,12 @@ class _RuntimeUintSource:
     @property
     def identity(self) -> tuple[tuple[str, ...], str, str]:
         return self.target_path, self.signature, self.argument_mode
+
+    @property
+    def instance_id(self) -> str:
+        if not self.target_path:
+            return "instance:root"
+        return "instance:path:" + "|".join(self.target_path)
 
 
 def _address_ref(path: tuple[str, ...]) -> str:
@@ -750,6 +757,7 @@ def build_search_model(
         transitions={key: transitions[key] for key in sorted(transitions)},
         max_sequence_length=6,
         analysis=analysis,
+        runtime_uint_sources=tuple(uint_sources),
     )
 
 
@@ -771,6 +779,59 @@ def _uint_expression(value: str) -> str:
 
 
 def _solidity_literal(value: object) -> str:
+    from qprover.trust404_values import (
+        Add,
+        Const,
+        ContractAddress,
+        Max,
+        Min,
+        PreviousReturn,
+        ReadUint,
+        Scale,
+        SelfAddress,
+        Sub,
+        TargetAddress,
+    )
+
+    if isinstance(value, Const):
+        return _solidity_literal(value.value)
+    if isinstance(value, SelfAddress):
+        return "address(this)"
+    if isinstance(value, TargetAddress):
+        return "target"
+    if isinstance(value, ContractAddress):
+        if value.access_path:
+            return _address_expression("target", value.access_path)
+        if value.instance_id in {"instance:root", "root", "target"}:
+            return "target"
+        if value.instance_id.startswith("instance:0x"):
+            return f"address({value.instance_id.removeprefix('instance:')})"
+        if value.instance_id.startswith("instance:path:"):
+            path = tuple(
+                item
+                for item in value.instance_id.removeprefix("instance:path:").split("|")
+                if item
+            )
+            return _address_expression("target", path)
+        raise ValueError(f"unrenderable contract instance: {value.instance_id}")
+    if isinstance(value, ReadUint):
+        target = _solidity_literal(ContractAddress(value.instance_id))
+        data = _encode_signature(value.signature, value.args)
+        return f"_readUint({target}, {data})"
+    if isinstance(value, Scale):
+        rendered = _solidity_literal(value.value)
+        return f"_scale({rendered}, {value.numerator}, {value.denominator})"
+    if isinstance(value, Add):
+        return f"({_solidity_literal(value.left)} + {_solidity_literal(value.right)})"
+    if isinstance(value, Sub):
+        return f"({_solidity_literal(value.left)} - {_solidity_literal(value.right)})"
+    if isinstance(value, Min):
+        return f"_min({_solidity_literal(value.left)}, {_solidity_literal(value.right)})"
+    if isinstance(value, Max):
+        return f"_max({_solidity_literal(value.left)}, {_solidity_literal(value.right)})"
+    if isinstance(value, PreviousReturn):
+        raise ValueError("PreviousReturn requires a stored temporary during rendering")
+
     if value == SELF_ADDRESS:
         return "address(this)"
     if value == OTHER_ADDRESS:
@@ -816,16 +877,39 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
         lines.append(f"_qproverStep = {index};")
         action_target = _address_expression("target", action.target_path)
         call_data = _encode_signature(action.signature, tuple(step.args))
-        if action.callback_enabled:
+        callback_program = getattr(step, "callback_program", None)
+        if callback_program is not None:
             callback_needed = True
             lines.extend(
                 (
-                    f"_callbackTarget = {action_target};",
-                    f"_callbackData = {call_data};",
-                    "_callbackBudget = 3;",
-                    f"_mustCall({action_target}, {int(step.value_wei)}, _callbackData);",
-                    "_callbackTarget = address(0);",
+                    "delete _callbackTargets;",
+                    "delete _callbackValues;",
                     "delete _callbackData;",
+                    "_callbackCursor = 0;",
+                    f"_callbackBudget = {int(callback_program.depth_budget)};",
+                )
+            )
+            for instruction in callback_program.instructions:
+                callback_target = _solidity_literal(instruction.target)
+                callback_value = _solidity_literal(instruction.value)
+                callback_data = _encode_signature(
+                    instruction.signature,
+                    instruction.args,
+                )
+                lines.extend(
+                    (
+                        f"_callbackTargets.push({callback_target});",
+                        f"_callbackValues.push({callback_value});",
+                        f"_callbackData.push({callback_data});",
+                    )
+                )
+            lines.extend(
+                (
+                    f"_mustCall({action_target}, {int(step.value_wei)}, {call_data});",
+                    "delete _callbackTargets;",
+                    "delete _callbackValues;",
+                    "delete _callbackData;",
+                    "_callbackCursor = 0;",
                     "_callbackBudget = 0;",
                 )
             )
@@ -842,17 +926,30 @@ def render_candidate(model: Track04SearchModel, candidate: object) -> str:
     receive_block = "\n    receive() external payable {}\n"
     if callback_needed:
         callback_fields = """
-    address private _callbackTarget;
-    bytes private _callbackData;
+    address[] private _callbackTargets;
+    uint256[] private _callbackValues;
+    bytes[] private _callbackData;
+    uint256 private _callbackCursor;
     uint256 private _callbackBudget;
 """
         receive_block = """
     receive() external payable {
-        if (_callbackTarget != address(0) && _callbackBudget > 0) {
-            _callbackBudget -= 1;
-            (bool ok,) = _callbackTarget.call(_callbackData);
-            if (!ok) revert QProverFailure(_qproverStep);
-        }
+        _dispatchCallback();
+    }
+
+    fallback() external payable {
+        _dispatchCallback();
+    }
+
+    function _dispatchCallback() private {
+        if (_callbackBudget == 0 || _callbackCursor >= _callbackTargets.length) return;
+        uint256 cursor = _callbackCursor;
+        _callbackCursor = cursor + 1;
+        _callbackBudget -= 1;
+        (bool ok,) = _callbackTargets[cursor].call{value: _callbackValues[cursor]}(
+            _callbackData[cursor]
+        );
+        if (!ok) revert QProverFailure(_qproverStep);
     }
 """
 
@@ -887,6 +984,14 @@ contract Exploit {{{common_fields}{callback_fields}
         if (value == 0 || numerator == 0) return 0;
         if (value > type(uint256).max / numerator) return type(uint256).max;
         return (value * numerator) / denominator;
+    }}
+
+    function _min(uint256 left, uint256 right) private pure returns (uint256) {{
+        return left < right ? left : right;
+    }}
+
+    function _max(uint256 left, uint256 right) private pure returns (uint256) {{
+        return left > right ? left : right;
     }}
 {receive_block}}}
 """
