@@ -255,6 +255,7 @@ class PortfolioStrategy:
         self._scheduler = PlannerScheduler(seed, tuple(planners))
         self._origins: dict[str, str] = {}
         self._proposed: set[str] = set()
+        self._feedback = StateLocalFeedback()
         self._initialized = False
 
     def initialize(self, problem: object, seed: int) -> None:
@@ -287,15 +288,60 @@ class PortfolioStrategy:
         return None
 
     def observe(self, candidate: object, result: object) -> None:
+        from qprover.models import Outcome
+        from qprover.search.base import Evaluation
+
         origin = self._origins.get(getattr(candidate, "canonical_id", ""), "qubo")
-        for planner in self._planners.values():
-            planner.observe(candidate, result)
         outcome = getattr(result, "outcome", None)
+        reverted = outcome is Outcome.REVERT
+        state_id = getattr(result, "state_fingerprint", None) or "state:baseline"
+        if reverted:
+            metadata = getattr(result, "metadata", {})
+            step = max(0, int(getattr(result, "transaction_count", 1)) - 1)
+            self._feedback.record(
+                AttemptFeedback(
+                    state_id=state_id,
+                    candidate_id=str(getattr(candidate, "canonical_id", "")),
+                    outcome="candidate_revert",
+                    revert_step=step,
+                    revert_selector=str(metadata.get("revert_selector") or "") or None,
+                    raw_revert_hash=str(metadata.get("raw_revert_hash") or "") or None,
+                    parameter_identity=str(getattr(candidate, "canonical_id", "")),
+                ),
+                action_ids=tuple(
+                    str(getattr(step_record, "action_id", ""))
+                    for step_record in getattr(candidate, "steps", ())
+                ),
+            )
+            shared_result = Evaluation(
+                outcome=Outcome.INCONCLUSIVE,
+                transaction_count=int(getattr(result, "transaction_count", 0)),
+                trace_features=frozenset(getattr(result, "trace_features", ())),
+                state_fingerprint=getattr(result, "state_fingerprint", None),
+                metadata=getattr(result, "metadata", {}),
+            )
+        else:
+            shared_result = result
+
+        for planner in self._planners.values():
+            planner.observe(candidate, shared_result)
+
         novel = bool(getattr(result, "trace_features", ())) or (
             getattr(result, "state_fingerprint", None) is not None
         )
-        reverted = getattr(outcome, "value", outcome) == "revert"
         self._scheduler.observe(origin, novel=novel, reverted=reverted)
+
+    def revert_penalty(
+        self,
+        state_id: str,
+        action_id: str,
+        parameter_identity: str = "",
+    ) -> float:
+        return self._feedback.revert_penalty(
+            state_id,
+            action_id,
+            parameter_identity,
+        )
 
     @property
     def stats(self):
