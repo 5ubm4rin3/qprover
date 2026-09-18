@@ -262,7 +262,7 @@ class PortfolioStrategy:
         if seed != self._seed:
             self._seed = seed
             self._scheduler = PlannerScheduler(seed, tuple(self._planners))
-        for index, (name, planner) in enumerate(self._planners.items()):
+        for index, (_name, planner) in enumerate(self._planners.items()):
             planner.initialize(problem, seed + index)
         self._initialized = True
 
