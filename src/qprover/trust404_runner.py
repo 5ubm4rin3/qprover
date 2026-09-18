@@ -100,18 +100,17 @@ def _make_qubo_strategy():
     )
 
 
-def _make_portfolio_strategy(seed: int):
+def _make_portfolio_strategy(seed: int, *, include_qubo: bool = True):
     from qprover.search.coverage import CoverageGuidedStrategy
     from qprover.search.risk import RiskGuidedStrategy
 
-    return PortfolioStrategy(
-        {
-            "best_first": RiskGuidedStrategy(beam_width=24),
-            "qubo": _make_qubo_strategy(),
-            "coverage": CoverageGuidedStrategy(proposal_attempts=96),
-        },
-        seed=seed,
-    )
+    planners = {
+        "best_first": RiskGuidedStrategy(beam_width=24),
+        "coverage": CoverageGuidedStrategy(proposal_attempts=96),
+    }
+    if include_qubo:
+        planners["qubo"] = _make_qubo_strategy()
+    return PortfolioStrategy(planners, seed=seed)
 
 
 def _default_harness_dir() -> Path:
@@ -582,7 +581,6 @@ def _run_search(
     from qprover.search.base import Evaluation, candidate_is_valid
     from qprover.search.controller import SearchController
 
-    strategy = _make_portfolio_strategy(seed)
     frontier = StateFrontier()
 
     def record_state(candidate: object, runtime_result: object) -> None:
@@ -787,6 +785,10 @@ def _run_search(
             break
 
         problem = _skeleton_problem(model, horizon=horizon)
+        strategy = _make_portfolio_strategy(
+            seed + horizon,
+            include_qubo=horizon <= 4,
+        )
         limits = SearchLimits(
             max_sequence_length=problem.max_sequence_length,
             max_variants=max(1, len(problem.variants)),
