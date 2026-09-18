@@ -71,6 +71,7 @@ class _AttemptLedger:
     winner_code: str | None = None
     winner_candidate: object | None = None
     proven_predicate: str = ""
+    minimized: bool = False
     attempts: int = 0
     fatal_error: bool = False
 
@@ -188,9 +189,10 @@ def _result_payload(ledger: _AttemptLedger) -> dict[str, object]:
     ]
     if proven:
         sequence = " -> ".join(item["action"] for item in exploit_path)
+        sequence_label = "minimized exploit sequence" if ledger.minimized else "exploit sequence"
         explanation = (
             f"Organizer Harness execution reproduced invariant "
-            f"{ledger.proven_predicate!r} after the minimized exploit sequence"
+            f"{ledger.proven_predicate!r} after the {sequence_label}"
             + (f": {sequence}." if sequence else ".")
         )
     elif ledger.fatal_error:
@@ -210,7 +212,7 @@ def _result_payload(ledger: _AttemptLedger) -> dict[str, object]:
         "explanation": explanation,
         "proof": {
             "organizer_harness_reproduced": proven,
-            "minimized_candidate": proven,
+            "minimized_candidate": proven and ledger.minimized,
         },
         "attempts": ledger.attempts,
     }
@@ -1011,6 +1013,7 @@ def run_track04(
                     pass
                 else:
                     ledger.winner_candidate = minimized.candidate
+                    ledger.minimized = True
                     ledger.winner_code = render_candidate(
                         model,
                         minimized.candidate,
