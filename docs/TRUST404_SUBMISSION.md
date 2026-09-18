@@ -1,4 +1,4 @@
-# TRUST404 Track 04 Submission Package — QProver v2
+# TRUST404 Track 04 Submission Package — QProver v2.5
 
 ## 제출 제목
 
@@ -12,7 +12,7 @@ QProver는 주최 측 Solidity target과 invariant를 compiler-backed 방식으�
 
 > **QProver는 취약해 보인다는 예측에서 멈추지 않고, 실제 실행 가능한 PoC를 만들고 invariant violation으로 검증합니다.**
 
-QProver v2는 공개 타깃에 맞춘 reentrancy/access-control/oracle/accounting exploit template를 사용하지 않습니다. `solc` AST에서 storage read/write, calls, value-flow와 dependency를 추출하고, 이를 generic action search 문제로 변환합니다. QUBO는 어떤 call sequence를 먼저 검증할지 정하는 prioritization backend이며 proof oracle이 아닙니다.
+QProver v2.5는 공개 타깃에 맞춘 reentrancy/access-control/oracle/accounting exploit template를 사용하지 않습니다. `solc` AST에서 storage read/write, calls, value-flow와 dependency를 추출하고, 이를 generic action search 문제로 변환합니다. QUBO는 어떤 call sequence를 먼저 검증할지 정하는 prioritization backend이며 proof oracle이 아닙니다.
 
 ## Track 04 요구사항 대응
 
@@ -20,9 +20,11 @@ QProver v2는 공개 타깃에 맞춘 reentrancy/access-control/oracle/accountin
 |---|---|
 | 입력 | 공식 `--contract`, `--invariants`, `--manifest`를 그대로 사용 |
 | 분석 | `solc` compiler AST / ABI / storage layout 기반 semantic analysis |
-| 탐색 | vulnerability macro가 아닌 generic ABI actions와 state dependency 탐색 |
-| 생성 | generic call trace를 standalone `Exploit.sol`로 lowering |
-| Self-validation | 후보를 organizer Harness에서 실제 실행하고 실패 결과를 search feedback으로 사용 |
+| 탐색 | PropertySlice + shared state frontier 위에서 best-first/QUBO/coverage deterministic portfolio |
+| 파라미터 | contextual typed ValueExpr, runtime getter, compiler constraint + bounded Z3 completion |
+| 실행 | persistent SearchAttacker + Anvil snapshot/revert, original `Invariants.checkAll(target)` 직접 호출 |
+| 생성 | 최소화된 generic IR/callback program을 standalone `Exploit.sol`로 lowering |
+| Self-validation | fast runtime violation을 최소화한 뒤 organizer Harness에서 fresh final proof |
 | 출력 | `Exploit.sol`, `attempts.log`, exit 0/1/2 |
 | 결정론 | stable ordering, bounded parameter domains, seeded search, timestamp 없는 log |
 | 정상 타깃 | 실제 invariant violation이 없으면 `PROVEN`으로 처리하지 않음 |
@@ -76,11 +78,11 @@ v2의 평가에서 특히 중요한 항목은 다음입니다.
 - attempt/time budget 내 success rate
 - 성공 PoC의 최소성
 
-## 현재 v2 한계
+## 현재 v2.5 한계
 
-- 초기 v2 Track04 search는 target contract의 public/external state-changing ABI를 중심으로 탐색합니다.
-- generic cross-contract address discovery/action expansion과 programmable callback runtime은 추가 일반화 대상입니다.
-- 복잡한 dynamic ABI type은 현재 bounded parameter domain에서 제외될 수 있습니다.
+- proxy/delegatecall implementation recovery, arbitrary CREATE/CREATE2 discovery는 후속 범위입니다.
+- 복잡한 dynamic ABI type과 arbitrary selector callback은 현재 bounded scope 밖일 수 있습니다.
+- fast runtime 성공도 organizer Harness에서 fresh 재현되지 않으면 exit 0이 아닙니다.
 - QUBO가 다른 classical search보다 우수하다는 주장은 별도 ablation 없이는 하지 않습니다.
 
 이 한계를 해결할 때도 공개 취약점별 macro를 다시 도입하지 않습니다.
