@@ -109,6 +109,22 @@ class RuntimeCall:
     target: str
     value_wei: int
     calldata: str
+    callback_program: tuple["RuntimeCall", ...] = ()
+    callback_depth_budget: int = 0
+
+
+class RuntimeCandidateRevert(RuntimeError):
+    def __init__(
+        self,
+        step: int,
+        *,
+        revert_selector: str | None = None,
+        raw_revert_hash: str | None = None,
+    ) -> None:
+        self.step = step
+        self.revert_selector = revert_selector
+        self.raw_revert_hash = raw_revert_hash
+        super().__init__(f"runtime candidate reverted at step {step}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +200,99 @@ class Track04Runtime:
             transaction_hashes=(),
         )
 
+    def instance_address(self, instance_id: str) -> str:
+        if instance_id in {"instance:root", "root", "target"}:
+            return self.target_address
+        if instance_id in {"instance:self", "self"}:
+            return self.attacker_address
+        if instance_id.startswith("instance:0x"):
+            return _normalize_address(instance_id.removeprefix("instance:"))
+        if instance_id.startswith("instance:path:"):
+            address = self.target_address
+            encoded_path = instance_id.removeprefix("instance:path:")
+            path = tuple(item for item in encoded_path.split("|") if item)
+            for getter in path:
+                raw = self.anvil.call(
+                    {
+                        "to": address,
+                        "data": _encode_abi_call(getter, (), ()),
+                    }
+                )
+                decoded = Web3().codec.decode(
+                    ["address"],
+                    _decode_hex(raw, "address getter return data"),
+                )
+                address = _normalize_address(str(decoded[0]))
+            return address
+        raise ValueError(f"unknown runtime contract instance: {instance_id}")
+
+    def read_uint(
+        self,
+        instance_id: str,
+        signature: str,
+        args: tuple[object, ...] = (),
+    ) -> int:
+        opening = signature.find("(")
+        if opening < 0 or not signature.endswith(")"):
+            raise ValueError("runtime getter signature is invalid")
+        encoded_types = signature[opening + 1 : -1]
+        abi_types = tuple(
+            item for item in encoded_types.split(",") if item
+        )
+        if len(abi_types) != len(args):
+            raise ValueError("runtime getter argument count mismatch")
+        raw = self.anvil.call(
+            {
+                "to": self.instance_address(instance_id),
+                "data": _encode_abi_call(signature, abi_types, args),
+            }
+        )
+        decoded = Web3().codec.decode(
+            ["uint256"],
+            _decode_hex(raw, "uint getter return data"),
+        )
+        return int(decoded[0])
+
+    def _send_attacker_transaction(self, data: str) -> dict[str, object]:
+        transaction_hash = self.anvil.send_transaction(
+            {
+                "from": self.controller_address,
+                "to": self.attacker_address,
+                "data": data,
+            }
+        )
+        return self.anvil.wait_for_receipt(transaction_hash)
+
+    def _configure_callback(self, call: RuntimeCall) -> None:
+        if not call.callback_program:
+            return
+        targets = [item.target for item in call.callback_program]
+        values = [item.value_wei for item in call.callback_program]
+        payloads = [
+            _decode_hex(item.calldata, "callback calldata")
+            for item in call.callback_program
+        ]
+        data = _encode_abi_call(
+            "configureCallback(address[],uint256[],bytes[],uint256)",
+            ("address[]", "uint256[]", "bytes[]", "uint256"),
+            (
+                targets,
+                values,
+                payloads,
+                call.callback_depth_budget,
+            ),
+        )
+        receipt = self._send_attacker_transaction(data)
+        if receipt.get("status") != 1:
+            raise RuntimeError("SearchAttacker callback configuration reverted")
+
+    def _clear_callback(self) -> None:
+        receipt = self._send_attacker_transaction(
+            _encode_abi_call("clearCallback()", (), ())
+        )
+        if receipt.get("status") != 1:
+            raise RuntimeError("SearchAttacker callback cleanup reverted")
+
     def execute(
         self,
         calls: tuple[RuntimeCall, ...],
@@ -191,7 +300,7 @@ class Track04Runtime:
         self.anvil.reset()
         transaction_hashes: list[str] = []
 
-        for call in calls:
+        for step_index, call in enumerate(calls):
             target = _normalize_address(call.target)
             if type(call.value_wei) is not int or not 0 <= call.value_wei < 1 << 256:
                 raise ValueError("runtime call value must be a uint256")
@@ -212,11 +321,30 @@ class Track04Runtime:
             }
             if call.value_wei:
                 transaction["value"] = call.value_wei
+            self._configure_callback(call)
             transaction_hash = self.anvil.send_transaction(transaction)
             receipt = self.anvil.wait_for_receipt(transaction_hash)
             if receipt.get("status") != 1:
-                raise RuntimeError("SearchAttacker execution reverted")
+                trace = self.anvil.debug_trace(transaction_hash)
+                raw = None
+                if trace is not None:
+                    returned = trace.get("returnValue")
+                    if isinstance(returned, str):
+                        raw = returned if returned.startswith("0x") else "0x" + returned
+                selector = raw[:10] if raw is not None and len(raw) >= 10 else None
+                digest = (
+                    Web3.keccak(hexstr=raw).hex()
+                    if raw is not None and raw != "0x"
+                    else None
+                )
+                raise RuntimeCandidateRevert(
+                    step_index,
+                    revert_selector=selector,
+                    raw_revert_hash=digest,
+                )
             transaction_hashes.append(transaction_hash)
+            if call.callback_program:
+                self._clear_callback()
 
         truth = self._check_all()
         return RuntimeEvaluation(
