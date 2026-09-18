@@ -530,6 +530,7 @@ def run_track04(
     harness_dir: Path | str | None = None,
     verifier: Callable[..., VerificationResult] = verify_exploit,
     clock: Callable[[], float] = time.monotonic,
+    runtime_factory: Callable[..., object] | None = None,
 ) -> int:
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be a positive integer")
@@ -573,21 +574,69 @@ def run_track04(
         if harness_dir is not None
         else _default_harness_dir()
     )
-    if _run_search(
-        model=model,
-        target_path=contract,
-        invariants_path=invariants,
-        manifest=manifest,
-        harness_dir=hdir,
-        seed=seed,
-        attempt_budget=max_attempts,
-        deadline=deadline,
-        ledger=ledger,
-        verifier=verifier,
-        clock=clock,
-    ):
-        _write_outputs(output, ledger)
-        return EXIT_FOUND
+    if runtime_factory is None:
+        found = _run_search(
+            model=model,
+            target_path=contract,
+            invariants_path=invariants,
+            manifest=manifest,
+            harness_dir=hdir,
+            seed=seed,
+            attempt_budget=max_attempts,
+            deadline=deadline,
+            ledger=ledger,
+            verifier=verifier,
+            clock=clock,
+        )
+        if found:
+            _write_outputs(output, ledger)
+            return EXIT_FOUND
+    else:
+        runtime_context = runtime_factory(
+            model=model,
+            target_path=contract,
+            invariants_path=invariants,
+            manifest=manifest,
+            harness_dir=hdir,
+            deadline=deadline,
+            clock=clock,
+        )
+        with runtime_context as runtime:
+            found = _run_search(
+                model=model,
+                target_path=contract,
+                invariants_path=invariants,
+                manifest=manifest,
+                harness_dir=hdir,
+                seed=seed,
+                attempt_budget=max_attempts,
+                deadline=deadline,
+                ledger=ledger,
+                verifier=verifier,
+                clock=clock,
+                runtime=runtime,
+            )
+        if found and ledger.winner_code is not None:
+            remaining_wall = deadline - clock()
+            if remaining_wall > 0:
+                final_proof = verifier(
+                    hdir,
+                    contract,
+                    invariants,
+                    ledger.winner_code,
+                    manifest,
+                    timeout_seconds=max(1, math.ceil(remaining_wall)),
+                )
+                if final_proof.category in {
+                    "infrastructure",
+                    "unsupported_deploy",
+                }:
+                    ledger.fatal_error = True
+                elif final_proof.proven:
+                    _write_outputs(output, ledger)
+                    return EXIT_FOUND
+            ledger.winner_code = None
+
     _write_outputs(output, ledger)
     return EXIT_ERROR if ledger.fatal_error else EXIT_NOT_FOUND
 
