@@ -189,7 +189,9 @@ def _result_payload(ledger: _AttemptLedger) -> dict[str, object]:
     ]
     if proven:
         sequence = " -> ".join(item["action"] for item in exploit_path)
-        sequence_label = "minimized exploit sequence" if ledger.minimized else "exploit sequence"
+        sequence_label = (
+            "minimized exploit sequence" if ledger.minimized else "exploit sequence"
+        )
         explanation = (
             f"Organizer Harness execution reproduced invariant "
             f"{ledger.proven_predicate!r} after the {sequence_label}"
