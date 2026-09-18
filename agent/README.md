@@ -32,6 +32,7 @@ python agent/agent.py \
 `--out`에는 항상 다음 파일이 생성됩니다.
 
 - `Exploit.sol`
+- `result.json` — 최종 판정, 위반 invariant, exploit action sequence, organizer proof 설명
 - `attempts.log`
 
 Exit code:
