@@ -516,9 +516,7 @@ def minimize_track04_candidate(
         changed = False
         current_steps = tuple(getattr(current, "steps"))
         for index in range(len(current_steps)):
-            proposed = rebuild(
-                current_steps[:index] + current_steps[index + 1 :]
-            )
+            proposed = rebuild(current_steps[:index] + current_steps[index + 1 :])
             if probe(proposed):
                 current = proposed
                 changed = True
