@@ -226,7 +226,6 @@ class Track04Runtime:
         )
 
 
-
 def _artifact_by_target(analysis: Any, compilation_target: str) -> Any:
     matches = tuple(
         artifact
