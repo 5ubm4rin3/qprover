@@ -97,7 +97,11 @@ search
 
 `attempts.log`에는 wall-clock timestamp를 넣지 않는다. candidate proof마다 organizer Harness의 fresh deployment를 사용하며 proof parser는 최종 `AGENT_RESULT`만 신뢰하도록 방어한다.
 
-## 8. 현재 한계
+## 8. 재현 방법
+
+성공한 실행은 최종 `Exploit.sol`을 organizer Harness의 fresh deployment에서 다시 실행해 재현한다. 같은 target, invariants, manifest, seed와 고정된 toolchain을 사용하면 동일한 deterministic search ordering을 사용하며, 최종 성공은 `Exploit.run(target)` 실행 뒤 원본 `Invariants.checkAll(target)`이 실제 위반을 반환할 때만 인정한다. 제출 이미지 내부에는 필요한 Foundry/solc와 Harness artifact가 포함되므로 채점 환경의 `--network=none` 조건에서도 이 proof path를 재현할 수 있다.
+
+## 9. 현재 한계
 
 - proxy/delegatecall implementation recovery와 arbitrary CREATE/CREATE2 discovery는 현재 범위 밖이다.
 - dynamic arrays/structs/tuple-heavy ABI와 arbitrary selector callback은 bounded generic parameter/runtime 범위에서 제외될 수 있다.
