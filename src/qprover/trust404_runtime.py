@@ -132,6 +132,8 @@ class RuntimeEvaluation:
     all_hold: bool
     violated_predicate: str
     transaction_hashes: tuple[str, ...]
+    state_fingerprint: str | None = None
+    trace_features: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)
@@ -347,10 +349,34 @@ class Track04Runtime:
                 self._clear_callback()
 
         truth = self._check_all()
+        features: set[str] = set()
+        for transaction_hash in transaction_hashes:
+            trace = self.anvil.transaction_trace(transaction_hash)
+            if trace is None:
+                continue
+            for record in trace:
+                action = record.get("action")
+                if not isinstance(action, dict):
+                    continue
+                target = action.get("to")
+                data = action.get("input")
+                if isinstance(target, str):
+                    selector = (
+                        data[:10]
+                        if isinstance(data, str) and len(data) >= 10
+                        else "0x"
+                    )
+                    features.add(f"call:{target.lower()}:{selector.lower()}")
+        fingerprint = None
+        state_root = getattr(self.anvil, "state_root", None)
+        if callable(state_root):
+            fingerprint = state_root()
         return RuntimeEvaluation(
             all_hold=truth.all_hold,
             violated_predicate=truth.violated_predicate,
             transaction_hashes=tuple(transaction_hashes),
+            state_fingerprint=fingerprint,
+            trace_features=frozenset(sorted(features)),
         )
 
 
