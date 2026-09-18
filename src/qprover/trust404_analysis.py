@@ -272,6 +272,7 @@ class Track04Analysis:
     contract_name: str
     source_units: tuple[SourceUnitArtifact, ...] = ()
     property_analysis: PropertyAnalysis | None = None
+    artifacts: tuple[ContractArtifact, ...] = ()
 
 
 def compile_track04_target(
@@ -407,4 +408,5 @@ def compile_track04_target(
             contract_name=target_name,
             source_units=source_units,
             property_analysis=property_analysis,
+            artifacts=artifacts,
         )
