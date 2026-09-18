@@ -10,6 +10,17 @@ from typing import Any
 
 from qprover.artifacts import ArtifactBundle
 
+_SUBDENOMINATION_MULTIPLIERS = {
+    "wei": 1,
+    "gwei": 10**9,
+    "ether": 10**18,
+    "seconds": 1,
+    "minutes": 60,
+    "hours": 60 * 60,
+    "days": 24 * 60 * 60,
+    "weeks": 7 * 24 * 60 * 60,
+}
+
 _ORACLE_MEMBERS = {
     "getprice",
     "latestanswer",
@@ -425,15 +436,34 @@ def _literal_integer(
         if isinstance(value, str):
             cleaned = value.replace("_", "")
             try:
-                return int(cleaned, 0)
+                parsed = int(cleaned, 0)
             except ValueError:
                 try:
-                    return int(cleaned, 10)
+                    parsed = int(cleaned, 10)
                 except ValueError:
                     return None
+            denomination = node.get("subdenomination")
+            if denomination is None:
+                return parsed
+            multiplier = _SUBDENOMINATION_MULTIPLIERS.get(str(denomination))
+            return parsed * multiplier if multiplier is not None else None
     if node.get("nodeType") == "UnaryOperation" and node.get("operator") == "-":
         nested = _literal_integer(node.get("subExpression"), declarations)
         return -nested if nested is not None else None
+    if node.get("nodeType") == "BinaryOperation":
+        left = _literal_integer(node.get("leftExpression"), declarations)
+        right = _literal_integer(node.get("rightExpression"), declarations)
+        if left is None or right is None:
+            return None
+        operator = node.get("operator")
+        if operator == "+":
+            return left + right
+        if operator == "-":
+            return left - right
+        if operator == "*":
+            return left * right
+        if operator == "/" and right != 0:
+            return left // right
     if node.get("nodeType") == "Identifier":
         reference = node.get("referencedDeclaration")
         declaration = (
