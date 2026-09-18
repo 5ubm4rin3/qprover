@@ -26,8 +26,14 @@ def _analysis(predicate: str, function_id: str) -> PropertyAnalysis:
 
 
 def test_property_slice_survives_semantic_rename() -> None:
-    first = build_property_slices(_analysis("alpha", "function:alpha"))
-    second = build_property_slices(_analysis("renamed", "function:renamed"))
+    first = build_property_slices(
+        _analysis("alpha", "function:alpha"),
+        root_target_identity="root",
+    )
+    second = build_property_slices(
+        _analysis("renamed", "function:renamed"),
+        root_target_identity="root",
+    )
 
     assert len(first) == len(second) == 1
     assert tuple(resource.kind for resource in first[0].resources) == tuple(
@@ -37,7 +43,10 @@ def test_property_slice_survives_semantic_rename() -> None:
 
 
 def test_irrelevant_property_metadata_does_not_change_resource_kind() -> None:
-    baseline = build_property_slices(_analysis("alpha", "function:alpha"))[0]
+    baseline = build_property_slices(
+        _analysis("alpha", "function:alpha"),
+        root_target_identity="root",
+    )[0]
     renamed = _analysis("wrapper_name", "function:wrapper")
     mutated = PropertyAnalysis(
         invariants_source_name=renamed.invariants_source_name,
@@ -58,7 +67,10 @@ def test_irrelevant_property_metadata_does_not_change_resource_kind() -> None:
             ),
         ),
     )
-    relevant = build_property_slices(mutated)[0]
+    relevant = build_property_slices(
+        mutated,
+        root_target_identity="root",
+    )[0]
 
     assert tuple(resource.kind for resource in relevant.resources) == tuple(
         resource.kind for resource in baseline.resources
