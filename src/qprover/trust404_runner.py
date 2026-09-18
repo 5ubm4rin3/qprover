@@ -13,9 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from qprover.trust404 import (
+    ADDRESS_REF_PREFIX,
     EXIT_ERROR,
     EXIT_FOUND,
     EXIT_NOT_FOUND,
+    OTHER_ADDRESS,
+    SELF_ADDRESS,
+    TARGET_ADDRESS,
+    UINT_REF_PREFIX,
     ManifestContractError,
     Track04Manifest,
     Track04SearchModel,
@@ -254,6 +259,61 @@ def _concrete_candidates(model: Track04SearchModel, skeleton, limit: int):
     return tuple(candidates)
 
 
+def _runtime_argument(value: object, abi_type: str, runtime: object) -> object:
+    """Resolve only concrete/root-runtime values supported before ValueExpr lands."""
+
+    from web3 import Web3
+
+    if abi_type == "address":
+        if value == SELF_ADDRESS:
+            value = getattr(runtime, "attacker_address")
+        elif value == TARGET_ADDRESS:
+            value = getattr(runtime, "target_address")
+        elif value == OTHER_ADDRESS:
+            value = "0x000000000000000000000000000000000000bEEF"
+        elif isinstance(value, str) and value.startswith(ADDRESS_REF_PREFIX):
+            raise ValueError("dynamic address reference requires contextual ValueExpr")
+        if not isinstance(value, str):
+            raise ValueError("runtime address argument must resolve to a string")
+        return Web3.to_checksum_address(value)
+
+    if isinstance(value, str) and value.startswith(UINT_REF_PREFIX):
+        raise ValueError("dynamic uint reference requires contextual ValueExpr")
+    if abi_type.startswith("bytes") and isinstance(value, str) and value.startswith("0x"):
+        return bytes.fromhex(value[2:])
+    return value
+
+
+def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
+    from qprover.trust404_runtime import RuntimeCall
+    from web3 import Web3
+
+    actions = {action.id: action for action in model.actions}
+    calls = []
+    for step in candidate.steps:
+        action = actions[step.action_id]
+        if action.target_path:
+            raise ValueError("runtime contract aliases require instance canonicalization")
+        if action.callback_enabled:
+            raise ValueError("callback runtime program is not available yet")
+        if len(step.args) != len(action.param_types):
+            raise ValueError("runtime argument count does not match action ABI")
+        arguments = tuple(
+            _runtime_argument(value, abi_type, runtime)
+            for value, abi_type in zip(step.args, action.param_types, strict=True)
+        )
+        selector = bytes(Web3.keccak(text=action.signature)[:4])
+        encoded = Web3().codec.encode(list(action.param_types), list(arguments))
+        calls.append(
+            RuntimeCall(
+                target=getattr(runtime, "target_address"),
+                value_wei=step.value_wei,
+                calldata="0x" + (selector + encoded).hex(),
+            )
+        )
+    return tuple(calls)
+
+
 def _record_attempt(
     ledger: _AttemptLedger,
     candidate,
@@ -297,6 +357,7 @@ def _run_search(
     ledger: _AttemptLedger,
     verifier: Callable[..., VerificationResult],
     clock: Callable[[], float],
+    runtime: object | None = None,
 ) -> bool:
     from qprover.models import Outcome, SearchLimits
     from qprover.search.base import Evaluation, candidate_is_valid
@@ -335,14 +396,36 @@ def _run_search(
             code = render_candidate(model, candidate)
             ledger.last_code = code
             ledger.codes[candidate.canonical_id] = code
-            verification = verifier(
-                harness_dir,
-                target_path,
-                invariants_path,
-                code,
-                manifest,
-                timeout_seconds=max(1, math.ceil(remaining_wall)),
-            )
+
+            if runtime is None:
+                verification = verifier(
+                    harness_dir,
+                    target_path,
+                    invariants_path,
+                    code,
+                    manifest,
+                    timeout_seconds=max(1, math.ceil(remaining_wall)),
+                )
+            else:
+                try:
+                    runtime_result = runtime.execute(
+                        _runtime_calls(model, candidate, runtime)
+                    )
+                except ValueError as error:
+                    return Evaluation(
+                        outcome=Outcome.INCONCLUSIVE,
+                        transaction_count=0,
+                        metadata={"note": str(error)},
+                    )
+                verification = VerificationResult(
+                    proven=not runtime_result.all_hold,
+                    violated_predicate=runtime_result.violated_predicate,
+                    category=(
+                        "proven" if not runtime_result.all_hold else "not_proven"
+                    ),
+                    note="persistent_runtime",
+                )
+
             ledger.attempts += 1
             _record_attempt(ledger, candidate, verification)
 
