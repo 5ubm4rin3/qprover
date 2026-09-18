@@ -62,9 +62,7 @@ def test_contextual_address_prefers_next_action_target_without_name_checks() -> 
     )
 
     assert completed
-    assert completed[0].steps[0].args == (
-        ContractAddress("instance:consumer"),
-    )
+    assert completed[0].steps[0].args == (ContractAddress("instance:consumer"),)
 
 
 def test_uint_parameter_admits_self_indexed_runtime_read_and_scaled_forms() -> None:
