@@ -122,7 +122,6 @@ def test_track04_compiler_run_uses_global_analysis_timeout(
     assert seen["timeout"] == 7
 
 
-
 def test_track04_compiler_extracts_bounded_parameter_constraint(tmp_path: Path) -> None:
     root = tmp_path / "target"
     src = root / "src"
