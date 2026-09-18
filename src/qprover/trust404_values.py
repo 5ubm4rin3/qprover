@@ -513,7 +513,7 @@ def complete_parameters(
     candidates: list[ValueCandidate] = []
     seen: set[str] = set()
     for selected in itertools.product(*per_step):
-        value_steps = tuple(
+        mutable_steps = [
             ValueStep(
                 action_id=str(getattr(step, "action_id")),
                 target_instance_id=_step_target(step),
@@ -523,8 +523,36 @@ def complete_parameters(
                 sender_slot=int(getattr(step, "sender_slot", 0)),
             )
             for step, args in zip(steps, selected, strict=True)
-        )
-        candidate = ValueCandidate(value_steps)
+        ]
+        actions = _actions(analysis)
+        for index in range(len(mutable_steps) - 1):
+            current = mutable_steps[index]
+            action = actions.get(current.action_id)
+            if not bool(getattr(action, "callback_enabled", False)):
+                continue
+            following = mutable_steps[index + 1]
+            program = CallbackProgram(
+                trigger_context="receive_or_fallback",
+                instructions=(
+                    CallInstruction(
+                        target=ContractAddress(following.target_instance_id),
+                        signature=following.signature,
+                        args=following.args,
+                        value=Const(following.value_wei),
+                    ),
+                ),
+                depth_budget=1,
+            )
+            mutable_steps[index] = ValueStep(
+                action_id=current.action_id,
+                target_instance_id=current.target_instance_id,
+                signature=current.signature,
+                args=current.args,
+                value_wei=current.value_wei,
+                sender_slot=current.sender_slot,
+                callback_program=program,
+            )
+        candidate = ValueCandidate(tuple(mutable_steps))
         if candidate.canonical_id in seen:
             continue
         seen.add(candidate.canonical_id)
