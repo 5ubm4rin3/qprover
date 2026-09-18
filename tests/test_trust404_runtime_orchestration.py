@@ -258,3 +258,66 @@ def test_main_passes_default_persistent_runtime_factory(
 
     assert exit_code == 1
     assert seen["runtime_factory"] is sentinel
+
+
+
+def test_fast_runtime_only_violation_is_not_final_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, invariants, manifest = _files(tmp_path)
+    out = tmp_path / "out"
+    fake_runtime = SimpleNamespace(target_address="0x" + "11" * 20)
+
+    monkeypatch.setattr(runner, "build_search_model", lambda *_args: _model())
+
+    def fake_search(**kwargs):
+        kwargs["ledger"].winner_candidate = SimpleNamespace(steps=(object(),))
+        kwargs["ledger"].winner_code = (
+            "// SPDX-License-Identifier: MIT\n"
+            "pragma solidity 0.8.24;\n"
+            "contract Exploit { function run(address) external payable {} }\n"
+        )
+        return True
+
+    monkeypatch.setattr(runner, "_run_search", fake_search)
+    monkeypatch.setattr(
+        runner,
+        "minimize_track04_candidate",
+        lambda candidate, _violates, **_kwargs: SimpleNamespace(candidate=candidate),
+    )
+    monkeypatch.setattr(
+        runner,
+        "render_candidate",
+        lambda _model, _candidate: (
+            "// SPDX-License-Identifier: MIT\n"
+            "pragma solidity 0.8.24;\n"
+            "contract Exploit { function run(address) external payable {} }\n"
+        ),
+    )
+
+    @contextmanager
+    def runtime_factory(**_kwargs):
+        yield fake_runtime
+
+    def final_verifier(*_args, **_kwargs) -> VerificationResult:
+        return VerificationResult(False, "", "not_proven")
+
+    exit_code = runner.run_track04(
+        target,
+        invariants,
+        manifest,
+        out,
+        timeout_seconds=30,
+        seed=7,
+        max_attempts=2,
+        harness_dir=tmp_path,
+        verifier=final_verifier,
+        clock=lambda: 0.0,
+        runtime_factory=runtime_factory,
+    )
+
+    assert exit_code == 1
+    log = (out / "attempts.log").read_text(encoding="utf-8")
+    assert "stage=final-proof" in log
+    assert "result=NOT_PROVEN" in log
