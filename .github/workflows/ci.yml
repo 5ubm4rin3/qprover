@@ -11,9 +11,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
-      UV_PYTHON: "3.14.7"
+      UV_PYTHON: "3.12.14"
 
     steps:
       - name: Checkout
@@ -26,15 +26,25 @@ jobs:
           enable-cache: true
 
       - name: Install Python
-        run: uv python install 3.14.7
+        run: uv python install 3.12.14
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.4.0
+          version: v1.7.1
 
       - name: Sync locked environment
         run: uv sync --frozen --all-groups
+
+      - name: Exact toolchain gate
+        run: |
+          python_version="$(uv run python --version 2>&1)"
+          forge_version="$(forge --version | head -n1)"
+          solc_version="$(solc --version 2>/dev/null || true)"
+          echo "$python_version"
+          echo "$forge_version"
+          test "$python_version" = "Python 3.12.14"
+          echo "$forge_version" | grep -F "1.7.1"
 
       - name: Lockfile check
         run: uv lock --check
@@ -45,14 +55,20 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
-      - name: Prime Solidity compiler cache
-        run: forge build --root benchmarks/foundry
-
       - name: Python tests
         run: uv run pytest -q
 
+      - name: Track04 Foundry harness
+        run: |
+          forge build --root trust404/harness
+          forge test --root trust404/harness -q
+
       - name: Foundry fixture tests
         run: forge test --root benchmarks/foundry -vv
+
+      - name: Production hardcoding gate
+        run: |
+          ! grep -R -n -E             'OpenVault|BadAccounting|NaiveOracle|ReentrantVault|SafeVault|BoundedOwner'             src/qprover trust404/harness/src
 
       - name: Doctor
         run: uv run qprover doctor --json
@@ -61,3 +77,25 @@ jobs:
         run: |
           rm -rf /tmp/qprover-demo-core
           uv run qprover demo --json --out /tmp/qprover-demo-core
+
+  submission-image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build exact submission image
+        run: docker build -f agent/Dockerfile -t qprover-track04-ci .
+
+      - name: Verify image offline toolchain
+        run: |
+          docker run --rm --network=none --entrypoint sh qprover-track04-ci -lc '
+            set -eu
+            test "$(python --version 2>&1)" = "Python 3.12.14"
+            forge --version | head -n1 | grep -F "1.7.1"
+            solc --version | grep -F "0.8.24"
+            test -f /opt/qprover/trust404/harness/out/SearchAttacker.sol/SearchAttacker.json
+          '
