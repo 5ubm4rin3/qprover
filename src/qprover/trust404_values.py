@@ -7,8 +7,6 @@ import itertools
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
-
 from qprover.parameters import ParameterError, solve_integer_domain
 
 
