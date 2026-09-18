@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+
 _NON_SEARCH_FAILURES = frozenset(
     {
         "parameter_invalid",
