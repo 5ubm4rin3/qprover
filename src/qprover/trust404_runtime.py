@@ -111,7 +111,7 @@ class RuntimeCall:
     target: str
     value_wei: int
     calldata: str
-    callback_program: tuple["RuntimeCall", ...] = ()
+    callback_program: tuple[RuntimeCall, ...] = ()
     callback_depth_budget: int = 0
 
 
