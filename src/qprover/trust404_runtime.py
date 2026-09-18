@@ -246,9 +246,7 @@ class Track04Runtime:
         if opening < 0 or not signature.endswith(")"):
             raise ValueError("runtime getter signature is invalid")
         encoded_types = signature[opening + 1 : -1]
-        abi_types = tuple(
-            item for item in encoded_types.split(",") if item
-        )
+        abi_types = tuple(item for item in encoded_types.split(",") if item)
         if len(abi_types) != len(args):
             raise ValueError("runtime getter argument count mismatch")
         raw = self.anvil.call(
@@ -277,8 +275,7 @@ class Track04Runtime:
         if not call.callback_program:
             return
         targets = [
-            Web3.to_checksum_address(item.target)
-            for item in call.callback_program
+            Web3.to_checksum_address(item.target) for item in call.callback_program
         ]
         values = [item.value_wei for item in call.callback_program]
         payloads = [
@@ -422,9 +419,7 @@ class Track04Runtime:
                 data = action.get("input")
                 if isinstance(target, str):
                     selector = (
-                        data[:10]
-                        if isinstance(data, str) and len(data) >= 10
-                        else "0x"
+                        data[:10] if isinstance(data, str) and len(data) >= 10 else "0x"
                     )
                     features.add(f"call:{target.lower()}:{selector.lower()}")
         fingerprint = self._state_fingerprint()
@@ -603,9 +598,7 @@ def deploy_runtime_from_artifacts(
 
     storage_layout = getattr(target_artifact, "storage_layout", {})
     storage_records = (
-        storage_layout.get("storage", ())
-        if isinstance(storage_layout, Mapping)
-        else ()
+        storage_layout.get("storage", ()) if isinstance(storage_layout, Mapping) else ()
     )
     storage_slots = tuple(
         sorted(
