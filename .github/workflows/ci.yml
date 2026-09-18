@@ -55,6 +55,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Official Track04 submission format gate
+        run: node trust404/scripts/validate-submission.mjs .
+
       - name: Prime benchmark Solidity compiler cache
         run: forge build --root benchmarks/foundry
 
