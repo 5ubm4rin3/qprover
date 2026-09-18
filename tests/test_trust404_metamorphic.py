@@ -16,7 +16,7 @@ def _analysis(predicate: str, function_id: str) -> PropertyAnalysis:
                 target_balance_read=True,
                 target_calls=(),
                 constants=(10**18,),
-                comparison_hints=(("target.balance", ">=", "1000000000000000000"),),
+                comparison_hints=((">=", "target.balance", "constant"),),
                 source_span="0:1:0",
                 bound_from_check_all=True,
                 known=True,
