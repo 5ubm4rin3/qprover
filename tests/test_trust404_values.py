@@ -108,3 +108,29 @@ def test_uint_parameter_admits_self_indexed_runtime_read_and_scaled_forms() -> N
     assert expressions[0] == read
     assert Scale(read, 1, 2) in expressions[:4]
     assert Scale(read, 2, 1) in expressions[:4]
+
+
+
+def test_bounded_parameter_constraint_produces_z3_model() -> None:
+    action = _action("call:kappa(uint256)", ("uint256",))
+    constraint = SimpleNamespace(
+        function_id=action.function_id,
+        parameter_index=0,
+        operator=">=",
+        constant=7,
+    )
+    analysis = SimpleNamespace(
+        actions=(action,),
+        parameter_constraints=(constraint,),
+        source_constants=(),
+    )
+    state = SimpleNamespace(runtime_uint_sources=(), previous_returns=())
+    skeleton = SimpleNamespace(
+        steps=(_step(action.id, "instance:root"),),
+    )
+
+    completed = complete_parameters(skeleton, state, analysis, limit=4)
+
+    assert completed
+    values = tuple(candidate.steps[0].args[0] for candidate in completed)
+    assert any(getattr(value, "value", None) == 7 for value in values)
