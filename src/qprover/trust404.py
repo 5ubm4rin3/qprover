@@ -192,6 +192,7 @@ class Track04SearchModel:
     max_sequence_length: int
     analysis: Track04Analysis
     runtime_uint_sources: tuple[object, ...] = ()
+    source_constants: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,6 +751,19 @@ def build_search_model(
             benefit = 0.45 + 0.25 * second.utility
             transitions[(first.id, second.id)] = round(min(1.0, benefit), 6)
 
+    source_constants = {
+        constant
+        for fact in getattr(property_analysis, "facts", ())
+        for constant in getattr(fact, "constants", ())
+        if type(constant) is int
+    }
+    for contract in analysis.report.contracts:
+        for function in contract.functions:
+            source_constants.update(
+                item.constant
+                for item in getattr(function, "parameter_constraints", ())
+            )
+
     return Track04SearchModel(
         actions=tuple(sorted(actions, key=lambda item: item.id)),
         variants=tuple(
@@ -763,6 +777,7 @@ def build_search_model(
         max_sequence_length=6,
         analysis=analysis,
         runtime_uint_sources=tuple(uint_sources),
+        source_constants=tuple(sorted(source_constants)),
     )
 
 
