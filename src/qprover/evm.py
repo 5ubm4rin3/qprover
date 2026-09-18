@@ -46,6 +46,7 @@ _RPC_METHODS = frozenset(
         "eth_chainId",
         "eth_getBalance",
         "eth_getBlockByNumber",
+        "eth_getStorageAt",
         "eth_getTransactionReceipt",
         "eth_gasPrice",
         "eth_sendTransaction",
@@ -503,6 +504,16 @@ class LocalAnvil:
         if type(block) is not dict:
             raise EVMError("local RPC returned invalid latest block")
         return _read_hash(block.get("stateRoot"), "state root")
+
+    def storage_at(self, address: str, slot: int) -> str:
+        normalized = _read_address(address, "storage account address")
+        return _read_bytes(
+            self._request(
+                "eth_getStorageAt",
+                [normalized, _quantity(slot, "storage slot"), "latest"],
+            ),
+            "storage word",
+        )
 
     def balance(self, address: str) -> int:
         normalized = _read_address(address, "account address")
