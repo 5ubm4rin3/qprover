@@ -141,6 +141,7 @@ def test_run_track04_writes_proven_exploit_and_deterministic_attempt_log(
     assert code == 0
     exploit = (out / "Exploit.sol").read_text(encoding="utf-8")
     log = (out / "attempts.log").read_text(encoding="utf-8")
+    result = json.loads((out / "result.json").read_text(encoding="utf-8"))
     assert "contract Exploit" in exploit
     assert "setOwner(address)" in exploit
     assert "result=PROVEN" in log
@@ -148,6 +149,15 @@ def test_run_track04_writes_proven_exploit_and_deterministic_attempt_log(
     assert "stage=search" in log
     assert "stage=macro" not in log
     assert "stage=direct" not in log
+    assert result["status"] == "PROVEN"
+    assert result["violated_invariant"] == "ownerUnchanged"
+    assert result["proof"]["organizer_harness_reproduced"] is True
+    assert result["proof"]["minimized_candidate"] is False
+    assert result["exploit_path"] == [
+        {"step": 0, "action": "call:setOwner(address)"}
+    ]
+    assert "ownerUnchanged" in result["explanation"]
+    assert "call:setOwner(address)" in result["explanation"]
 
 
 def test_run_track04_returns_one_and_keeps_best_candidate_when_not_proven(
@@ -177,9 +187,14 @@ def test_run_track04_returns_one_and_keeps_best_candidate_when_not_proven(
     assert code == 1
     assert "contract Exploit" in (out / "Exploit.sol").read_text(encoding="utf-8")
     lines = (out / "attempts.log").read_text(encoding="utf-8").splitlines()
+    result = json.loads((out / "result.json").read_text(encoding="utf-8"))
     assert 1 <= len(lines) <= 2
     assert all("result=NOT_PROVEN" in line for line in lines)
     assert all("stage=search" in line for line in lines)
+    assert result["status"] == "NOT_FOUND"
+    assert result["violated_invariant"] is None
+    assert result["exploit_path"] == []
+    assert result["proof"]["organizer_harness_reproduced"] is False
 
 
 def test_run_track04_returns_two_for_harness_infrastructure_failure(
@@ -208,8 +223,12 @@ def test_run_track04_returns_two_for_harness_infrastructure_failure(
 
     assert code == 2
     log = (out / "attempts.log").read_text(encoding="utf-8")
+    result = json.loads((out / "result.json").read_text(encoding="utf-8"))
     assert "result=ERROR" in log
     assert "forge missing" in log
+    assert result["status"] == "ERROR"
+    assert result["violated_invariant"] is None
+    assert result["proof"]["organizer_harness_reproduced"] is False
 
 
 def test_submission_dockerfile_only_copies_existing_root_inputs() -> None:
