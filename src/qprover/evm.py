@@ -65,6 +65,7 @@ _BYTES = re.compile(r"0x(?:[0-9a-fA-F]{2})*")
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 _HASH = re.compile(r"0x[0-9a-fA-F]{64}")
 _MAX_UINT256 = (1 << 256) - 1
+_MAX_UINT64 = (1 << 64) - 1
 
 
 def _ephemeral_port() -> int:
@@ -445,11 +446,11 @@ class LocalAnvil:
 
         if self._process is not None:
             raise EVMError("block context must be configured before Anvil starts")
-        if type(block_number) is not int or not 0 <= block_number <= _MAX_UINT256:
+        if type(block_number) is not int or not 0 <= block_number <= _MAX_UINT64:
             raise ValueError("block_number must be a nonnegative integer")
         if (
             type(block_timestamp) is not int
-            or not 0 <= block_timestamp <= _MAX_UINT256
+            or not 0 <= block_timestamp <= _MAX_UINT64
         ):
             raise ValueError("block_timestamp must be a nonnegative integer")
         self._genesis_block_number = block_number
