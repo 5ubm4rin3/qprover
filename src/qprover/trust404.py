@@ -760,8 +760,7 @@ def build_search_model(
     for contract in analysis.report.contracts:
         for function in contract.functions:
             source_constants.update(
-                item.constant
-                for item in getattr(function, "parameter_constraints", ())
+                item.constant for item in getattr(function, "parameter_constraints", ())
             )
 
     return Track04SearchModel(
@@ -846,9 +845,13 @@ def _solidity_literal(value: object) -> str:
     if isinstance(value, Sub):
         return f"({_solidity_literal(value.left)} - {_solidity_literal(value.right)})"
     if isinstance(value, Min):
-        return f"_min({_solidity_literal(value.left)}, {_solidity_literal(value.right)})"
+        return (
+            f"_min({_solidity_literal(value.left)}, {_solidity_literal(value.right)})"
+        )
     if isinstance(value, Max):
-        return f"_max({_solidity_literal(value.left)}, {_solidity_literal(value.right)})"
+        return (
+            f"_max({_solidity_literal(value.left)}, {_solidity_literal(value.right)})"
+        )
     if isinstance(value, PreviousReturn):
         raise ValueError("PreviousReturn requires a stored temporary during rendering")
 
