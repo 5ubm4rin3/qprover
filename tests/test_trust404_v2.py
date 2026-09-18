@@ -17,6 +17,14 @@ from qprover.trust404 import (
     build_search_model,
     render_candidate,
 )
+from qprover.trust404_values import (
+    CallbackProgram,
+    CallInstruction,
+    Const,
+    ContractAddress,
+    ValueCandidate,
+    ValueStep,
+)
 
 
 def _manifest(tmp_path: Path) -> Track04Manifest:
@@ -323,20 +331,38 @@ def test_v2_callback_mode_is_generic_search_action(tmp_path: Path) -> None:
     assert callback.id == "call:withdraw(uint256)@callback"
     assert "macro" not in callback.id
 
-    candidate = _Candidate(
+    program = CallbackProgram(
+        trigger_context="receive_or_fallback",
+        instructions=(
+            CallInstruction(
+                target=ContractAddress("instance:root"),
+                signature="deposit()",
+                args=(),
+                value=Const(0),
+            ),
+        ),
+        depth_budget=1,
+    )
+    candidate = ValueCandidate(
         (
-            _Step(
-                callback.id,
-                callback.signature,
-                (1,),
+            ValueStep(
+                action_id=callback.id,
+                target_instance_id="instance:root",
+                signature=callback.signature,
+                args=(Const(1),),
+                value_wei=0,
+                callback_program=program,
             ),
         )
     )
     code = render_candidate(model, candidate)
-    assert "address private _callbackTarget" in code
-    assert "bytes private _callbackData" in code
+
+    assert "address[] private _callbackTargets" in code
+    assert "bytes[] private _callbackData" in code
     assert "receive() external payable" in code
-    assert "_callbackTarget.call(_callbackData)" in code
+    assert "fallback() external payable" in code
+    assert 'abi.encodeWithSignature("deposit()")' in code
+    assert "_dispatchCallback();" in code
     assert "reentrancy" not in code.lower()
 
 
