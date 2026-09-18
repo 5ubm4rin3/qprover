@@ -173,6 +173,7 @@ def _default_runtime_factory(
             manifest=manifest,
             search_attacker_bytecode=_search_attacker_bytecode(harness_dir),
             attacker_funding_wei=10 * 10**18,
+            observation_sources=model.runtime_uint_sources,
         )
         yield runtime
 
