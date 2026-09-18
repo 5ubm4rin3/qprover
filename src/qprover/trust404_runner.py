@@ -100,9 +100,7 @@ def _search_attacker_bytecode(harness_dir: Path) -> str:
         raise ValueError("SearchAttacker artifact is invalid") from error
     bytecode_record = raw.get("bytecode") if isinstance(raw, dict) else None
     bytecode = (
-        bytecode_record.get("object")
-        if isinstance(bytecode_record, dict)
-        else None
+        bytecode_record.get("object") if isinstance(bytecode_record, dict) else None
     )
     if not isinstance(bytecode, str) or not bytecode:
         raise ValueError("SearchAttacker artifact lacks deployment bytecode")
