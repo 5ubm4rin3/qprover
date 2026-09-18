@@ -98,6 +98,7 @@ uv run qprover-trust404 \
 `--out`에는 항상 다음 파일을 생성합니다.
 
 - `Exploit.sol` — 성공한 경우 실제 invariant violation을 재현한 PoC. 실패한 경우 마지막 deterministic candidate 또는 no-op PoC.
+- `result.json` — 최종 판정, 실제 위반된 invariant, 재현된 exploit action sequence, fresh organizer proof 여부와 사람이 읽을 수 있는 위반 설명.
 - `attempts.log` — 실제 검증한 후보와 결과를 deterministic 형식으로 기록.
 
 Exit code:
