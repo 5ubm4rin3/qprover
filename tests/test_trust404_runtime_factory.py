@@ -99,3 +99,62 @@ def test_deploy_runtime_uses_retained_compiler_artifacts() -> None:
     assert anvil.sent[2]["data"] == "0x6003600055"
     assert anvil.balances == [(ATTACKER, 10**18)]
     assert anvil.baselines == 1
+
+
+
+def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
+    target = "0x00000000000000000000000000000000000000a1"
+    setup = "0x00000000000000000000000000000000000000e4"
+    invariants = "0x00000000000000000000000000000000000000b2"
+    attacker = "0x00000000000000000000000000000000000000d3"
+
+    class SetupAnvil(_FakeAnvil):
+        def __init__(self) -> None:
+            super().__init__()
+            self.receipts = iter(
+                (
+                    {"status": 1, "contractAddress": setup},
+                    {"status": 1, "contractAddress": None},
+                    {"status": 1, "contractAddress": invariants},
+                    {"status": 1, "contractAddress": attacker},
+                )
+            )
+
+        def debug_trace(self, _transaction_hash: str):
+            encoded = Web3().codec.encode(["address"], [target])
+            return {"returnValue": "0x" + encoded.hex()}
+
+    setup_artifact = _Artifact(
+        compilation_target="Setup.s.sol:Setup",
+        bytecode="0x6004600055",
+        abi=(),
+    )
+    invariants_artifact = _Artifact(
+        compilation_target="Invariants.sol:Invariants",
+        bytecode="0x6002600055",
+        abi=(),
+    )
+    analysis = SimpleNamespace(
+        artifacts=(setup_artifact, invariants_artifact),
+        setup_source="Setup.s.sol",
+    )
+    manifest = SimpleNamespace(
+        target_src="src/Target.sol",
+        target_name="Target",
+        invariants_contract="Invariants.sol",
+        constructor_args=(),
+        deploy_value_wei=0,
+        setup="Setup.s.sol",
+    )
+    anvil = SetupAnvil()
+
+    runtime = deploy_runtime_from_artifacts(
+        anvil,
+        analysis=analysis,
+        manifest=manifest,
+        search_attacker_bytecode="0x6003600055",
+    )
+
+    assert runtime.target_address == target
+    assert runtime.invariants_address == invariants
+    assert runtime.attacker_address == attacker
