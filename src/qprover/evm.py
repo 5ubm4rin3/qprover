@@ -56,6 +56,7 @@ _RPC_METHODS = frozenset(
     }
 )
 _CHAIN_ID = 31_337
+_BLOCK_GAS_LIMIT = 60_000_000
 _GENESIS_TIMESTAMP = 1_700_000_000
 _EXPECTED_ACCOUNTS = (
     "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
@@ -219,6 +220,8 @@ class LocalAnvil:
             str(_CHAIN_ID),
             "--hardfork",
             "cancun",
+            "--gas-limit",
+            str(_BLOCK_GAS_LIMIT),
             "--timestamp",
             str(self._genesis_timestamp),
             "--number",
