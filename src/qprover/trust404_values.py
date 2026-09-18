@@ -438,7 +438,7 @@ def _parameter_domains(
 ) -> tuple[tuple[ValueExpr, ...], ...]:
     actions = _actions(analysis)
     step = steps[index]
-    action = actions.get(str(getattr(step, "action_id")))
+    action = actions.get(str(step.action_id))
     if action is None:
         return ()
     domains: list[tuple[ValueExpr, ...]] = []
@@ -516,9 +516,9 @@ def complete_parameters(
     for selected in itertools.product(*per_step):
         mutable_steps = [
             ValueStep(
-                action_id=str(getattr(step, "action_id")),
+                action_id=str(step.action_id),
                 target_instance_id=_step_target(step),
-                signature=str(getattr(step, "signature")),
+                signature=str(step.signature),
                 args=tuple(args),
                 value_wei=int(getattr(step, "value_wei", 0)),
                 sender_slot=int(getattr(step, "sender_slot", 0)),
