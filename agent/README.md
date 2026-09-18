@@ -37,9 +37,9 @@ python agent/agent.py \
 
 Exit code:
 
-- `0`: 실제 invariant violation 확인
-- `1`: 제한 내에서 exploit을 찾지 못함
-- `2`: 입력 또는 infrastructure 오류
+- Exit code `0`: 실제 organizer Harness에서 invariant violation을 재현함
+- Exit code `1`: 제한 내에서 재현 가능한 exploit을 찾지 못함
+- Exit code `2`: 입력, 실행 환경 또는 infrastructure 오류
 
 ## Docker
 
