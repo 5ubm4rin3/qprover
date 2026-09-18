@@ -268,7 +268,10 @@ class Track04Runtime:
     def _configure_callback(self, call: RuntimeCall) -> None:
         if not call.callback_program:
             return
-        targets = [item.target for item in call.callback_program]
+        targets = [
+            Web3.to_checksum_address(item.target)
+            for item in call.callback_program
+        ]
         values = [item.value_wei for item in call.callback_program]
         payloads = [
             _decode_hex(item.calldata, "callback calldata")
