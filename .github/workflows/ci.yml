@@ -91,7 +91,7 @@ jobs:
           )
           assert result["status"] == "PROVEN"
           assert result["proof"]["organizer_harness_reproduced"] is True
-          assert result["violated_invariant"] == "ownerUnchanged"
+          assert result["violated_invariant"] == "flagRemainsFalse"
           PY
 
       - name: Foundry fixture tests
