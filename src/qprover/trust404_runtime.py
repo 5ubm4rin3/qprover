@@ -23,6 +23,20 @@ def _normalize_address(address: str) -> str:
     return lowered
 
 
+def _receipt_succeeded(receipt: Mapping[str, object]) -> bool:
+    """Accept both JSON-RPC hex quantities and normalized integer test receipts."""
+
+    status = receipt.get("status")
+    if type(status) is int:
+        return status == 1
+    if isinstance(status, str):
+        try:
+            return int(status, 16) == 1
+        except ValueError:
+            return False
+    return False
+
+
 def _normalize_code_hash(code_hash: str) -> str:
     if not isinstance(code_hash, str) or not code_hash.startswith("0x"):
         raise ValueError("code hash must be a hex string")
@@ -293,14 +307,14 @@ class Track04Runtime:
             ),
         )
         receipt = self._send_attacker_transaction(data)
-        if receipt.get("status") != 1:
+        if not _receipt_succeeded(receipt):
             raise RuntimeError("SearchAttacker callback configuration reverted")
 
     def _clear_callback(self) -> None:
         receipt = self._send_attacker_transaction(
             _encode_abi_call("clearCallback()", (), ())
         )
-        if receipt.get("status") != 1:
+        if not _receipt_succeeded(receipt):
             raise RuntimeError("SearchAttacker callback cleanup reverted")
 
     def _state_fingerprint(self) -> str:
@@ -383,7 +397,7 @@ class Track04Runtime:
             self._configure_callback(call)
             transaction_hash = self.anvil.send_transaction(transaction)
             receipt = self.anvil.wait_for_receipt(transaction_hash)
-            if receipt.get("status") != 1:
+            if not _receipt_succeeded(receipt):
                 trace = self.anvil.debug_trace(transaction_hash)
                 raw = None
                 if trace is not None:
@@ -498,7 +512,7 @@ def _deploy_contract(
         transaction["value"] = value_wei
     transaction_hash = anvil.send_transaction(transaction)
     receipt = anvil.wait_for_receipt(transaction_hash)
-    if receipt.get("status") != 1:
+    if not _receipt_succeeded(receipt):
         detail = ""
         trace_reader = getattr(anvil, "debug_trace", None)
         if callable(trace_reader):
@@ -553,7 +567,7 @@ def _deploy_target_via_setup(
         }
     )
     receipt = anvil.wait_for_receipt(transaction_hash)
-    if receipt.get("status") != 1:
+    if not _receipt_succeeded(receipt):
         raise RuntimeError("Track04 setup transaction reverted")
     trace = anvil.debug_trace(transaction_hash)
     if trace is None:
