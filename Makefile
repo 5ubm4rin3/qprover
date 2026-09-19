@@ -21,7 +21,7 @@ demo:
 	./scripts/demo.sh
 
 track04:
-	bash scripts/track04.sh
+	uv run qprover track04
 
 verify:
 	uv lock --check
