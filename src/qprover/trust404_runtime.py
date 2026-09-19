@@ -476,6 +476,7 @@ def _deploy_contract(
     constructor_types: tuple[str, ...] = (),
     constructor_args: tuple[object, ...] = (),
     value_wei: int = 0,
+    label: str = "contract",
 ) -> str:
     if not isinstance(bytecode, str) or not bytecode.startswith("0x"):
         raise ValueError("runtime deployment bytecode must be 0x-prefixed")
@@ -498,7 +499,7 @@ def _deploy_contract(
     transaction_hash = anvil.send_transaction(transaction)
     receipt = anvil.wait_for_receipt(transaction_hash)
     if receipt.get("status") != 1:
-        raise RuntimeError("runtime contract deployment reverted")
+        raise RuntimeError(f"runtime {label} deployment reverted")
     address = receipt.get("contractAddress")
     if not isinstance(address, str):
         raise RuntimeError("runtime deployment receipt lacks contract address")
@@ -519,6 +520,7 @@ def _deploy_target_via_setup(
         anvil,
         controller_address=controller,
         bytecode=setup_artifact.bytecode,
+        label="setup",
     )
     transaction_hash = anvil.send_transaction(
         {
@@ -578,6 +580,7 @@ def deploy_runtime_from_artifacts(
             constructor_types=_constructor_types(target_artifact),
             constructor_args=tuple(manifest.constructor_args),
             value_wei=manifest.deploy_value_wei,
+            label="target",
         )
 
     invariants_key = f"{manifest.invariants_contract}:Invariants"
@@ -586,12 +589,14 @@ def deploy_runtime_from_artifacts(
         anvil,
         controller_address=controller,
         bytecode=invariants_artifact.bytecode,
+        label="invariants",
     )
 
     attacker_address = _deploy_contract(
         anvil,
         controller_address=controller,
         bytecode=search_attacker_bytecode,
+        label="SearchAttacker",
     )
     if type(attacker_funding_wei) is not int or attacker_funding_wei < 0:
         raise ValueError("attacker funding must be a nonnegative integer")
