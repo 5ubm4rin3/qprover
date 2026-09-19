@@ -536,6 +536,116 @@ def _demo(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
+
+def _find_track04_file(package: Path, name: str) -> Path:
+    direct = package / name
+    if direct.is_file():
+        return direct.resolve()
+    matches = tuple(
+        sorted(
+            path.resolve()
+            for path in package.rglob(name)
+            if path.is_file()
+        )
+    )
+    if not matches:
+        raise ValueError(
+            f"{name} not found under {package}. "
+            "Place the organizer package in trust404/target/ "
+            "or pass its directory explicitly."
+        )
+    if len(matches) != 1:
+        rendered = ", ".join(str(path) for path in matches[:4])
+        raise ValueError(f"multiple {name} files found under {package}: {rendered}")
+    return matches[0]
+
+
+def _track04(args: argparse.Namespace) -> int:
+    """Human-friendly wrapper around the official Track 04 CLI contract."""
+
+    from qprover.trust404 import Track04Manifest
+    from qprover.trust404_runner import _default_runtime_factory, run_track04
+
+    workspace = Path(args.workspace).resolve()
+    package = (
+        Path(args.package).expanduser().resolve()
+        if args.package
+        else workspace / "trust404" / "target"
+    )
+    if not package.is_dir():
+        raise ValueError(
+            f"Track04 package directory not found: {package}. "
+            "Put the organizer package in trust404/target/ "
+            "or run: uv run qprover track04 /path/to/package"
+        )
+
+    manifest_path = _find_track04_file(package, "manifest.json")
+    manifest = Track04Manifest.load(manifest_path)
+    package_root = manifest_path.parent.resolve()
+
+    contract = (package_root / manifest.target_src).resolve()
+    try:
+        contract.relative_to(package_root)
+    except ValueError as error:
+        raise ValueError("manifest target.src escapes the package directory") from error
+    if not contract.is_file():
+        raise ValueError(
+            f"target source from manifest not found: {contract}"
+        )
+
+    invariants = _find_track04_file(package_root, "Invariants.sol")
+    output = (
+        Path(args.out).expanduser().resolve()
+        if args.out
+        else workspace / "trust404" / "results" / "latest"
+    )
+    output.mkdir(parents=True, exist_ok=True)
+
+    timeout = args.timeout if args.timeout is not None else manifest.timeout_sec
+    seed = args.seed if args.seed is not None else manifest.manifest_seed
+    max_attempts = (
+        args.max_attempts
+        if args.max_attempts is not None
+        else manifest.max_attempts
+    )
+
+    code = run_track04(
+        contract,
+        invariants,
+        manifest_path,
+        output,
+        timeout_seconds=timeout,
+        seed=seed,
+        max_attempts=max_attempts,
+        runtime_factory=_default_runtime_factory,
+    )
+
+    result_path = output / "result.json"
+    result: dict[str, object] = {}
+    if result_path.is_file():
+        try:
+            loaded = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                result = loaded
+        except (OSError, json.JSONDecodeError):
+            result = {}
+
+    payload = {
+        "ok": code == 0,
+        "exit_code": code,
+        "status": result.get(
+            "status",
+            "PROVEN" if code == 0 else "NOT_FOUND" if code == 1 else "ERROR",
+        ),
+        "target": str(contract),
+        "output": str(output),
+        "result": str(result_path),
+        "exploit": str(output / "Exploit.sol"),
+        "attempts": str(output / "attempts.log"),
+    }
+    _emit(payload, as_json=args.json)
+    return code
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="qprover",
@@ -606,6 +716,23 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--labels", default="benchmarks/labels.json")
     report.add_argument("--json", action="store_true")
     report.set_defaults(func=_report)
+
+    track04 = sub.add_parser(
+        "track04",
+        help="Run TRUST404 Track 04 from one organizer package directory",
+    )
+    track04.add_argument(
+        "package",
+        nargs="?",
+        help="package directory (default: trust404/target)",
+    )
+    track04.add_argument("--workspace", default=".")
+    track04.add_argument("--out")
+    track04.add_argument("--timeout", type=int)
+    track04.add_argument("--seed", type=int)
+    track04.add_argument("--max-attempts", type=int, dest="max_attempts")
+    track04.add_argument("--json", action="store_true")
+    track04.set_defaults(func=_track04)
 
     demo = sub.add_parser("demo")
     demo.add_argument("--workspace", default=".")
