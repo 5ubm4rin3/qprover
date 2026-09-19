@@ -2,13 +2,9 @@
 pragma solidity 0.8.24;
 
 contract DemoTarget {
-    address public owner;
+    bool public flag;
 
-    constructor() {
-        owner = address(0x1234);
-    }
-
-    function setOwner(address newOwner) external {
-        owner = newOwner;
+    function flip() external {
+        flag = true;
     }
 }
