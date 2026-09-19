@@ -1,6 +1,6 @@
 # QProver TRUST404 Track 04 Agent
 
-QProver v2는 주최 측이 제공하는 target, invariants, manifest를 읽고 Solidity compiler 기반 의미 분석을 수행한 뒤, 취약점별 전용 macro 없이 generic ABI call sequence를 탐색합니다. 생성된 모든 후보는 공식 Harness에서 실제 invariant violation이 발생하는지 검증됩니다.
+QProver v2는 주최 측이 제공하는 target, invariants, manifest를 읽고 Solidity compiler 기반 의미 분석을 수행한 뒤, 취약점별 전용 macro 없이 generic ABI call sequence를 탐색합니다. 후보는 local Anvil의 persistent `SearchAttacker`로 실행하며, 최종 standalone exploit이 fresh organizer Harness에서 supplied invariant violation을 다시 재현한 경우에만 `PROVEN`입니다.
 
 ## 실행
 
@@ -80,11 +80,17 @@ generic ABI actions
   ↓
 QUBO 기반 후보 우선순위
   ↓
-Exploit.sol 생성
+local Anvil + SearchAttacker 실행
   ↓
-공식 Harness 실행
+original Invariants.checkAll(target)
   ↓
-실패 시 feedback 후 재탐색 / 성공 시 PROVEN
+실패 시 feedback 후 재탐색
+  ↓
+execution-backed 최소화 + Exploit.sol 생성
+  ↓
+fresh organizer Harness final proof
+  ↓
+PROVEN / NOT_FOUND / ERROR
 ```
 
 QProver v2에는 reentrancy, access-control, oracle, unchecked-accounting 같은 취약점 클래스별 exploit macro가 없습니다. 탐색기는 취약점 이름을 정답으로 넣지 않고 compiler facts와 실제 실행 결과를 이용합니다.

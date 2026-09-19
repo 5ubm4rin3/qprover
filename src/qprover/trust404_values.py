@@ -338,6 +338,8 @@ def _address_domain(
 
 
 def _uint_domain(
+    steps: tuple[object, ...],
+    step_index: int,
     action: object,
     step: object,
     parameter_index: int,
@@ -350,11 +352,25 @@ def _uint_domain(
     writes = set(getattr(action, "storage_writes", ()))
     target = _step_target(step)
     sources = tuple(getattr(state, "runtime_uint_sources", ()))
+    function = _function_fact(analysis, action)
+    consumes_token = any(
+        getattr(call, "member_name", None) == "transferFrom"
+        for call in getattr(function, "calls", ())
+    )
+    previous_target = _step_target(steps[step_index - 1]) if step_index > 0 else None
 
-    def rank(source: object) -> tuple[int, int, str, str]:
+    def rank(source: object) -> tuple[int, int, int, str, str]:
         overlap = len(set(getattr(source, "reads", ())) & (reads | writes))
         same_target = int(getattr(source, "instance_id", "") == target)
+        recent_asset_balance = int(
+            consumes_token
+            and previous_target is not None
+            and getattr(source, "instance_id", "") == previous_target
+            and getattr(source, "signature", "") == "balanceOf(address)"
+            and getattr(source, "argument_mode", "none") == "self"
+        )
         return (
+            -recent_asset_balance,
             -overlap,
             -same_target,
             str(getattr(source, "instance_id", "")),
@@ -366,6 +382,23 @@ def _uint_domain(
     def add(value: ValueExpr) -> None:
         if value not in result:
             result.append(value)
+
+    bounds = _integer_bounds(abi_type)
+    positive_constants = tuple(
+        sorted(
+            {
+                value
+                for value in getattr(analysis, "source_constants", ())
+                if type(value) is int
+                and value > 0
+                and bounds is not None
+                and bounds[0] <= value <= bounds[1]
+            }
+        )
+    )
+    runtime_cap = (
+        positive_constants[0] if len(steps) > 1 and positive_constants else None
+    )
 
     for source in sorted(sources, key=rank):
         mode = getattr(source, "argument_mode", "none")
@@ -383,6 +416,8 @@ def _uint_domain(
         )
         if not read.signature:
             continue
+        if runtime_cap is not None:
+            add(Min(Max(read, Const(1)), Const(runtime_cap)))
         add(read)
         add(Scale(read, 1, 2))
         add(Scale(read, 2, 1))
@@ -407,7 +442,6 @@ def _uint_domain(
     for value in sorted({value for value in constants if type(value) is int}):
         add(Const(value))
 
-    bounds = _integer_bounds(abi_type)
     if bounds is not None:
         minimum, maximum = bounds
         for value in (1, 0, maximum, minimum):
@@ -449,6 +483,8 @@ def _parameter_domains(
             domain = _address_domain(steps, index, state)
         elif _integer_bounds(abi_type) is not None:
             domain = _uint_domain(
+                steps,
+                index,
                 action,
                 step,
                 parameter_index,
@@ -526,20 +562,19 @@ def complete_parameters(
             for step, args in zip(steps, selected, strict=True)
         ]
         actions = _actions(analysis)
-        for index in range(len(mutable_steps) - 1):
+        for index in range(len(mutable_steps)):
             current = mutable_steps[index]
             action = actions.get(current.action_id)
             if not bool(getattr(action, "callback_enabled", False)):
                 continue
-            following = mutable_steps[index + 1]
             program = CallbackProgram(
                 trigger_context="receive_or_fallback",
                 instructions=(
                     CallInstruction(
-                        target=ContractAddress(following.target_instance_id),
-                        signature=following.signature,
-                        args=following.args,
-                        value=Const(following.value_wei),
+                        target=ContractAddress(current.target_instance_id),
+                        signature=current.signature,
+                        args=current.args,
+                        value=Const(current.value_wei),
                     ),
                 ),
                 depth_budget=1,

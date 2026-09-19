@@ -142,6 +142,8 @@ def test_analysis_distinguishes_token_transfer_from_native_transfer(
     )
 
     assert token_call.kind == "external"
+    assert token_call.receiver_name == "token"
+    assert type(token_call.receiver_declaration) is int
     assert token_call.receiver_type == "contract IERC20"
     assert token_transfer.value_flows[0].asset == "token"
     assert token_transfer.value_flows[0].operation == "transfer"

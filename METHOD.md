@@ -95,7 +95,7 @@ search
 - seeded annealing
 - candidate/log formatting
 
-`attempts.log`에는 wall-clock timestamp를 넣지 않는다. candidate proof마다 organizer Harness의 fresh deployment를 사용하며 proof parser는 최종 `AGENT_RESULT`만 신뢰하도록 방어한다.
+`attempts.log`에는 wall-clock timestamp를 넣지 않는다. Search candidate는 매번 동일한 Anvil baseline snapshot으로 되돌려 실행하고, 최종 standalone exploit proof는 organizer Harness의 fresh deployment를 사용한다. Proof parser는 최종 `AGENT_RESULT`와 manifest에 선언된 predicate의 일치 여부를 함께 검증한다.
 
 ## 8. 재현 방법
 

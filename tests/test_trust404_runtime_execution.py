@@ -94,3 +94,24 @@ def test_runtime_resets_baseline_and_uses_original_check_all() -> None:
     assert second.violated_predicate == ""
     assert anvil.reset_calls == 2
     assert anvil.state == 0
+
+
+def test_runtime_lazy_calls_are_built_after_prior_state_changes() -> None:
+    anvil = _FakeAnvil()
+    runtime = Track04Runtime.start(
+        anvil,
+        controller_address=CONTROLLER,
+        target_address=TARGET,
+        invariants_address=INVARIANTS,
+        attacker_address=ATTACKER,
+    )
+    observed: list[int] = []
+
+    def build_call(active: Track04Runtime) -> RuntimeCall:
+        observed.append(active.anvil.state)
+        return RuntimeCall(target=TARGET, value_wei=0, calldata="0x12345678")
+
+    result = runtime.execute_lazy((build_call, build_call))
+
+    assert observed == [0, 1]
+    assert result.all_hold is False

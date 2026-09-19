@@ -209,6 +209,13 @@ def verify_exploit(
         if completed.returncode == 0 and results:
             verdict, predicate = results[-1]
             proven = verdict == "PROVEN"
+            if proven and predicate not in manifest.predicates:
+                return VerificationResult(
+                    False,
+                    "",
+                    "forge_error",
+                    "reported predicate is not declared in the manifest",
+                )
             violated = predicate if proven else ""
             return VerificationResult(
                 proven,

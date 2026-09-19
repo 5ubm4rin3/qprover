@@ -128,6 +128,8 @@ class CallFact:
     receiver_type: str | None
     ast_id: int
     source_span: str
+    receiver_name: str | None = None
+    receiver_declaration: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,9 +347,25 @@ def _call_fact(
     if expression.get("nodeType") == "MemberAccess":
         member_name = str(expression.get("memberName", "<unknown>"))
         receiver_type = _receiver_type(expression)
+        receiver = expression.get("expression")
+        receiver_name = (
+            str(receiver.get("name"))
+            if isinstance(receiver, Mapping) and isinstance(receiver.get("name"), str)
+            else None
+        )
+        receiver_reference = (
+            receiver.get("referencedDeclaration")
+            if isinstance(receiver, Mapping)
+            else None
+        )
+        receiver_declaration = (
+            receiver_reference if isinstance(receiver_reference, int) else None
+        )
     else:
         member_name = str(expression.get("name", "<unknown>"))
         receiver_type = None
+        receiver_name = None
+        receiver_declaration = None
     reference = expression.get("referencedDeclaration")
     target = function_identities.get(reference) if isinstance(reference, int) else None
     if target:
@@ -380,6 +398,8 @@ def _call_fact(
         receiver_type=receiver_type,
         ast_id=int(node.get("id", -1)),
         source_span=str(node.get("src", "unknown")),
+        receiver_name=receiver_name,
+        receiver_declaration=receiver_declaration,
     )
 
 

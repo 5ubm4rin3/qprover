@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -370,10 +370,29 @@ class Track04Runtime:
         self,
         calls: tuple[RuntimeCall, ...],
     ) -> RuntimeEvaluation:
+        return self._execute(tuple(lambda _runtime, call=call: call for call in calls))
+
+    def execute_lazy(
+        self,
+        builders: tuple[Callable[[Track04Runtime], RuntimeCall], ...],
+    ) -> RuntimeEvaluation:
+        """Resolve each call after prior calls have changed local EVM state."""
+
+        if any(not callable(builder) for builder in builders):
+            raise TypeError("lazy runtime calls must be callable")
+        return self._execute(builders)
+
+    def _execute(
+        self,
+        builders: tuple[Callable[[Track04Runtime], RuntimeCall], ...],
+    ) -> RuntimeEvaluation:
         self.anvil.reset()
         transaction_hashes: list[str] = []
 
-        for step_index, call in enumerate(calls):
+        for step_index, builder in enumerate(builders):
+            call = builder(self)
+            if not isinstance(call, RuntimeCall):
+                raise TypeError("runtime call builder must return RuntimeCall")
             target = _normalize_address(call.target)
             if type(call.value_wei) is not int or not 0 <= call.value_wei < 1 << 256:
                 raise ValueError("runtime call value must be a uint256")

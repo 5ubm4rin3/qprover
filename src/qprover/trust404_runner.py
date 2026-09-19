@@ -433,6 +433,211 @@ def _runtime_instance_address(runtime: object, instance_id: str) -> str:
     raise ValueError(f"runtime cannot resolve contract instance {instance_id!r}")
 
 
+def _semantic_hypotheses(
+    model: Track04SearchModel,
+    runtime: object,
+) -> tuple[tuple[str, ...], ...]:
+    """Derive executable prerequisite chains from compiler facts and aliases.
+
+    These are deterministic search seeds, not proof. Runtime execution and the
+    fresh organizer replay remain the only paths to ``PROVEN``.
+    """
+
+    actions = {action.id: action for action in model.actions}
+    report = getattr(model.analysis, "report", None)
+    functions = {
+        function.canonical_id: function
+        for contract in getattr(report, "contracts", ())
+        for function in getattr(contract, "functions", ())
+    }
+    storage_declarations = {
+        int(storage.declaration_id)
+        for contract in getattr(report, "contracts", ())
+        for storage in getattr(contract, "storage", ())
+        if type(getattr(storage, "declaration_id", None)) is int
+    }
+    address_cache: dict[tuple[str, ...], str | None] = {}
+
+    def address(path: tuple[str, ...]) -> str | None:
+        if path not in address_cache:
+            try:
+                resolved = _runtime_instance_address(
+                    runtime,
+                    _instance_id_for_path(path),
+                )
+            except (KeyError, ValueError):
+                resolved = None
+            address_cache[path] = (
+                resolved.lower() if isinstance(resolved, str) else None
+            )
+        return address_cache[path]
+
+    def fact(action: object) -> object | None:
+        return functions.get(str(getattr(action, "function_id", "")))
+
+    def receiver_address(action: object, call: object) -> str | None:
+        name = getattr(call, "receiver_name", None)
+        if not isinstance(name, str) or not name:
+            return None
+        declaration = getattr(call, "receiver_declaration", None)
+        if (
+            storage_declarations
+            and type(declaration) is int
+            and declaration not in storage_declarations
+        ):
+            return None
+        path = (*tuple(getattr(action, "target_path", ())), f"{name}()")
+        return address(path)
+
+    def token_inputs(action: object) -> tuple[str, ...]:
+        function = fact(action)
+        if function is None:
+            return ()
+        return tuple(
+            asset
+            for call in getattr(function, "calls", ())
+            if getattr(call, "member_name", None) == "transferFrom"
+            and (asset := receiver_address(action, call)) is not None
+        )
+
+    def token_outputs(action: object) -> tuple[tuple[int, str], ...]:
+        function = fact(action)
+        if function is None:
+            return ()
+        priorities = {"mint": 0, "transfer": 1}
+        return tuple(
+            (priorities[member], asset)
+            for call in getattr(function, "calls", ())
+            if (member := getattr(call, "member_name", None)) in priorities
+            and (asset := receiver_address(action, call)) is not None
+        )
+
+    def producer(asset: str, consumer_id: str) -> object | None:
+        ranked: list[tuple[object, ...]] = []
+        for candidate in actions.values():
+            if candidate.id == consumer_id:
+                continue
+            matching = tuple(
+                priority
+                for priority, output_asset in token_outputs(candidate)
+                if output_asset == asset
+            )
+            if not matching:
+                continue
+            ranked.append(
+                (
+                    min(matching),
+                    len(token_inputs(candidate)),
+                    bool(getattr(candidate, "callback_enabled", False)),
+                    len(tuple(getattr(candidate, "target_path", ()))),
+                    -float(getattr(candidate, "utility", 0.0)),
+                    str(candidate.id),
+                    candidate,
+                )
+            )
+        return min(ranked)[-1] if ranked else None
+
+    def approval(asset: str) -> object | None:
+        matches = [
+            candidate
+            for candidate in actions.values()
+            if candidate.signature == "approve(address,uint256)"
+            and address(tuple(candidate.target_path)) == asset
+        ]
+        return min(
+            matches,
+            key=lambda item: (
+                len(item.target_path),
+                bool(item.callback_enabled),
+                item.id,
+            ),
+            default=None,
+        )
+
+    def expand(action: object, active: frozenset[str] = frozenset()) -> tuple[str, ...]:
+        if action.id in active:
+            return ()
+        chain: list[str] = []
+        next_active = active | frozenset({action.id})
+        for asset in token_inputs(action):
+            source = producer(asset, action.id)
+            if source is not None:
+                chain.extend(expand(source, next_active))
+            permit = approval(asset)
+            if permit is not None and permit.id not in chain:
+                chain.append(permit.id)
+        if action.id not in chain:
+            chain.append(action.id)
+        return tuple(chain)
+
+    hypotheses: set[tuple[str, ...]] = set()
+    for endpoint in actions.values():
+        endpoint_fact = fact(endpoint)
+        if endpoint_fact is None:
+            continue
+        relevant = set(getattr(endpoint_fact, "storage_reads", ()))
+        if not relevant:
+            continue
+        endpoint_address = address(tuple(endpoint.target_path))
+        predecessors = [
+            candidate
+            for candidate in actions.values()
+            if candidate.id != endpoint.id
+            and not candidate.callback_enabled
+            and address(tuple(candidate.target_path)) == endpoint_address
+            and set(candidate.storage_writes).intersection(relevant)
+        ]
+        predecessors.sort(
+            key=lambda item: (
+                -len(set(item.storage_writes).intersection(relevant)),
+                -item.utility,
+                item.id,
+            )
+        )
+        for predecessor in predecessors:
+            sequence = (*expand(predecessor), *expand(endpoint))
+            deduplicated = tuple(dict.fromkeys(sequence))
+            if 1 < len(deduplicated) <= model.max_sequence_length:
+                hypotheses.add(deduplicated)
+
+    def rank(sequence: tuple[str, ...]) -> tuple[object, ...]:
+        endpoint = actions[sequence[-1]]
+        return (
+            int(bool(endpoint.target_path)),
+            -len(sequence),
+            -sum(bool(actions[action_id].callback_enabled) for action_id in sequence),
+            -endpoint.utility,
+            sequence,
+        )
+
+    return tuple(sorted(hypotheses, key=rank))
+
+
+def _hypothesis_skeleton(
+    model: Track04SearchModel,
+    sequence: tuple[str, ...],
+) -> object:
+    from qprover.models import ActionStep, Candidate
+
+    actions = {action.id: action for action in model.actions}
+    grouped = _variants_by_action(model)
+    steps = []
+    for action_id in sequence:
+        action = actions[action_id]
+        variant = grouped[action_id][0]
+        steps.append(
+            ActionStep(
+                action_id=action_id,
+                target_id=_instance_id_for_path(action.target_path),
+                signature=variant.signature,
+                sender_slot=0,
+                args=variant.args,
+                value_wei=variant.value_wei,
+            )
+        )
+    return Candidate(tuple(steps))
+
+
 def _resolve_value_expr(value: object, runtime: object) -> object:
     if isinstance(value, Const):
         return value.value
@@ -518,11 +723,12 @@ def _runtime_argument(value: object, abi_type: str, runtime: object) -> object:
     return value
 
 
-def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
+def _runtime_call(
+    model: Track04SearchModel, step: object, runtime: object
+) -> RuntimeCall:
     from web3 import Web3
 
     actions = {action.id: action for action in model.actions}
-    calls: list[RuntimeCall] = []
 
     def encode_call(
         target_instance_id: str,
@@ -545,41 +751,52 @@ def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
             calldata="0x" + (selector + encoded).hex(),
         )
 
-    for step in candidate.steps:
-        action = actions[step.action_id]
-        target_instance_id = getattr(
-            step,
-            "target_instance_id",
-            _instance_id_for_path(action.target_path),
-        )
-        primary = encode_call(
-            target_instance_id,
-            action.signature,
-            tuple(step.args),
-            int(step.value_wei),
-        )
-        callback = getattr(step, "callback_program", None)
-        if callback is not None:
-            nested = tuple(
-                encode_call(
-                    instruction.target.instance_id
-                    if isinstance(instruction.target, ContractAddress)
-                    else "instance:root",
-                    instruction.signature,
-                    instruction.args,
-                    int(_resolve_value_expr(instruction.value, runtime)),
-                )
-                for instruction in callback.instructions
+    action = actions[step.action_id]
+    target_instance_id = getattr(
+        step,
+        "target_instance_id",
+        _instance_id_for_path(action.target_path),
+    )
+    primary = encode_call(
+        target_instance_id,
+        action.signature,
+        tuple(step.args),
+        int(step.value_wei),
+    )
+    callback = getattr(step, "callback_program", None)
+    if callback is not None:
+        nested = tuple(
+            encode_call(
+                instruction.target.instance_id
+                if isinstance(instruction.target, ContractAddress)
+                else "instance:root",
+                instruction.signature,
+                instruction.args,
+                int(_resolve_value_expr(instruction.value, runtime)),
             )
-            primary = RuntimeCall(
-                target=primary.target,
-                value_wei=primary.value_wei,
-                calldata=primary.calldata,
-                callback_program=nested,
-                callback_depth_budget=callback.depth_budget,
-            )
-        calls.append(primary)
-    return tuple(calls)
+            for instruction in callback.instructions
+        )
+        primary = RuntimeCall(
+            target=primary.target,
+            value_wei=primary.value_wei,
+            calldata=primary.calldata,
+            callback_program=nested,
+            callback_depth_budget=callback.depth_budget,
+        )
+    return primary
+
+
+def _runtime_call_builders(model: Track04SearchModel, candidate: object):
+    return tuple(
+        lambda runtime, step=step: _runtime_call(model, step, runtime)
+        for step in candidate.steps
+    )
+
+
+def _runtime_calls(model: Track04SearchModel, candidate, runtime: object):
+    return tuple(
+        builder(runtime) for builder in _runtime_call_builders(model, candidate)
+    )
 
 
 def _record_final_proof(
@@ -590,7 +807,8 @@ def _record_final_proof(
         "PROVEN"
         if verification.proven
         else "ERROR"
-        if verification.category in {"infrastructure", "unsupported_deploy"}
+        if verification.category
+        in {"forge_error", "infrastructure", "unsupported_deploy"}
         else "NOT_PROVEN"
     )
     ledger.lines.append(
@@ -613,6 +831,8 @@ def _record_attempt(
     ledger: _AttemptLedger,
     candidate,
     verification: VerificationResult,
+    *,
+    strategy: str = "portfolio",
 ) -> None:
     result_name = {
         "proven": "PROVEN",
@@ -629,7 +849,7 @@ def _record_attempt(
             (
                 f"attempt={ledger.attempts}",
                 "stage=search",
-                "strategy=portfolio",
+                f"strategy={strategy}",
                 f"result={result_name}",
                 f"violated={verification.violated_predicate}",
                 f"candidate={candidate.canonical_id}",
@@ -660,6 +880,7 @@ def _run_search(
     from qprover.search.controller import SearchController
 
     frontier = StateFrontier()
+    active_strategy = "portfolio"
 
     def record_state(candidate: object, runtime_result: object) -> None:
         fingerprint = getattr(runtime_result, "state_fingerprint", None)
@@ -745,9 +966,15 @@ def _run_search(
                 )
             else:
                 try:
-                    runtime_result = runtime.execute(
-                        _runtime_calls(model, candidate, runtime)
-                    )
+                    lazy_execute = getattr(runtime, "execute_lazy", None)
+                    if callable(lazy_execute):
+                        runtime_result = lazy_execute(
+                            _runtime_call_builders(model, candidate)
+                        )
+                    else:
+                        runtime_result = runtime.execute(
+                            _runtime_calls(model, candidate, runtime)
+                        )
                 except RuntimeCandidateRevert as error:
                     ledger.attempts += 1
                     verification = VerificationResult(
@@ -756,7 +983,12 @@ def _run_search(
                         "runtime_revert",
                         f"revert_step={error.step}",
                     )
-                    _record_attempt(ledger, candidate, verification)
+                    _record_attempt(
+                        ledger,
+                        candidate,
+                        verification,
+                        strategy=active_strategy,
+                    )
                     return Evaluation(
                         outcome=Outcome.REVERT,
                         transaction_count=error.step + 1,
@@ -782,7 +1014,12 @@ def _run_search(
                 )
 
             ledger.attempts += 1
-            _record_attempt(ledger, candidate, verification)
+            _record_attempt(
+                ledger,
+                candidate,
+                verification,
+                strategy=active_strategy,
+            )
             if runtime is not None:
                 record_state(candidate, runtime_result)
 
@@ -856,6 +1093,29 @@ def _run_search(
     if attempt_budget <= 0:
         return False
 
+    if runtime is not None:
+        active_strategy = "semantic"
+        semantic_problem = _skeleton_problem(model)
+        semantic_attempts = 0
+        semantic_limit = min(1, max(0, attempt_budget - ledger.attempts - 1))
+        for sequence in _semantic_hypotheses(model, runtime):
+            if semantic_attempts >= semantic_limit or deadline - clock() <= 0:
+                break
+            skeleton = _hypothesis_skeleton(model, sequence)
+            if not candidate_is_valid(semantic_problem, skeleton):
+                continue
+            evaluation = Evaluator().evaluate(skeleton)
+            semantic_attempts += 1
+            if (
+                evaluation.outcome is Outcome.VIOLATION
+                and ledger.winner_code is not None
+            ):
+                return True
+            if evaluation.outcome is Outcome.INFRA_ERROR:
+                return False
+
+    active_strategy = "portfolio"
+
     for horizon in _search_horizons(model):
         remaining_attempts = attempt_budget - ledger.attempts
         remaining_wall = math.floor(deadline - clock())
@@ -920,6 +1180,10 @@ def run_track04(
     contract = Path(contract_path).resolve()
     invariants = Path(invariants_path).resolve()
     output = Path(out_dir).resolve()
+    _write_outputs(
+        output,
+        _AttemptLedger(lines=[], codes={}, fatal_error=True),
+    )
     if not contract.is_file():
         raise FileNotFoundError(f"contract not found: {contract}")
     if not invariants.is_file():
@@ -999,9 +1263,15 @@ def run_track04(
                     if deadline - clock() <= 0:
                         return False
                     try:
-                        result = runtime.execute(
-                            _runtime_calls(model, proposed, runtime)
-                        )
+                        lazy_execute = getattr(runtime, "execute_lazy", None)
+                        if callable(lazy_execute):
+                            result = lazy_execute(
+                                _runtime_call_builders(model, proposed)
+                            )
+                        else:
+                            result = runtime.execute(
+                                _runtime_calls(model, proposed, runtime)
+                            )
                     except RuntimeCandidateRevert:
                         return False
                     return not result.all_hold
@@ -1034,6 +1304,7 @@ def run_track04(
                 )
                 _record_final_proof(ledger, final_proof)
                 if final_proof.category in {
+                    "forge_error",
                     "infrastructure",
                     "unsupported_deploy",
                 }:

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import qprover.trust404_runner as runner
+from qprover.models import ActionStep, Candidate
 from qprover.trust404 import Track04Action, Track04SearchModel, Track04Variant
 from qprover.trust404_harness import VerificationResult
 
@@ -320,3 +321,153 @@ def test_fast_runtime_only_violation_is_not_final_success(
     log = (out / "attempts.log").read_text(encoding="utf-8")
     assert "stage=final-proof" in log
     assert "result=NOT_PROVEN" in log
+
+
+def test_minimizer_replay_resolves_each_call_against_live_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, invariants, manifest = _files(tmp_path)
+    out = tmp_path / "out"
+    candidate = Candidate(
+        (
+            ActionStep(
+                action_id="call:alpha()",
+                target_id="instance:root",
+                signature="alpha()",
+                sender_slot=0,
+                args=(),
+                value_wei=0,
+            ),
+        )
+    )
+    lazy_replays: list[int] = []
+
+    class FakeRuntime:
+        target_address = "0x" + "11" * 20
+
+        def execute(self, _calls):
+            raise AssertionError("minimization must not eagerly resolve calls")
+
+        def execute_lazy(self, builders):
+            lazy_replays.append(len(builders))
+            return SimpleNamespace(all_hold=False)
+
+    monkeypatch.setattr(runner, "build_search_model", lambda *_args: _model())
+
+    def fake_search(**kwargs):
+        kwargs["ledger"].winner_candidate = candidate
+        kwargs["ledger"].winner_code = "candidate-code"
+        return True
+
+    def fake_minimize(seed, still_violates, **_kwargs):
+        assert still_violates(seed) is True
+        return SimpleNamespace(candidate=seed)
+
+    monkeypatch.setattr(runner, "_run_search", fake_search)
+    monkeypatch.setattr(runner, "minimize_track04_candidate", fake_minimize)
+    monkeypatch.setattr(runner, "render_candidate", lambda *_args: "final-code")
+
+    @contextmanager
+    def runtime_factory(**_kwargs):
+        yield FakeRuntime()
+
+    exit_code = runner.run_track04(
+        target,
+        invariants,
+        manifest,
+        out,
+        timeout_seconds=30,
+        seed=7,
+        max_attempts=2,
+        harness_dir=tmp_path,
+        verifier=lambda *_args, **_kwargs: VerificationResult(
+            True,
+            "checkAll",
+            "proven",
+        ),
+        clock=lambda: 0.0,
+        runtime_factory=runtime_factory,
+    )
+
+    assert exit_code == 0
+    assert lazy_replays == [1]
+
+
+def test_final_organizer_execution_failure_is_error_not_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, invariants, manifest = _files(tmp_path)
+    out = tmp_path / "out"
+    fake_runtime = SimpleNamespace(target_address="0x" + "11" * 20)
+
+    monkeypatch.setattr(runner, "build_search_model", lambda *_args: _model())
+
+    def fake_search(**kwargs):
+        kwargs["ledger"].winner_code = "generated-exploit"
+        return True
+
+    monkeypatch.setattr(runner, "_run_search", fake_search)
+
+    @contextmanager
+    def runtime_factory(**_kwargs):
+        yield fake_runtime
+
+    exit_code = runner.run_track04(
+        target,
+        invariants,
+        manifest,
+        out,
+        timeout_seconds=30,
+        seed=7,
+        max_attempts=2,
+        harness_dir=tmp_path,
+        verifier=lambda *_args, **_kwargs: VerificationResult(
+            False,
+            "",
+            "forge_error",
+            "compiler rejected generated exploit",
+        ),
+        clock=lambda: 0.0,
+        runtime_factory=runtime_factory,
+    )
+
+    result = json.loads((out / "result.json").read_text(encoding="utf-8"))
+    assert exit_code == 2
+    assert result["status"] == "ERROR"
+    assert "result=ERROR" in (out / "attempts.log").read_text(encoding="utf-8")
+
+
+def test_early_failure_replaces_stale_proven_outputs_with_error_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, invariants, manifest = _files(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "Exploit.sol").write_text("stale proven exploit", encoding="utf-8")
+    (out / "result.json").write_text('{"status":"PROVEN"}\n', encoding="utf-8")
+
+    def fail_analysis(*_args, **_kwargs):
+        raise ValueError("analysis failed")
+
+    monkeypatch.setattr(runner, "build_search_model", fail_analysis)
+
+    with pytest.raises(ValueError, match="analysis failed"):
+        runner.run_track04(
+            target,
+            invariants,
+            manifest,
+            out,
+            timeout_seconds=30,
+            seed=7,
+            max_attempts=2,
+        )
+
+    result = json.loads((out / "result.json").read_text(encoding="utf-8"))
+    exploit = (out / "Exploit.sol").read_text(encoding="utf-8")
+    assert result["status"] == "ERROR"
+    assert result["proof"]["organizer_harness_reproduced"] is False
+    assert "stale proven exploit" not in exploit
+    assert "function run(address) external payable {}" in exploit

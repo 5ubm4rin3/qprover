@@ -180,3 +180,37 @@ def test_verify_exploit_uses_final_agent_result_not_earlier_spoof(
     assert result.proven is False
     assert result.violated_predicate == ""
     assert result.category == "not_proven"
+
+
+def test_verify_exploit_rejects_proven_predicate_not_bound_by_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(tmp_path)
+    target = tmp_path / "src" / "Demo.sol"
+    target.parent.mkdir()
+    target.write_text("contract Demo {}", encoding="utf-8")
+    invariants = tmp_path / "Invariants.sol"
+    invariants.write_text("contract Invariants {}", encoding="utf-8")
+    hdir = _harness(tmp_path)
+
+    def runner(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args[0],
+            0,
+            "AGENT_RESULT PROVEN undeclaredPredicate\n",
+            "",
+        )
+
+    result = verify_exploit(
+        hdir,
+        target,
+        invariants,
+        "pragma solidity 0.8.24; contract Exploit { function run(address) external payable {} }",
+        manifest,
+        timeout_seconds=12,
+        runner=runner,
+    )
+
+    assert result.proven is False
+    assert result.category == "forge_error"
+    assert "manifest" in result.note

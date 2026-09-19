@@ -213,9 +213,9 @@ Current release scope:
 - no public-chain transaction broadcasting;
 - no claim that solver exhaustion proves safety;
 - no quantum-advantage claim;
-- no exact TRUST404 grader-schema claim until the participant package is available.
+- official Track 04 CLI and participant-package format validation, with unsupported setup semantics rejected closed.
 
-A future TRUST404 adapter should preserve/hashes organizer input bytes, translate only supported semantics and fail closed on unsupported invariants/setup rules.
+The TRUST404 adapter binds the supplied target, invariants and manifest throughout analysis and fresh final proof, translates only supported semantics and fails closed on unsupported deployment/setup rules.
 
 
 ## Track 04 v2.5 property-directed path
