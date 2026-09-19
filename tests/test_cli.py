@@ -82,8 +82,10 @@ def test_track04_cli_runs_default_workspace_and_manifest_budgets(
         encoding="utf-8",
     )
 
+    import qprover.cli as cli_module
     import qprover.trust404_runner as runner
 
+    monkeypatch.setattr(cli_module, "_ensure_track04_harness", lambda _workspace: None)
     observed: dict[str, object] = {}
 
     def fake_run(contract, invariants, manifest, out, **kwargs):
@@ -163,7 +165,10 @@ def test_track04_cli_falls_back_to_bundled_demo(
     )
     (tmp_path / "trust404" / "target").mkdir(parents=True)
 
+    import qprover.cli as cli_module
     import qprover.trust404_runner as runner
+
+    monkeypatch.setattr(cli_module, "_ensure_track04_harness", lambda _workspace: None)
 
     def fake_run(_contract, _invariants, _manifest, out, **_kwargs):
         output = Path(out)
