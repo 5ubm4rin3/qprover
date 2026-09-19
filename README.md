@@ -99,7 +99,9 @@ QProver는 기존 QProver core를 기반으로 확장한 프로젝트입니다. 
 
 평소에는 공식 CLI의 모든 경로와 budget option을 직접 적을 필요가 없습니다.
 
-주최 측에서 받은 Track 04 package를 그대로 `trust404/target/` 아래에 넣습니다.
+아무 준비 없이 먼저 동작을 확인하려면 repository root에서 바로 `make track04`를 실행하면 됩니다. `trust404/target/`이 비어 있으면 bundled demo target을 자동으로 사용합니다.
+
+주최 측에서 받은 실제 Track 04 package가 있다면 그대로 `trust404/target/` 아래에 넣으면, 다음 실행부터는 demo 대신 실제 package를 자동으로 사용합니다.
 
 ```text
 trust404/
@@ -111,7 +113,7 @@ trust404/
 └── results/
 ```
 
-그다음 repository root에서 **한 줄만 실행**합니다.
+실행은 항상 **한 줄**입니다.
 
 ```bash
 make track04
@@ -123,7 +125,7 @@ make track04
 uv run qprover track04
 ```
 
-QProver는 `manifest.json`에서 target source, timeout, seed, max-attempts를 자동으로 읽고 실행합니다.
+QProver는 `manifest.json`에서 target source, timeout, seed, max-attempts를 자동으로 읽고 실행합니다. 출력의 `package_source`가 `bundled-demo`이면 내장 demo를, `trust404/target`이면 주최 측 package를 실행한 것입니다.
 
 결과는 기본적으로 repository 내부의 다음 위치에 저장됩니다.
 
@@ -137,6 +139,11 @@ trust404/results/latest/
 따라서 가장 일반적인 사용 흐름은 이것뿐입니다.
 
 ```text
+처음 테스트:
+1. make track04
+2. trust404/results/latest/result.json 확인
+
+실제 대회 target:
 1. organizer package → trust404/target/
 2. make track04
 3. trust404/results/latest/result.json 확인
