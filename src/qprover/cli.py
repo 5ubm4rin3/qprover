@@ -536,6 +536,79 @@ def _demo(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
+_TRACK04_FORGE_STD_REV = "bf647bd6046f2f7da30d0c2bf435e5c76a780c1b"
+
+
+def _run_bootstrap_command(command: list[str], *, cwd: Path | None = None) -> None:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ValueError(f"could not execute {command[0]!r}") from error
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout).strip().splitlines()
+    message = detail[-1] if detail else f"exit code {result.returncode}"
+    raise ValueError(f"Track04 bootstrap failed: {message[:300]}")
+
+
+def _ensure_track04_harness(workspace: Path) -> None:
+    harness = workspace / "trust404" / "harness"
+    artifact = harness / "out" / "SearchAttacker.sol" / "SearchAttacker.json"
+    if artifact.is_file():
+        return
+    if shutil.which("forge") is None:
+        raise ValueError("forge is required for Track04; install Foundry first")
+
+    forge_std = harness / "lib" / "forge-std"
+    git_dir = forge_std / ".git"
+    if not git_dir.is_dir():
+        if shutil.which("git") is None:
+            raise ValueError("git is required to prepare pinned forge-std")
+        print("[qprover] preparing pinned forge-std...", file=sys.stderr)
+        shutil.rmtree(forge_std, ignore_errors=True)
+        forge_std.mkdir(parents=True, exist_ok=True)
+        _run_bootstrap_command(["git", "init", "-q"], cwd=forge_std)
+        _run_bootstrap_command(
+            ["git", "remote", "add", "origin", "https://github.com/foundry-rs/forge-std"],
+            cwd=forge_std,
+        )
+        _run_bootstrap_command(
+            ["git", "fetch", "-q", "--depth", "1", "origin", _TRACK04_FORGE_STD_REV],
+            cwd=forge_std,
+        )
+        _run_bootstrap_command(
+            ["git", "checkout", "-q", "--detach", "FETCH_HEAD"], cwd=forge_std
+        )
+    else:
+        current = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=forge_std,
+            text=True,
+            capture_output=True,
+            check=False,
+        ).stdout.strip()
+        if current != _TRACK04_FORGE_STD_REV:
+            print("[qprover] restoring pinned forge-std...", file=sys.stderr)
+            _run_bootstrap_command(
+                ["git", "fetch", "-q", "--depth", "1", "origin", _TRACK04_FORGE_STD_REV],
+                cwd=forge_std,
+            )
+            _run_bootstrap_command(
+                ["git", "checkout", "-q", "--detach", "FETCH_HEAD"], cwd=forge_std
+            )
+
+    print("[qprover] building Track04 harness...", file=sys.stderr)
+    _run_bootstrap_command(["forge", "build", "--root", str(harness)])
+    if not artifact.is_file():
+        raise ValueError("Track04 harness build did not produce SearchAttacker artifact")
+
+
 def _find_track04_file(package: Path, name: str) -> Path:
     direct = package / name
     if direct.is_file():
@@ -562,6 +635,7 @@ def _track04(args: argparse.Namespace) -> int:
     from qprover.trust404_runner import _default_runtime_factory, run_track04
 
     workspace = Path(args.workspace).resolve()
+    _ensure_track04_harness(workspace)
     if args.package:
         package = Path(args.package).expanduser().resolve()
         package_source = "explicit"
