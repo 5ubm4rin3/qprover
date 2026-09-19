@@ -456,6 +456,12 @@ CI에서는 이 외에도 exact submission Docker image를 build하고, bundled 
 
 `attempts.log`에는 wall-clock timestamp를 넣지 않습니다.
 
+최종 root `Exploit.sol`은 pinned linux/amd64 submission image, `--network=none`,
+untouched official Harness 조건에서 동일한 PoC를 fresh deployment로 10회 독립
+replay했습니다. 10회 모두 `ownerUnchanged`를 첫 위반 predicate로 재현했습니다.
+이는 generator 10회 비교가 아니라 official `DETERMINISM.md`가 요구하는 same-PoC
+N=10 replay입니다.
+
 ## Benchmark Note
 
 `benchmarks/`와 `docs/BENCHMARK.md`에는 기존 QProver core / search backend 비교 실험이 포함되어 있습니다.
@@ -492,6 +498,7 @@ QProver는 organizer-provided, owned, 또는 명시적으로 허가된 security 
 - `docs/BENCHMARK.md` — benchmark methodology, historical result, limitation
 - `docs/DEMO.md` — demo flow
 - `docs/PRESENTATION.md` — presentation notes
+- `docs/TRUST404_FINAL_EVALUATION.md` — public, synthetic holdout, determinism 및 proof-integrity evidence
 
 ## License
 

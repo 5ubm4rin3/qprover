@@ -214,6 +214,64 @@ def test_predicate_not_called_from_check_all_is_unknown() -> None:
     assert fact.known is False
 
 
+def test_check_all_order_ignores_non_predicate_helper_calls() -> None:
+    target = _parameter("target", 80)
+    helper = _function(
+        "normalize",
+        81,
+        body={"nodeType": "Block", "id": 82, "statements": []},
+    )
+    predicate = _function(
+        "positionSafe",
+        83,
+        parameters=(target,),
+        body={"nodeType": "Block", "id": 84, "statements": []},
+    )
+    check_all = _function(
+        "checkAll",
+        85,
+        parameters=(_parameter("target", 86),),
+        body={
+            "nodeType": "Block",
+            "id": 87,
+            "statements": [
+                {
+                    "nodeType": "ExpressionStatement",
+                    "expression": {
+                        "nodeType": "FunctionCall",
+                        "id": 88,
+                        "src": "10:1:0",
+                        "expression": {
+                            "nodeType": "Identifier",
+                            "referencedDeclaration": 81,
+                        },
+                    },
+                },
+                {
+                    "nodeType": "ExpressionStatement",
+                    "expression": {
+                        "nodeType": "FunctionCall",
+                        "id": 89,
+                        "src": "20:1:0",
+                        "expression": {
+                            "nodeType": "Identifier",
+                            "referencedDeclaration": 83,
+                        },
+                    },
+                },
+            ],
+        },
+    )
+
+    analysis = extract_property_analysis(
+        (_source_unit((helper, predicate, check_all)),),
+        invariants_source_name="Invariants.sol",
+        predicates=("positionSafe",),
+    )
+
+    assert analysis.check_all_predicates == ("positionSafe",)
+
+
 def test_balance_property_slice_prioritizes_native_value_out() -> None:
     properties = PropertyAnalysis(
         invariants_source_name="Invariants.sol",

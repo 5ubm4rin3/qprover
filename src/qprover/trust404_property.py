@@ -38,6 +38,7 @@ class PropertyAnalysis:
     invariants_source_name: str
     contract_name: str | None
     facts: tuple[PropertyFact, ...]
+    check_all_predicates: tuple[str, ...] = ()
 
     def fact(self, predicate_name: str) -> PropertyFact:
         matches = [item for item in self.facts if item.predicate_name == predicate_name]
@@ -309,6 +310,40 @@ def _bound_predicate_ids(functions: Sequence[Mapping[str, Any]]) -> frozenset[in
     return frozenset(identifiers)
 
 
+def _check_all_predicate_order(
+    functions: Sequence[Mapping[str, Any]],
+    predicate_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    check_all = [item for item in functions if item.get("name") == "checkAll"]
+    if len(check_all) != 1:
+        return ()
+    names_by_id = {
+        int(item["id"]): str(item.get("name"))
+        for item in functions
+        if isinstance(item.get("id"), int) and item.get("name") in predicate_names
+    }
+    calls: list[tuple[int, str]] = []
+    for node in _walk(check_all[0].get("body")):
+        if node.get("nodeType") != "FunctionCall":
+            continue
+        expression = node.get("expression")
+        declaration = (
+            expression.get("referencedDeclaration")
+            if isinstance(expression, Mapping)
+            else None
+        )
+        name = names_by_id.get(declaration) if isinstance(declaration, int) else None
+        source = node.get("src")
+        if name is None or not isinstance(source, str):
+            continue
+        try:
+            offset = int(source.split(":", 1)[0])
+        except ValueError:
+            continue
+        calls.append((offset, name))
+    return tuple(name for _, name in sorted(calls))
+
+
 def extract_property_analysis(
     source_units: Sequence[object],
     *,
@@ -331,6 +366,7 @@ def extract_property_analysis(
         by_name.setdefault(str(function.get("name")), []).append(function)
     constants = _constant_values(contract)
     bound_ids = _bound_predicate_ids(functions)
+    check_all_predicates = _check_all_predicate_order(functions, predicate_names)
     contract_name = str(contract.get("name"))
 
     facts: list[PropertyFact] = []
@@ -400,4 +436,5 @@ def extract_property_analysis(
         invariants_source_name=invariants_source_name,
         contract_name=contract_name,
         facts=tuple(facts),
+        check_all_predicates=check_all_predicates,
     )

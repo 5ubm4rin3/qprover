@@ -139,6 +139,38 @@ def test_bounded_parameter_constraint_produces_z3_model() -> None:
     assert any(getattr(value, "value", None) == 7 for value in values)
 
 
+def test_exact_parameter_constraint_precedes_unrelated_runtime_read() -> None:
+    action = _action("call:advance(uint256)", ("uint256",))
+    constraint = SimpleNamespace(
+        function_id=action.function_id,
+        parameter_index=0,
+        operator="==",
+        constant=37,
+    )
+    unrelated = SimpleNamespace(
+        instance_id="instance:root",
+        signature="counter()",
+        argument_mode="none",
+        reads=("storage:counter",),
+    )
+    analysis = SimpleNamespace(
+        actions=(action,),
+        parameter_constraints=(constraint,),
+        source_constants=(37,),
+    )
+    state = SimpleNamespace(
+        runtime_uint_sources=(unrelated,),
+        previous_returns=(),
+    )
+    skeleton = SimpleNamespace(
+        steps=(_step(action.id, "instance:root"),),
+    )
+
+    completed = complete_parameters(skeleton, state, analysis, limit=1)
+
+    assert completed[0].steps[0].args == (Const(37),)
+
+
 def test_token_input_amount_prefers_recent_asset_balance_over_reserve_read() -> None:
     approve = _action("call:approve(address,uint256)", ("address", "uint256"))
     consume = _action(

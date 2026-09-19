@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 import qprover.trust404 as trust404
-from qprover.trust404 import Track04Manifest, build_search_model
+from qprover.trust404 import (
+    ManifestContractError,
+    Track04Manifest,
+    build_search_model,
+)
 from qprover.trust404_property import PropertyAnalysis, PropertyFact
 
 
@@ -162,3 +166,64 @@ def test_build_search_model_uses_property_relevance_in_action_utilities(
     model = build_search_model(target, invariants, _manifest(tmp_path))
 
     assert model.utilities["call:alpha()"] > model.utilities["call:beta()"]
+
+
+@pytest.mark.parametrize(
+    ("function_id", "bound_from_check_all"),
+    ((None, False), ("function:Invariants.sol:Invariants:20:solvent(address)", False)),
+)
+def test_build_search_model_rejects_missing_or_unbound_manifest_predicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    function_id: str | None,
+    bound_from_check_all: bool,
+) -> None:
+    target, invariants = _sources(tmp_path)
+    analysis = _analysis()
+    invalid_fact = PropertyFact(
+        predicate_name="solvent",
+        function_id=function_id,
+        target_parameter_index=0,
+        target_balance_read=True,
+        target_calls=(),
+        constants=(),
+        comparison_hints=(),
+        source_span=None,
+        bound_from_check_all=bound_from_check_all,
+        known=False,
+    )
+    analysis.property_analysis = PropertyAnalysis(
+        invariants_source_name="Invariants.sol",
+        contract_name="Invariants",
+        facts=(invalid_fact,),
+    )
+    monkeypatch.setattr(
+        trust404,
+        "compile_track04_target",
+        lambda *_args, **_kwargs: analysis,
+    )
+
+    with pytest.raises(ManifestContractError, match="predicate"):
+        build_search_model(target, invariants, _manifest(tmp_path))
+
+
+def test_build_search_model_rejects_manifest_predicate_order_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, invariants = _sources(tmp_path)
+    analysis = _analysis()
+    analysis.property_analysis = PropertyAnalysis(
+        invariants_source_name="Invariants.sol",
+        contract_name="Invariants",
+        facts=analysis.property_analysis.facts,
+        check_all_predicates=("other", "solvent"),
+    )
+    monkeypatch.setattr(
+        trust404,
+        "compile_track04_target",
+        lambda *_args, **_kwargs: analysis,
+    )
+
+    with pytest.raises(ManifestContractError, match="order"):
+        build_search_model(target, invariants, _manifest(tmp_path))

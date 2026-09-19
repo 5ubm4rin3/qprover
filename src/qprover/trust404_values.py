@@ -400,6 +400,18 @@ def _uint_domain(
         positive_constants[0] if len(steps) > 1 and positive_constants else None
     )
 
+    constraints = _constraints(analysis, action)
+    exact_models = _constraint_models(
+        abi_type,
+        parameter_index,
+        tuple(item for item in constraints if getattr(item, "operator", None) == "=="),
+        limit,
+    )
+    for value in exact_models:
+        add(value)
+    if len(result) >= limit:
+        return tuple(result[:limit])
+
     for source in sorted(sources, key=rank):
         mode = getattr(source, "argument_mode", "none")
         args: tuple[ValueExpr, ...]
@@ -433,7 +445,7 @@ def _uint_domain(
     for value in _constraint_models(
         abi_type,
         parameter_index,
-        _constraints(analysis, action),
+        constraints,
         limit,
     ):
         add(value)

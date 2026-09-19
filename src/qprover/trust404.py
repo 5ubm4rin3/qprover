@@ -645,6 +645,29 @@ def build_search_model(
         predicates=manifest.predicates,
     )
     property_analysis = getattr(analysis, "property_analysis", None)
+    if property_analysis is not None:
+        facts_by_predicate: dict[str, list[object]] = {}
+        for fact in getattr(property_analysis, "facts", ()):
+            facts_by_predicate.setdefault(str(fact.predicate_name), []).append(fact)
+        for predicate in manifest.predicates:
+            matches = facts_by_predicate.get(predicate, [])
+            if len(matches) != 1 or getattr(matches[0], "function_id", None) is None:
+                raise ManifestContractError(
+                    f"manifest predicate is not declared exactly once: {predicate}"
+                )
+            if not bool(getattr(matches[0], "bound_from_check_all", False)):
+                raise ManifestContractError(
+                    f"manifest predicate is not bound by checkAll: {predicate}"
+                )
+        check_all_predicates = tuple(
+            getattr(property_analysis, "check_all_predicates", ())
+        )
+        if check_all_predicates and check_all_predicates != manifest.predicates:
+            raise ManifestContractError(
+                "manifest predicate order does not match checkAll: "
+                f"manifest={manifest.predicates!r}, "
+                f"checkAll={check_all_predicates!r}"
+            )
     property_slices = (
         build_property_slices(
             property_analysis,
