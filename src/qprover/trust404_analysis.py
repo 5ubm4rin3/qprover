@@ -419,4 +419,5 @@ def compile_track04_target(
             source_units=source_units,
             property_analysis=property_analysis,
             artifacts=artifacts,
+            setup_source=setup_source,
         )
