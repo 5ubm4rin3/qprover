@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from test_benchmark import config, matrix, suite
 
-from qprover.cli import build_parser, main
+from qprover.cli import _find_track04_file, build_parser, main
 
 
 def test_cli_exposes_required_noninteractive_commands() -> None:
@@ -19,8 +19,27 @@ def test_cli_exposes_required_noninteractive_commands() -> None:
         "replay",
         "benchmark",
         "report",
+        "track04",
         "demo",
     }
+
+
+def test_track04_cli_defaults_to_local_workspace() -> None:
+    args = build_parser().parse_args(["track04"])
+    assert args.package is None
+    assert args.out is None
+    assert args.timeout is None
+    assert args.seed is None
+    assert args.max_attempts is None
+
+
+def test_track04_file_discovery_prefers_direct_file(tmp_path: Path) -> None:
+    direct = tmp_path / "manifest.json"
+    nested = tmp_path / "nested" / "manifest.json"
+    nested.parent.mkdir()
+    direct.write_text("{}")
+    nested.write_text("{}")
+    assert _find_track04_file(tmp_path, "manifest.json") == direct.resolve()
 
 
 def test_doctor_json_emits_exactly_one_document(tmp_path: Path, capsys) -> None:
