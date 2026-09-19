@@ -1,0 +1,25 @@
+{
+  "schema": "trust404.track04.manifest/0.1",
+  "target": {
+    "name": "SafeVault",
+    "src": "src/SafeVault.sol",
+    "solc": "0.8.24",
+    "evm_version": "cancun"
+  },
+  "deploy": {
+    "mode": "local",
+    "constructor_args": [],
+    "value_wei": "10000000000000000000",
+    "setup": "Setup.s.sol"
+  },
+  "determinism": {
+    "block_number": 21000000,
+    "block_timestamp": 1735689600,
+    "seed": 42
+  },
+  "invariants": {
+    "contract": "Invariants.sol",
+    "predicates": ["vaultSolvent"]
+  },
+  "budget": { "timeout_sec": 300, "max_attempts": 5 }
+}

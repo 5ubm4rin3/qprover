@@ -1,8 +1,8 @@
 {
   "schema": "trust404.track04.manifest/0.1",
   "target": {
-    "name": "DemoTarget",
-    "src": "src/DemoTarget.sol",
+    "name": "NaiveOracle",
+    "src": "src/NaiveOracle.sol",
     "solc": "0.8.24",
     "evm_version": "cancun"
   },
@@ -12,18 +12,13 @@
     "value_wei": "0"
   },
   "determinism": {
-    "block_number": 12345,
-    "block_timestamp": 1700000000,
+    "block_number": 21000000,
+    "block_timestamp": 1735689600,
     "seed": 42
   },
   "invariants": {
     "contract": "Invariants.sol",
-    "predicates": [
-      "flagRemainsFalse"
-    ]
+    "predicates": ["protocolSolvent"]
   },
-  "budget": {
-    "timeout_sec": 60,
-    "max_attempts": 8
-  }
+  "budget": { "timeout_sec": 600, "max_attempts": 8 }
 }
