@@ -101,32 +101,16 @@ def test_deploy_runtime_uses_retained_compiler_artifacts() -> None:
     assert anvil.baselines == 1
 
 
-def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
-    target = "0x00000000000000000000000000000000000000a1"
-    setup = "0x00000000000000000000000000000000000000e4"
-    invariants = "0x00000000000000000000000000000000000000b2"
-    attacker = "0x00000000000000000000000000000000000000d3"
-
-    class SetupAnvil(_FakeAnvil):
-        def __init__(self) -> None:
-            super().__init__()
-            self.receipts = iter(
-                (
-                    {"status": "0x1", "contractAddress": setup},
-                    {"status": "0x1", "contractAddress": None},
-                    {"status": "0x1", "contractAddress": invariants},
-                    {"status": "0x1", "contractAddress": attacker},
-                )
-            )
-
-        def debug_trace(self, _transaction_hash: str):
-            encoded = Web3().codec.encode(["address"], [target])
-            return {"returnValue": "0x" + encoded.hex()}
-
+def test_deploy_runtime_reconstructs_manifest_target_when_setup_is_declared() -> None:
     target_artifact = _Artifact(
         compilation_target="src/Target.sol:Target",
         bytecode="0x6001600055",
-        abi=(),
+        abi=(
+            {
+                "type": "constructor",
+                "inputs": ({"name": "seed", "type": "uint256"},),
+            },
+        ),
         storage_layout={"storage": ()},
     )
     setup_artifact = _Artifact(
@@ -147,11 +131,11 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
         target_src="src/Target.sol",
         target_name="Target",
         invariants_contract="Invariants.sol",
-        constructor_args=(),
+        constructor_args=(7,),
         deploy_value_wei=123,
         setup="Setup.s.sol",
     )
-    anvil = SetupAnvil()
+    anvil = _FakeAnvil()
 
     runtime = deploy_runtime_from_artifacts(
         anvil,
@@ -160,7 +144,11 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
         search_attacker_bytecode="0x6003600055",
     )
 
-    assert runtime.target_address == target
-    assert runtime.invariants_address == invariants
-    assert runtime.attacker_address == attacker
-    assert anvil.balances == [(setup, 123), (attacker, 10**18)]
+    constructor = Web3().codec.encode(["uint256"], [7]).hex()
+    assert runtime.target_address == TARGET
+    assert runtime.invariants_address == INVARIANTS
+    assert runtime.attacker_address == ATTACKER
+    assert len(anvil.sent) == 3
+    assert anvil.sent[0]["data"] == "0x6001600055" + constructor
+    assert anvil.sent[0]["value"] == 123
+    assert anvil.balances == [(ATTACKER, 10**18)]
