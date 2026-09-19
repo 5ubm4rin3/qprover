@@ -1,6 +1,6 @@
 PYTHON ?= uv run python
 
-.PHONY: test lint format-check foundry doctor demo verify
+.PHONY: test lint format-check foundry doctor demo track04 verify
 
 test:
 	uv run pytest -q
@@ -19,6 +19,9 @@ doctor:
 
 demo:
 	./scripts/demo.sh
+
+track04:
+	uv run qprover track04
 
 verify:
 	uv lock --check
