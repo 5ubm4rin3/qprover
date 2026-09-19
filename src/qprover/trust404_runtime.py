@@ -543,51 +543,6 @@ def _deploy_contract(
     return _normalize_address(address)
 
 
-def _deploy_target_via_setup(
-    anvil: Any,
-    *,
-    analysis: Any,
-    controller: str,
-    setup_funding_wei: int = 0,
-) -> str:
-    setup_source = getattr(analysis, "setup_source", None)
-    if not isinstance(setup_source, str) or not setup_source:
-        raise ValueError("setup source is missing from compiler analysis")
-    setup_artifact = _artifact_by_target(analysis, f"{setup_source}:Setup")
-    setup_address = _deploy_contract(
-        anvil,
-        controller_address=controller,
-        bytecode=setup_artifact.bytecode,
-        label="setup",
-    )
-    if type(setup_funding_wei) is not int or not 0 <= setup_funding_wei < 1 << 256:
-        raise ValueError("setup funding must be a uint256")
-    if setup_funding_wei:
-        anvil.set_balance(setup_address, setup_funding_wei)
-    transaction_hash = anvil.send_transaction(
-        {
-            "from": controller,
-            "to": setup_address,
-            "data": _encode_abi_call("run()", (), ()),
-        }
-    )
-    receipt = anvil.wait_for_receipt(transaction_hash)
-    if not _receipt_succeeded(receipt):
-        raise RuntimeError("Track04 setup transaction reverted")
-    trace = anvil.debug_trace(transaction_hash)
-    if trace is None:
-        raise RuntimeError("Track04 setup return data is unavailable")
-    returned = trace.get("returnValue")
-    if not isinstance(returned, str):
-        raise RuntimeError("Track04 setup returned invalid data")
-    raw = returned if returned.startswith("0x") else "0x" + returned
-    decoded = Web3().codec.decode(
-        ["address"],
-        _decode_hex(raw, "setup return data"),
-    )
-    return _normalize_address(str(decoded[0]))
-
-
 def deploy_runtime_from_artifacts(
     anvil: Any,
     *,
@@ -608,23 +563,19 @@ def deploy_runtime_from_artifacts(
 
     target_key = f"{manifest.target_src}:{manifest.target_name}"
     target_artifact = _artifact_by_target(analysis, target_key)
-    if getattr(manifest, "setup", None) is not None:
-        target_address = _deploy_target_via_setup(
-            anvil,
-            analysis=analysis,
-            controller=controller,
-            setup_funding_wei=manifest.deploy_value_wei,
-        )
-    else:
-        target_address = _deploy_contract(
-            anvil,
-            controller_address=controller,
-            bytecode=target_artifact.bytecode,
-            constructor_types=_constructor_types(target_artifact),
-            constructor_args=tuple(manifest.constructor_args),
-            value_wei=manifest.deploy_value_wei,
-            label="target",
-        )
+    # The persistent Anvil search runtime cannot execute Forge cheatcodes from
+    # Setup.s.sol. Reconstruct the target directly from the manifest and
+    # compiler-derived constructor ABI; the final organizer Harness remains
+    # the authoritative proof boundary and executes Setup.s.sol exactly.
+    target_address = _deploy_contract(
+        anvil,
+        controller_address=controller,
+        bytecode=target_artifact.bytecode,
+        constructor_types=_constructor_types(target_artifact),
+        constructor_args=tuple(manifest.constructor_args),
+        value_wei=manifest.deploy_value_wei,
+        label="target",
+    )
 
     invariants_key = f"{manifest.invariants_contract}:Invariants"
     invariants_artifact = _artifact_by_target(analysis, invariants_key)
