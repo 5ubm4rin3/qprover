@@ -105,6 +105,52 @@ contract Invariants {
     assert fact.bound_from_check_all is True
 
 
+def test_track04_compiler_retains_setup_source(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    src = root / "src"
+    src.mkdir(parents=True)
+    target = src / "Target.sol"
+    target.write_text(
+        """// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+contract Target {
+    constructor() payable {}
+}
+""",
+        encoding="utf-8",
+    )
+    setup = root / "Setup.s.sol"
+    setup.write_text(
+        """// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+import {Target} from "./src/Target.sol";
+
+contract Setup {
+    function run() external returns (address target) {
+        target = address(new Target());
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    analysis = compile_track04_target(
+        target,
+        target_name="Target",
+        target_src="src/Target.sol",
+        solc_version="0.8.24",
+        evm_version="cancun",
+        setup_path=setup,
+    )
+
+    assert analysis.setup_source == "Setup.s.sol"
+    assert "Setup.s.sol:Setup" in {
+        artifact.compilation_target for artifact in analysis.artifacts
+    }
+
+
 def test_track04_compiler_run_uses_global_analysis_timeout(
     tmp_path: Path, monkeypatch
 ) -> None:
