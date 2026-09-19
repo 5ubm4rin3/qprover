@@ -135,18 +135,8 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen --all-groups
 
-      - name: Install pinned Track04 forge-std
-        run: |
-          rm -rf trust404/harness/lib/forge-std
-          mkdir -p trust404/harness/lib/forge-std
-          git -C trust404/harness/lib/forge-std init -q
-          git -C trust404/harness/lib/forge-std remote add origin https://github.com/foundry-rs/forge-std
-          git -C trust404/harness/lib/forge-std fetch --depth 1 origin bf647bd6046f2f7da30d0c2bf435e5c76a780c1b
-          git -C trust404/harness/lib/forge-std checkout --detach FETCH_HEAD
-          forge build --root trust404/harness
-
-      - name: Run one-command Track04 demo
-        run: uv run qprover track04 --json
+      - name: Run one-command Track04 demo from clean checkout
+        run: make track04
 
   submission-image:
     needs: verify
