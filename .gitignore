@@ -28,3 +28,11 @@ task-5-report.md
 
 # TRUST404 local Foundry dependencies
 trust404/harness/lib/
+
+
+# TRUST404 local input/output
+# Keep organizer targets and generated results out of Git.
+trust404/target/*
+!trust404/target/.gitkeep
+trust404/results/*
+!trust404/results/.gitkeep
