@@ -238,7 +238,7 @@ Analysis를 위해 temporary compiler workspace를 만들 수는 있지만, fina
 
 모든 실행은 `--out` 아래에 다음 결과를 생성합니다.
 
-- `Exploit.sol` — standalone executable PoC. 성공 시 실제 invariant violation을 재현하며, 실패 시 마지막 deterministic candidate 또는 no-op exploit이 기록됩니다.
+- `Exploit.sol` — standalone executable PoC. 성공 시 실제 invariant violation을 재현하며, `NOT_FOUND`/`ERROR`에서는 false exploit으로 오인되지 않도록 명백한 no-op exploit을 기록합니다.
 - `result.json` — final status, violated invariant, exploit action sequence, organizer proof 여부, minimization 여부, human-readable explanation을 기록합니다.
 - `attempts.log` — concretely validated candidate와 outcome을 deterministic format으로 기록합니다.
 
