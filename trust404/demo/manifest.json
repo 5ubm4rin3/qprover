@@ -19,7 +19,7 @@
   "invariants": {
     "contract": "Invariants.sol",
     "predicates": [
-      "ownerUnchanged"
+      "flagRemainsFalse"
     ]
   },
   "budget": {
