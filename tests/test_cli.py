@@ -125,6 +125,67 @@ def test_track04_cli_runs_default_workspace_and_manifest_budgets(
     )
 
 
+def test_track04_cli_falls_back_to_bundled_demo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    demo = tmp_path / "trust404" / "demo"
+    (demo / "src").mkdir(parents=True)
+    (demo / "src" / "Demo.sol").write_text("contract Demo {}", encoding="utf-8")
+    (demo / "Invariants.sol").write_text("contract Invariants {}", encoding="utf-8")
+    (demo / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "trust404.track04.manifest/0.1",
+                "target": {
+                    "name": "Demo",
+                    "src": "src/Demo.sol",
+                    "solc": "0.8.24",
+                    "evm_version": "cancun",
+                },
+                "deploy": {
+                    "mode": "local",
+                    "constructor_args": [],
+                    "value_wei": "0",
+                },
+                "determinism": {
+                    "block_number": 1,
+                    "block_timestamp": 2,
+                    "seed": 11,
+                },
+                "invariants": {
+                    "contract": "Invariants.sol",
+                    "predicates": ["holds"],
+                },
+                "budget": {"timeout_sec": 10, "max_attempts": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "trust404" / "target").mkdir(parents=True)
+
+    import qprover.trust404_runner as runner
+
+    def fake_run(_contract, _invariants, _manifest, out, **_kwargs):
+        output = Path(out)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "Exploit.sol").write_text("contract Exploit {}", encoding="utf-8")
+        (output / "attempts.log").write_text("", encoding="utf-8")
+        (output / "result.json").write_text(
+            json.dumps({"status": "PROVEN"}),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(runner, "run_track04", fake_run)
+
+    code = main(["track04", "--workspace", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["package_source"] == "bundled-demo"
+    assert payload["target"] == str((demo / "src" / "Demo.sol").resolve())
+
+
 def test_doctor_json_emits_exactly_one_document(tmp_path: Path, capsys) -> None:
     code = main(["doctor", "--json", "--out", str(tmp_path / "doctor")])
     captured = capsys.readouterr()
