@@ -2,14 +2,12 @@
 pragma solidity 0.8.24;
 
 interface IDemoTarget {
-    function owner() external view returns (address);
+    function flag() external view returns (bool);
 }
 
 contract Invariants {
-    address private constant INITIAL_OWNER = address(0x1234);
-
-    function ownerUnchanged(address target) public view returns (bool) {
-        return IDemoTarget(target).owner() == INITIAL_OWNER;
+    function flagRemainsFalse(address target) public view returns (bool) {
+        return !IDemoTarget(target).flag();
     }
 
     function checkAll(address target)
@@ -17,8 +15,8 @@ contract Invariants {
         view
         returns (bool allHold, string memory firstViolated)
     {
-        if (!ownerUnchanged(target)) {
-            return (false, "ownerUnchanged");
+        if (!flagRemainsFalse(target)) {
+            return (false, "flagRemainsFalse");
         }
         return (true, "");
     }
