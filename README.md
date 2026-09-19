@@ -64,6 +64,37 @@ unchecked-accounting macro
 
 즉 vulnerability name을 맞히는 시스템이 아니라, **실제로 실행 가능한 counterexample을 찾는 시스템**을 목표로 합니다.
 
+## What Was Newly Implemented During TRUST404
+
+QProver는 기존 QProver core를 기반으로 확장한 프로젝트입니다. 기존 core에는 compiler-backed program analysis, generic search abstraction, local EVM execution, PoC/replay infrastructure, 그리고 v1 benchmark harness가 있었습니다.
+
+이번 TRUST404 build period에는 Track 04 요구사항에 맞추기 위해 다음 부분을 새로 구현하거나 크게 재설계했습니다.
+
+- organizer 제공 `Target.sol` / `Invariants.sol` / `manifest.json`을 읽는 Track 04 CLI 및 adapter
+- supplied invariant를 compiler AST에서 읽어 search guidance로 바꾸는 `PropertyFact` / `PropertySlice`
+- public target name이나 known exploit witness에 의존하지 않는 macro-free generic action model
+- reachable contract discovery와 compiler-derived read/write/call/value dependency 기반 transition model
+- shortest-first horizon search와 best-first / bounded QUBO / coverage portfolio
+- runtime getter, contract instance, compiler constant, ABI boundary, bounded Z3 constraint를 사용하는 typed contextual `ValueExpr` parameter completion
+- persistent `SearchAttacker` + local Anvil snapshot 기반 Self-validation Loop
+- state fingerprint, state-local revert feedback, feasibility/frontier infrastructure
+- vulnerability-specific template 대신 generic callback IR과 standalone `Exploit.sol` lowering
+- execution-backed witness minimization
+- search-time runtime과 분리된 fresh organizer Harness final proof
+- `result.json`을 통한 violated invariant / exploit path / proof status 설명
+- pinned Python / Foundry / solc / forge-std를 사용하는 exact submission Docker image 및 `--network=none` CI verification
+- official Track 04 submission-format validator를 CI gate로 통합
+
+기존 QProver v1 benchmark 결과는 repository에 남아 있지만, 해당 결과를 이번 v2.5 hidden-target generalization 성능으로 주장하지 않습니다.
+
+## AI-assisted Development Disclosure
+
+이번 프로젝트 개발에는 **ChatGPT 및 OpenAI coding agents를 포함한 AI-assisted development tools**를 사용했습니다. AI 도구는 implementation draft, refactoring, debugging, test 작성, documentation, code review 보조에 폭넓게 사용되었습니다.
+
+최종 architecture와 security boundary를 결정하고, 실제 test/CI/runtime 결과를 확인하며, generated code와 문서를 검토하고 제출물에 대한 책임을 지는 것은 참가자입니다.
+
+또한 QProver의 **runtime exploit search 자체는 외부 LLM/API에 의존하지 않습니다.** 제출된 agent는 compiler-backed analysis, deterministic search/optimization, local EVM execution으로 동작하며 offline scoring 환경에서도 실행되도록 구성되어 있습니다.
+
 ## Quick Start
 
 ### 1. Build the submission image
