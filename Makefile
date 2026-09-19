@@ -22,8 +22,7 @@ demo:
 
 track04:
 ifdef TARGET
-	@uv run qprover track04 "trust404/targets/$(TARGET)" --out "trust404/results/latest/$(TARGET)"; \
-	code=$?; if [ $code -eq 2 ]; then exit 2; fi
+	uv run qprover track04 "trust404/targets/$(TARGET)" --out "trust404/results/latest/$(TARGET)"
 else
 	uv run qprover track04
 endif
