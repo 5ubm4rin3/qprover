@@ -562,11 +562,22 @@ def _track04(args: argparse.Namespace) -> int:
     from qprover.trust404_runner import _default_runtime_factory, run_track04
 
     workspace = Path(args.workspace).resolve()
-    package = (
-        Path(args.package).expanduser().resolve()
-        if args.package
-        else workspace / "trust404" / "target"
-    )
+    if args.package:
+        package = Path(args.package).expanduser().resolve()
+        package_source = "explicit"
+    else:
+        local_target = workspace / "trust404" / "target"
+        demo_target = workspace / "trust404" / "demo"
+        has_local_manifest = (local_target / "manifest.json").is_file() or any(
+            path.is_file() for path in local_target.rglob("manifest.json")
+        )
+        if has_local_manifest:
+            package = local_target
+            package_source = "trust404/target"
+        else:
+            package = demo_target
+            package_source = "bundled-demo"
+
     if not package.is_dir():
         raise ValueError(
             f"Track04 package directory not found: {package}. "
@@ -628,6 +639,7 @@ def _track04(args: argparse.Namespace) -> int:
             "status",
             "PROVEN" if code == 0 else "NOT_FOUND" if code == 1 else "ERROR",
         ),
+        "package_source": package_source,
         "target": str(contract),
         "output": str(output),
         "result": str(result_path),
