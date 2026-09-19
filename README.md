@@ -95,7 +95,70 @@ QProver는 기존 QProver core를 기반으로 확장한 프로젝트입니다. 
 
 또한 QProver의 **runtime exploit search 자체는 외부 LLM/API에 의존하지 않습니다.** 제출된 agent는 compiler-backed analysis, deterministic search/optimization, local EVM execution으로 동작하며 offline scoring 환경에서도 실행되도록 구성되어 있습니다.
 
-## Quick Start
+## Simplest Run
+
+평소에는 공식 CLI의 모든 경로와 budget option을 직접 적을 필요가 없습니다.
+
+주최 측에서 받은 Track 04 package를 그대로 `trust404/target/` 아래에 넣습니다.
+
+```text
+trust404/
+├── target/
+│   ├── manifest.json
+│   ├── Invariants.sol
+│   └── src/
+│       └── <Target>.sol
+└── results/
+```
+
+그다음 repository root에서 **한 줄만 실행**합니다.
+
+```bash
+make track04
+```
+
+동일한 명령을 직접 쓰면:
+
+```bash
+uv run qprover track04
+```
+
+QProver는 `manifest.json`에서 target source, timeout, seed, max-attempts를 자동으로 읽고 실행합니다.
+
+결과는 기본적으로 repository 내부의 다음 위치에 저장됩니다.
+
+```text
+trust404/results/latest/
+├── Exploit.sol
+├── result.json
+└── attempts.log
+```
+
+따라서 가장 일반적인 사용 흐름은 이것뿐입니다.
+
+```text
+1. organizer package → trust404/target/
+2. make track04
+3. trust404/results/latest/result.json 확인
+```
+
+다른 위치의 package를 바로 실행하고 싶을 때만 경로를 하나 넘기면 됩니다.
+
+```bash
+uv run qprover track04 /path/to/organizer-package
+```
+
+결과 위치를 바꾸고 싶을 때만 `--out`을 사용합니다.
+
+```bash
+uv run qprover track04 /path/to/organizer-package \
+  --out trust404/results/my-run
+```
+
+`trust404/target/`과 `trust404/results/`의 실제 내용은 Git에서 ignore되므로, 비공개 organizer target이나 local result를 실수로 commit하지 않도록 구성되어 있습니다.
+
+## Official Docker Interface
+
 
 ### 1. Build the submission image
 
@@ -132,9 +195,11 @@ docker run --rm \
 
 주최 측 runner가 mount를 직접 구성한다면 container에는 공식 CLI argument만 전달하면 됩니다.
 
-## Local Execution
+## Advanced Official CLI
 
-Python 3.12+, `uv`, Foundry가 설치되어 있다면 Docker 없이도 실행할 수 있습니다.
+아래 인터페이스는 organizer/scoring compatibility를 위해 그대로 유지하는 저수준 CLI입니다. 평소 로컬 실행에는 위의 `make track04`를 권장합니다.
+
+Python 3.12+, `uv`, Foundry가 설치되어 있다면 다음과 같이 모든 값을 직접 지정할 수도 있습니다.
 
 ```bash
 uv sync --frozen
@@ -143,7 +208,7 @@ uv run qprover-trust404 \
   --contract /path/to/target/src/Target.sol \
   --invariants /path/to/target/Invariants.sol \
   --manifest /path/to/target/manifest.json \
-  --out /tmp/qprover-out \
+  --out trust404/results/manual \
   --timeout 300 \
   --seed 42 \
   --max-attempts 5
