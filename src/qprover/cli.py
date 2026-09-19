@@ -644,36 +644,20 @@ def _find_track04_file(package: Path, name: str) -> Path:
     return matches[0]
 
 
-def _track04(args: argparse.Namespace) -> int:
-    """Human-friendly wrapper around the official Track 04 CLI contract."""
-
+def _run_track04_package(
+    *,
+    package: Path,
+    output: Path,
+    package_source: str,
+    timeout_override: int | None,
+    seed_override: int | None,
+    max_attempts_override: int | None,
+) -> tuple[int, dict[str, object]]:
     from qprover.trust404 import Track04Manifest
     from qprover.trust404_runner import _default_runtime_factory, run_track04
 
-    workspace = Path(args.workspace).resolve()
-    _ensure_track04_harness(workspace)
-    if args.package:
-        package = Path(args.package).expanduser().resolve()
-        package_source = "explicit"
-    else:
-        local_target = workspace / "trust404" / "target"
-        demo_target = workspace / "trust404" / "demo"
-        has_local_manifest = (local_target / "manifest.json").is_file() or any(
-            path.is_file() for path in local_target.rglob("manifest.json")
-        )
-        if has_local_manifest:
-            package = local_target
-            package_source = "trust404/target"
-        else:
-            package = demo_target
-            package_source = "bundled-demo"
-
     if not package.is_dir():
-        raise ValueError(
-            f"Track04 package directory not found: {package}. "
-            "Put the organizer package in trust404/target/ "
-            "or run: uv run qprover track04 /path/to/package"
-        )
+        raise ValueError(f"Track04 package directory not found: {package}")
 
     manifest_path = _find_track04_file(package, "manifest.json")
     manifest = Track04Manifest.load(manifest_path)
@@ -688,17 +672,16 @@ def _track04(args: argparse.Namespace) -> int:
         raise ValueError(f"target source from manifest not found: {contract}")
 
     invariants = _find_track04_file(package_root, "Invariants.sol")
-    output = (
-        Path(args.out).expanduser().resolve()
-        if args.out
-        else workspace / "trust404" / "results" / "latest"
-    )
     output.mkdir(parents=True, exist_ok=True)
 
-    timeout = args.timeout if args.timeout is not None else manifest.timeout_sec
-    seed = args.seed if args.seed is not None else manifest.manifest_seed
+    timeout = (
+        timeout_override if timeout_override is not None else manifest.timeout_sec
+    )
+    seed = seed_override if seed_override is not None else manifest.manifest_seed
     max_attempts = (
-        args.max_attempts if args.max_attempts is not None else manifest.max_attempts
+        max_attempts_override
+        if max_attempts_override is not None
+        else manifest.max_attempts
     )
 
     code = run_track04(
@@ -722,7 +705,8 @@ def _track04(args: argparse.Namespace) -> int:
         except (OSError, json.JSONDecodeError):
             result = {}
 
-    payload = {
+    payload: dict[str, object] = {
+        "target_name": manifest.target_name,
         "ok": code == 0,
         "exit_code": code,
         "status": result.get(
@@ -736,9 +720,118 @@ def _track04(args: argparse.Namespace) -> int:
         "exploit": str(output / "Exploit.sol"),
         "attempts": str(output / "attempts.log"),
     }
-    _emit(payload, as_json=args.json)
-    return code
+    return code, payload
 
+
+def _public_track04_packages(workspace: Path) -> tuple[Path, ...]:
+    root = workspace / "trust404" / "targets"
+    if not root.is_dir():
+        return ()
+    return tuple(
+        path.resolve()
+        for path in sorted(root.iterdir(), key=lambda item: item.name)
+        if path.is_dir() and (path / "manifest.json").is_file()
+    )
+
+
+def _track04(args: argparse.Namespace) -> int:
+    """Human-friendly runner for one organizer target or all public targets."""
+
+    workspace = Path(args.workspace).resolve()
+    _ensure_track04_harness(workspace)
+
+    if args.package:
+        package = Path(args.package).expanduser().resolve()
+        output = (
+            Path(args.out).expanduser().resolve()
+            if args.out
+            else workspace / "trust404" / "results" / "latest"
+        )
+        code, payload = _run_track04_package(
+            package=package,
+            output=output,
+            package_source="explicit",
+            timeout_override=args.timeout,
+            seed_override=args.seed,
+            max_attempts_override=args.max_attempts,
+        )
+        _emit(payload, as_json=args.json)
+        return code
+
+    local_target = workspace / "trust404" / "target"
+    has_local_manifest = (local_target / "manifest.json").is_file() or any(
+        path.is_file() for path in local_target.rglob("manifest.json")
+    )
+    if has_local_manifest:
+        output = (
+            Path(args.out).expanduser().resolve()
+            if args.out
+            else workspace / "trust404" / "results" / "latest"
+        )
+        code, payload = _run_track04_package(
+            package=local_target,
+            output=output,
+            package_source="trust404/target",
+            timeout_override=args.timeout,
+            seed_override=args.seed,
+            max_attempts_override=args.max_attempts,
+        )
+        _emit(payload, as_json=args.json)
+        return code
+
+    packages = _public_track04_packages(workspace)
+    if not packages:
+        raise ValueError(
+            "no Track04 target package found; expected trust404/targets/<Name>/"
+        )
+
+    output_root = (
+        Path(args.out).expanduser().resolve()
+        if args.out
+        else workspace / "trust404" / "results" / "latest"
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    runs: list[dict[str, object]] = []
+    proven = 0
+    not_found = 0
+    errors = 0
+    for package in packages:
+        name = package.name
+        code, payload = _run_track04_package(
+            package=package,
+            output=output_root / name,
+            package_source=f"trust404/targets/{name}",
+            timeout_override=args.timeout,
+            seed_override=args.seed,
+            max_attempts_override=args.max_attempts,
+        )
+        runs.append(payload)
+        if code == 0:
+            proven += 1
+        elif code == 1:
+            not_found += 1
+        else:
+            errors += 1
+
+    summary = {
+        "ok": errors == 0,
+        "status": "COMPLETE" if errors == 0 else "ERROR",
+        "mode": "public-targets",
+        "targets": len(runs),
+        "proven": proven,
+        "not_found": not_found,
+        "errors": errors,
+        "output": str(output_root),
+        "runs": runs,
+    }
+    summary_path = output_root / "summary.json"
+    summary_path.write_text(
+        json.dumps(summary, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _emit(summary, as_json=args.json)
+    return 2 if errors else 0
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -813,12 +906,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     track04 = sub.add_parser(
         "track04",
-        help="Run TRUST404 Track 04 from one organizer package directory",
+        help="Run one TRUST404 package or all bundled public targets",
     )
     track04.add_argument(
         "package",
         nargs="?",
-        help="package directory (default: trust404/target)",
+        help="single package directory; omit to run trust404/targets/*",
     )
     track04.add_argument("--workspace", default=".")
     track04.add_argument("--out")
