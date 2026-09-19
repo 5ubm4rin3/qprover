@@ -548,6 +548,7 @@ def _deploy_target_via_setup(
     *,
     analysis: Any,
     controller: str,
+    setup_funding_wei: int = 0,
 ) -> str:
     setup_source = getattr(analysis, "setup_source", None)
     if not isinstance(setup_source, str) or not setup_source:
@@ -559,6 +560,10 @@ def _deploy_target_via_setup(
         bytecode=setup_artifact.bytecode,
         label="setup",
     )
+    if type(setup_funding_wei) is not int or not 0 <= setup_funding_wei < 1 << 256:
+        raise ValueError("setup funding must be a uint256")
+    if setup_funding_wei:
+        anvil.set_balance(setup_address, setup_funding_wei)
     transaction_hash = anvil.send_transaction(
         {
             "from": controller,
@@ -608,6 +613,7 @@ def deploy_runtime_from_artifacts(
             anvil,
             analysis=analysis,
             controller=controller,
+            setup_funding_wei=manifest.deploy_value_wei,
         )
     else:
         target_address = _deploy_contract(
