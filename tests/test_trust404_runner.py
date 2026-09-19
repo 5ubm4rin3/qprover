@@ -183,7 +183,10 @@ def test_run_track04_returns_one_and_keeps_best_candidate_when_not_proven(
     )
 
     assert code == 1
-    assert "contract Exploit" in (out / "Exploit.sol").read_text(encoding="utf-8")
+    exploit = (out / "Exploit.sol").read_text(encoding="utf-8")
+    assert "contract Exploit" in exploit
+    assert "function run(address) external payable {}" in exploit
+    assert "setOwner(address)" not in exploit
     lines = (out / "attempts.log").read_text(encoding="utf-8").splitlines()
     result = json.loads((out / "result.json").read_text(encoding="utf-8"))
     assert 1 <= len(lines) <= 2
