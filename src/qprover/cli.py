@@ -536,17 +536,12 @@ def _demo(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
-
 def _find_track04_file(package: Path, name: str) -> Path:
     direct = package / name
     if direct.is_file():
         return direct.resolve()
     matches = tuple(
-        sorted(
-            path.resolve()
-            for path in package.rglob(name)
-            if path.is_file()
-        )
+        sorted(path.resolve() for path in package.rglob(name) if path.is_file())
     )
     if not matches:
         raise ValueError(
@@ -589,9 +584,7 @@ def _track04(args: argparse.Namespace) -> int:
     except ValueError as error:
         raise ValueError("manifest target.src escapes the package directory") from error
     if not contract.is_file():
-        raise ValueError(
-            f"target source from manifest not found: {contract}"
-        )
+        raise ValueError(f"target source from manifest not found: {contract}")
 
     invariants = _find_track04_file(package_root, "Invariants.sol")
     output = (
@@ -604,9 +597,7 @@ def _track04(args: argparse.Namespace) -> int:
     timeout = args.timeout if args.timeout is not None else manifest.timeout_sec
     seed = args.seed if args.seed is not None else manifest.manifest_seed
     max_attempts = (
-        args.max_attempts
-        if args.max_attempts is not None
-        else manifest.max_attempts
+        args.max_attempts if args.max_attempts is not None else manifest.max_attempts
     )
 
     code = run_track04(
@@ -645,6 +636,7 @@ def _track04(args: argparse.Namespace) -> int:
     }
     _emit(payload, as_json=args.json)
     return code
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
