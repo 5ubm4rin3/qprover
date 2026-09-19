@@ -119,6 +119,8 @@ trust404/
 make track04
 ```
 
+첫 실행에서는 필요한 pinned `forge-std`와 Track 04 Harness artifact가 없으면 자동으로 준비한 뒤 실행합니다. 이후 실행에서는 이미 준비된 artifact를 재사용합니다.
+
 동일한 명령을 직접 쓰면:
 
 ```bash
