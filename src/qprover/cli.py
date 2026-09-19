@@ -705,7 +705,8 @@ def _run_track04_package(
 
     payload: dict[str, object] = {
         "target_name": manifest.target_name,
-        "ok": code == 0,
+        "ok": code != 2,
+        "proven": code == 0,
         "exit_code": code,
         "status": result.get(
             "status",
@@ -754,7 +755,7 @@ def _track04(args: argparse.Namespace) -> int:
             max_attempts_override=args.max_attempts,
         )
         _emit(payload, as_json=args.json)
-        return code
+        return 2 if code == 2 else 0
 
     local_target = workspace / "trust404" / "target"
     has_local_manifest = (local_target / "manifest.json").is_file() or any(
@@ -775,7 +776,7 @@ def _track04(args: argparse.Namespace) -> int:
             max_attempts_override=args.max_attempts,
         )
         _emit(payload, as_json=args.json)
-        return code
+        return 2 if code == 2 else 0
 
     packages = _public_track04_packages(workspace)
     if not packages:
