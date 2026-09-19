@@ -222,7 +222,8 @@ def _result_payload(ledger: _AttemptLedger) -> dict[str, object]:
 
 def _write_outputs(out_dir: Path, ledger: _AttemptLedger) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    code = ledger.winner_code or ledger.last_code
+    proven = ledger.winner_code is not None and bool(ledger.proven_predicate)
+    code = ledger.winner_code if proven else _NOOP_EXPLOIT
     (out_dir / "Exploit.sol").write_text(code, encoding="utf-8")
     log = "\n".join(ledger.lines)
     (out_dir / "attempts.log").write_text(log + ("\n" if log else ""), encoding="utf-8")
