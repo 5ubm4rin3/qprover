@@ -1,0 +1,29 @@
+{
+  "schema": "trust404.track04.manifest/0.1",
+  "target": {
+    "name": "DemoTarget",
+    "src": "src/DemoTarget.sol",
+    "solc": "0.8.24",
+    "evm_version": "cancun"
+  },
+  "deploy": {
+    "mode": "local",
+    "constructor_args": [],
+    "value_wei": "0"
+  },
+  "determinism": {
+    "block_number": 12345,
+    "block_timestamp": 1700000000,
+    "seed": 42
+  },
+  "invariants": {
+    "contract": "Invariants.sol",
+    "predicates": [
+      "ownerUnchanged"
+    ]
+  },
+  "budget": {
+    "timeout_sec": 60,
+    "max_attempts": 8
+  }
+}
