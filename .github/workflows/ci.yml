@@ -78,20 +78,23 @@ jobs:
           forge build --root trust404/harness
           forge test --root trust404/harness -q
 
-      - name: One-command Track04 demo
+      - name: Official OpenVault Track04 smoke
         run: |
-          rm -rf trust404/results/latest
-          uv run qprover track04 --json
+          rm -rf trust404/results/latest/OpenVault
+          uv run qprover track04 trust404/targets/OpenVault \
+            --out trust404/results/latest/OpenVault --json
           uv run python - <<'PY'
           import json
           from pathlib import Path
 
           result = json.loads(
-              Path("trust404/results/latest/result.json").read_text(encoding="utf-8")
+              Path("trust404/results/latest/OpenVault/result.json").read_text(
+                  encoding="utf-8"
+              )
           )
           assert result["status"] == "PROVEN"
           assert result["proof"]["organizer_harness_reproduced"] is True
-          assert result["violated_invariant"] == "flagRemainsFalse"
+          assert result["violated_invariant"] in {"ownerUnchanged", "vaultSolvent"}
           PY
 
       - name: Foundry fixture tests
@@ -135,8 +138,8 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen --all-groups
 
-      - name: Run one-command Track04 demo from clean checkout
-        run: make track04
+      - name: Run official Track04 target from clean checkout
+        run: make track04 TARGET=OpenVault
 
   submission-image:
     needs: verify
@@ -160,7 +163,7 @@ jobs:
             test -f /opt/qprover/trust404/harness/out/SearchAttacker.sol/SearchAttacker.json
             python -c "import qprover.trust404_runner; print(\"OFFLINE_IMPORT_OK\")"
             forge test --root /opt/qprover/trust404/harness -q
-            /opt/qprover/.venv/bin/qprover track04 --workspace /opt/qprover --json
-            test -f /opt/qprover/trust404/results/latest/result.json
-            test -f /opt/qprover/trust404/results/latest/Exploit.sol
+            /opt/qprover/.venv/bin/qprover track04 /opt/qprover/trust404/targets/OpenVault --workspace /opt/qprover --out /opt/qprover/trust404/results/latest/OpenVault --json
+            test -f /opt/qprover/trust404/results/latest/OpenVault/result.json
+            test -f /opt/qprover/trust404/results/latest/OpenVault/Exploit.sol
           '
