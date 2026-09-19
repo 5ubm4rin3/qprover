@@ -674,9 +674,7 @@ def _run_track04_package(
     invariants = _find_track04_file(package_root, "Invariants.sol")
     output.mkdir(parents=True, exist_ok=True)
 
-    timeout = (
-        timeout_override if timeout_override is not None else manifest.timeout_sec
-    )
+    timeout = timeout_override if timeout_override is not None else manifest.timeout_sec
     seed = seed_override if seed_override is not None else manifest.manifest_seed
     max_attempts = (
         max_attempts_override
@@ -832,6 +830,7 @@ def _track04(args: argparse.Namespace) -> int:
     )
     _emit(summary, as_json=args.json)
     return 2 if errors else 0
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
