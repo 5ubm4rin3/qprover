@@ -22,9 +22,9 @@ class _FakeAnvil:
         self.sent: list[dict[str, object]] = []
         self.receipts = iter(
             (
-                {"status": 1, "contractAddress": TARGET},
-                {"status": 1, "contractAddress": INVARIANTS},
-                {"status": 1, "contractAddress": ATTACKER},
+                {"status": "0x1", "contractAddress": TARGET},
+                {"status": "0x1", "contractAddress": INVARIANTS},
+                {"status": "0x1", "contractAddress": ATTACKER},
             )
         )
         self.baselines = 0
@@ -112,10 +112,10 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
             super().__init__()
             self.receipts = iter(
                 (
-                    {"status": 1, "contractAddress": setup},
-                    {"status": 1, "contractAddress": None},
-                    {"status": 1, "contractAddress": invariants},
-                    {"status": 1, "contractAddress": attacker},
+                    {"status": "0x1", "contractAddress": setup},
+                    {"status": "0x1", "contractAddress": None},
+                    {"status": "0x1", "contractAddress": invariants},
+                    {"status": "0x1", "contractAddress": attacker},
                 )
             )
 
