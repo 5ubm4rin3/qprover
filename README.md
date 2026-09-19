@@ -97,74 +97,71 @@ QProver는 기존 QProver core를 기반으로 확장한 프로젝트입니다. 
 
 ## Simplest Run
 
-평소에는 공식 CLI의 모든 경로와 budget option을 직접 적을 필요가 없습니다.
-
-아무 준비 없이 먼저 동작을 확인하려면 repository root에서 바로 `make track04`를 실행하면 됩니다. `trust404/target/`이 비어 있으면 bundled demo target을 자동으로 사용합니다.
-
-주최 측에서 받은 실제 Track 04 package가 있다면 그대로 `trust404/target/` 아래에 넣으면, 다음 실행부터는 demo 대신 실제 package를 자동으로 사용합니다.
+TRUST404가 배포한 **실제 공개 Track 04 타깃 6개**를 repository의 `trust404/targets/`에 그대로 포함합니다.
 
 ```text
 trust404/
-├── target/
-│   ├── manifest.json
-│   ├── Invariants.sol
-│   └── src/
-│       └── <Target>.sol
+├── targets/
+│   ├── BadAccounting/
+│   ├── BoundedOwner/
+│   ├── NaiveOracle/
+│   ├── OpenVault/
+│   ├── ReentrantVault/
+│   └── SafeVault/
 └── results/
 ```
 
-실행은 항상 **한 줄**입니다.
+공개 타깃 전체를 실행하려면 repository root에서 한 줄만 실행합니다.
 
 ```bash
 make track04
 ```
 
-첫 실행에서는 필요한 pinned `forge-std`와 Track 04 Harness artifact가 없으면 자동으로 준비한 뒤 실행합니다. 이후 실행에서는 이미 준비된 artifact를 재사용합니다.
+첫 실행에서 pinned `forge-std`와 Track 04 Harness artifact가 없으면 QProver가 자동으로 준비합니다.
 
-동일한 명령을 직접 쓰면:
-
-```bash
-uv run qprover track04
-```
-
-QProver는 `manifest.json`에서 target source, timeout, seed, max-attempts를 자동으로 읽고 실행합니다. 출력의 `package_source`가 `bundled-demo`이면 내장 demo를, `trust404/target`이면 주최 측 package를 실행한 것입니다.
-
-결과는 기본적으로 repository 내부의 다음 위치에 저장됩니다.
+전체 실행 결과는 target별로 분리됩니다.
 
 ```text
 trust404/results/latest/
-├── Exploit.sol
-├── result.json
-└── attempts.log
+├── BadAccounting/
+│   ├── Exploit.sol
+│   ├── result.json
+│   └── attempts.log
+├── BoundedOwner/
+├── NaiveOracle/
+├── OpenVault/
+├── ReentrantVault/
+├── SafeVault/
+└── summary.json
 ```
 
-따라서 가장 일반적인 사용 흐름은 이것뿐입니다.
+특정 공개 타깃 하나만 실행하려면:
 
-```text
-처음 테스트:
-1. make track04
-2. trust404/results/latest/result.json 확인
-
-실제 대회 target:
-1. organizer package → trust404/target/
-2. make track04
-3. trust404/results/latest/result.json 확인
+```bash
+make track04 TARGET=ReentrantVault
 ```
 
-다른 위치의 package를 바로 실행하고 싶을 때만 경로를 하나 넘기면 됩니다.
+또는 직접:
+
+```bash
+uv run qprover track04 trust404/targets/ReentrantVault \
+  --out trust404/results/latest/ReentrantVault
+```
+
+공개셋은 주최 측 participant package에 포함된 실제 평가용 타깃입니다.
+
+- Vulnerable: `ReentrantVault`, `OpenVault`, `BadAccounting`, `NaiveOracle`
+- Sound negative: `SafeVault`, `BoundedOwner`
+
+따라서 전체 실행에서 `PROVEN`과 `NOT_FOUND`는 모두 정상적인 결과일 수 있습니다. Batch 실행 자체는 infrastructure/internal `ERROR`가 있을 때만 실패합니다.
+
+별도의 organizer package 하나를 실행할 때는 경로만 전달하면 됩니다.
 
 ```bash
 uv run qprover track04 /path/to/organizer-package
 ```
 
-결과 위치를 바꾸고 싶을 때만 `--out`을 사용합니다.
-
-```bash
-uv run qprover track04 /path/to/organizer-package \
-  --out trust404/results/my-run
-```
-
-`trust404/target/`과 `trust404/results/`의 실제 내용은 Git에서 ignore되므로, 비공개 organizer target이나 local result를 실수로 commit하지 않도록 구성되어 있습니다.
+또한 로컬 비공개 target을 `trust404/target/`에 넣으면, 인자 없는 `uv run qprover track04`은 해당 단일 target을 공개셋보다 우선하여 실행합니다. `trust404/target/`의 내용과 `trust404/results/`는 Git에서 ignore됩니다.
 
 ## Official Docker Interface
 
