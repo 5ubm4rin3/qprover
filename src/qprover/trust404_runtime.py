@@ -499,7 +499,30 @@ def _deploy_contract(
     transaction_hash = anvil.send_transaction(transaction)
     receipt = anvil.wait_for_receipt(transaction_hash)
     if receipt.get("status") != 1:
-        raise RuntimeError(f"runtime {label} deployment reverted")
+        detail = ""
+        trace_reader = getattr(anvil, "debug_trace", None)
+        if callable(trace_reader):
+            try:
+                trace = trace_reader(transaction_hash)
+            except Exception:
+                trace = None
+            if isinstance(trace, Mapping):
+                returned = trace.get("returnValue")
+                logs = trace.get("structLogs")
+                last_ops = (
+                    tuple(
+                        str(item.get("op", ""))
+                        for item in logs[-4:]
+                        if isinstance(item, Mapping)
+                    )
+                    if isinstance(logs, list)
+                    else ()
+                )
+                detail = (
+                    f"; return={returned!r}; last_ops={last_ops!r}; "
+                    f"gas_used={receipt.get('gasUsed')!r}"
+                )
+        raise RuntimeError(f"runtime {label} deployment reverted{detail}")
     address = receipt.get("contractAddress")
     if not isinstance(address, str):
         raise RuntimeError("runtime deployment receipt lacks contract address")
