@@ -148,7 +148,7 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
         target_name="Target",
         invariants_contract="Invariants.sol",
         constructor_args=(),
-        deploy_value_wei=0,
+        deploy_value_wei=123,
         setup="Setup.s.sol",
     )
     anvil = SetupAnvil()
@@ -163,3 +163,4 @@ def test_deploy_runtime_uses_manifest_setup_return_address() -> None:
     assert runtime.target_address == target
     assert runtime.invariants_address == invariants
     assert runtime.attacker_address == attacker
+    assert anvil.balances == [(setup, 123), (attacker, 10**18)]
