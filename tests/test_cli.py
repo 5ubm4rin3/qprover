@@ -127,42 +127,54 @@ def test_track04_cli_runs_default_workspace_and_manifest_budgets(
     )
 
 
-def test_track04_cli_falls_back_to_bundled_demo(
+def test_track04_cli_runs_bundled_public_targets_as_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    demo = tmp_path / "trust404" / "demo"
-    (demo / "src").mkdir(parents=True)
-    (demo / "src" / "Demo.sol").write_text("contract Demo {}", encoding="utf-8")
-    (demo / "Invariants.sol").write_text("contract Invariants {}", encoding="utf-8")
-    (demo / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "trust404.track04.manifest/0.1",
-                "target": {
-                    "name": "Demo",
-                    "src": "src/Demo.sol",
-                    "solc": "0.8.24",
-                    "evm_version": "cancun",
-                },
-                "deploy": {
-                    "mode": "local",
-                    "constructor_args": [],
-                    "value_wei": "0",
-                },
-                "determinism": {
-                    "block_number": 1,
-                    "block_timestamp": 2,
-                    "seed": 11,
-                },
-                "invariants": {
-                    "contract": "Invariants.sol",
-                    "predicates": ["holds"],
-                },
-                "budget": {"timeout_sec": 10, "max_attempts": 2},
-            }
-        ),
-        encoding="utf-8",
-    )
+    targets = tmp_path / "trust404" / "targets"
+
+    def write_target(name: str, predicate: str) -> None:
+        package = targets / name
+        (package / "src").mkdir(parents=True)
+        (package / "src" / f"{name}.sol").write_text(
+            f"contract {name} {{}}",
+            encoding="utf-8",
+        )
+        (package / "Invariants.sol").write_text(
+            "contract Invariants {}",
+            encoding="utf-8",
+        )
+        (package / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema": "trust404.track04.manifest/0.1",
+                    "target": {
+                        "name": name,
+                        "src": f"src/{name}.sol",
+                        "solc": "0.8.24",
+                        "evm_version": "cancun",
+                    },
+                    "deploy": {
+                        "mode": "local",
+                        "constructor_args": [],
+                        "value_wei": "0",
+                    },
+                    "determinism": {
+                        "block_number": 1,
+                        "block_timestamp": 2,
+                        "seed": 42,
+                    },
+                    "invariants": {
+                        "contract": "Invariants.sol",
+                        "predicates": [predicate],
+                    },
+                    "budget": {"timeout_sec": 10, "max_attempts": 2},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_target("Alpha", "alphaHolds")
+    write_target("Beta", "betaHolds")
     (tmp_path / "trust404" / "target").mkdir(parents=True)
 
     import qprover.cli as cli_module
@@ -170,16 +182,24 @@ def test_track04_cli_falls_back_to_bundled_demo(
 
     monkeypatch.setattr(cli_module, "_ensure_track04_harness", lambda _workspace: None)
 
-    def fake_run(_contract, _invariants, _manifest, out, **_kwargs):
+    def fake_run(contract, _invariants, _manifest, out, **_kwargs):
         output = Path(out)
         output.mkdir(parents=True, exist_ok=True)
+        name = Path(contract).stem
+        proven = name == "Alpha"
         (output / "Exploit.sol").write_text("contract Exploit {}", encoding="utf-8")
         (output / "attempts.log").write_text("", encoding="utf-8")
         (output / "result.json").write_text(
-            json.dumps({"status": "PROVEN"}),
+            json.dumps(
+                {
+                    "status": "PROVEN" if proven else "NOT_FOUND",
+                    "violated_invariant": "alphaHolds" if proven else None,
+                    "proof": {"organizer_harness_reproduced": proven},
+                }
+            ),
             encoding="utf-8",
         )
-        return 0
+        return 0 if proven else 1
 
     monkeypatch.setattr(runner, "run_track04", fake_run)
 
@@ -187,8 +207,18 @@ def test_track04_cli_falls_back_to_bundled_demo(
     payload = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert payload["package_source"] == "bundled-demo"
-    assert payload["target"] == str((demo / "src" / "Demo.sol").resolve())
+    assert payload["mode"] == "public-targets"
+    assert payload["targets"] == 2
+    assert payload["proven"] == 1
+    assert payload["not_found"] == 1
+    assert payload["errors"] == 0
+    assert [item["target_name"] for item in payload["runs"]] == ["Alpha", "Beta"]
+    summary = json.loads(
+        (tmp_path / "trust404" / "results" / "latest" / "summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["status"] == "COMPLETE"
 
 
 def test_doctor_json_emits_exactly_one_document(tmp_path: Path, capsys) -> None:
