@@ -575,7 +575,13 @@ def _ensure_track04_harness(workspace: Path) -> None:
         forge_std.mkdir(parents=True, exist_ok=True)
         _run_bootstrap_command(["git", "init", "-q"], cwd=forge_std)
         _run_bootstrap_command(
-            ["git", "remote", "add", "origin", "https://github.com/foundry-rs/forge-std"],
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/foundry-rs/forge-std",
+            ],
             cwd=forge_std,
         )
         _run_bootstrap_command(
@@ -596,7 +602,15 @@ def _ensure_track04_harness(workspace: Path) -> None:
         if current != _TRACK04_FORGE_STD_REV:
             print("[qprover] restoring pinned forge-std...", file=sys.stderr)
             _run_bootstrap_command(
-                ["git", "fetch", "-q", "--depth", "1", "origin", _TRACK04_FORGE_STD_REV],
+                [
+                    "git",
+                    "fetch",
+                    "-q",
+                    "--depth",
+                    "1",
+                    "origin",
+                    _TRACK04_FORGE_STD_REV,
+                ],
                 cwd=forge_std,
             )
             _run_bootstrap_command(
@@ -606,7 +620,9 @@ def _ensure_track04_harness(workspace: Path) -> None:
     print("[qprover] building Track04 harness...", file=sys.stderr)
     _run_bootstrap_command(["forge", "build", "--root", str(harness)])
     if not artifact.is_file():
-        raise ValueError("Track04 harness build did not produce SearchAttacker artifact")
+        raise ValueError(
+            "Track04 harness build did not produce SearchAttacker artifact"
+        )
 
 
 def _find_track04_file(package: Path, name: str) -> Path:
