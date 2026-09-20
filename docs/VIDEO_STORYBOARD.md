@@ -1,46 +1,43 @@
-# QProver ≤5-Minute Demo Video Storyboard
+# QProver 5분 이내 데모 영상 구성
 
-Target runtime: **4:20–4:50**. Record at readable terminal font size. Do not fast-forward evidence that judges need to inspect.
+목표 길이: **4:20–4:50**.
+Terminal font는 읽기 쉽게 유지하고, 검증해야 할 evidence 구간은 fast-forward하지 않습니다.
 
-## 0:00–0:20 — Problem
+## 0:00–0:20 — 문제
 
-Screen: title + one sentence.
+화면: title + 한 문장
 
-Narration:
+나레이션:
 
-> Security AI can flag suspicious code, but a warning is not proof. The hard question is whether an executable transaction sequence actually violates the supplied security invariant.
+> Security AI는 suspicious code를 표시할 수 있지만 warning은 proof가 아닙니다. 실제로 실행 가능한 transaction sequence가 supplied security invariant를 깨는지가 핵심 문제입니다.
 
 ## 0:20–0:50 — Architecture
 
-Screen: architecture diagram from README.
+화면: README architecture diagram
 
-Narration:
+나레이션:
 
-> QProver compiles and analyzes the target, builds exploit hypotheses, turns transaction-sequence exploration into an explicit search problem, and executes every candidate on a fresh local EVM. Failed candidates feed back into search. Only executed invariant violations can progress to proof.
+> QProver는 target을 compile하고 분석한 뒤 exploit hypothesis를 구성하고, transaction-sequence exploration을 explicit search problem으로 바꿉니다. 모든 candidate는 local EVM에서 실행되며 실패 결과도 다시 search에 feedback됩니다. 실제로 실행된 invariant violation만 proof 단계로 넘어갈 수 있습니다.
 
 ## 0:50–1:10 — Environment check
-
-Terminal:
 
 ```bash
 uv run qprover doctor --json
 ```
 
-Highlight `ok:true`, Forge, Anvil, offline build and cleanup.
+`ok:true`, Forge, Anvil, offline build, cleanup을 확인합니다.
 
-Narration:
+나레이션:
 
-> The bundled workflow is local-only. No wallet key or public RPC is required.
+> Bundled workflow는 local-only이며 wallet key나 public RPC가 필요하지 않습니다.
 
 ## 1:10–2:20 — Autonomous demo
-
-Terminal:
 
 ```bash
 uv run qprover demo --json --out /private/tmp/qprover-demo-core
 ```
 
-When it finishes, highlight:
+완료 후 확인:
 
 ```text
 status: CONFIRMED
@@ -50,52 +47,48 @@ minimized_steps: 2
 successful_cold_replays: 3
 ```
 
-Narration:
+나레이션:
 
-> QUBO prioritizes candidate sequences, but the EVM decides whether they work. Here QProver found a violating path, revalidated it, minimized three steps to two, generated a Foundry PoC and independently replayed the proof three times.
+> QUBO는 candidate sequence를 prioritization하지만 실제 동작 여부는 EVM이 판단합니다. QProver는 violation path를 찾고 재검증한 뒤 3-step witness를 2-step으로 최소화하고 Foundry PoC를 생성해 proof를 3회 독립 replay합니다.
 
 ## 2:20–3:00 — Evidence bundle
-
-Terminal:
 
 ```bash
 find /private/tmp/qprover-demo-core -type f | sort
 ```
 
-Open a few lines of `certificate.json`, generated `.t.sol`, and `qubo.json`.
+`certificate.json`, generated `.t.sol`, `qubo.json` 일부를 확인합니다.
 
-Narration:
+나레이션:
 
-> The result is not a prose claim. The bundle contains the exact state/transaction evidence, an executable PoC, the QUBO model evidence and replay records.
+> 결과는 prose claim이 아닙니다. Bundle에는 exact state/transaction evidence, executable PoC, QUBO model evidence, replay record가 포함됩니다.
 
 ## 3:00–3:50 — Benchmark
 
-Screen: strategy table.
+화면: strategy table
 
-Narration:
+나레이션:
 
-> We compared four strategies under equal search budgets across six vulnerable/sound paired families and ten seeds—480 executions total. QUBO confirmed 45 of 60 vulnerable runs, or 75%, versus 35% random, 33.3% risk-guided and 20% coverage-guided search. No false confirmations were observed in 60 negative runs per strategy.
+> 동일한 search budget에서 6개의 vulnerable/sound paired family와 10개의 seed를 사용해 4개 strategy를 비교했습니다. 총 480 executions입니다. QUBO는 vulnerable run 60개 중 45개, 75%를 confirmed했고 Random 35%, Risk 33.3%, Coverage 20%였습니다. Strategy별 60개의 negative run에서는 false confirmation이 관찰되지 않았습니다.
 
-Then show family table for ~15 seconds.
+Family table을 약 15초 보여줍니다.
 
-> The family breakdown shows where each strategy succeeded. QUBO led or tied across five of six families.
+> Family breakdown은 strategy별 성공 영역을 보여줍니다. QUBO는 6개 family 중 5개에서 최고 또는 공동 최고였습니다.
 
 ## 3:50–4:15 — Trade-off
 
-Screen: candidates/confirmed and solver time.
+화면: candidates/confirmed와 solver time
 
-Narration:
+나레이션:
 
-> QUBO used 15.6 candidate evaluations per confirmed exploit and spent additional simulated-annealing compute. The benchmark measures prioritization and search yield, not wall-clock speedup.
+> QUBO는 confirmed exploit당 15.6 candidate evaluation을 사용했고 추가 simulated-annealing compute를 사용했습니다. 이 benchmark는 wall-clock speedup이 아니라 prioritization과 search yield를 측정합니다.
 
-## 4:15–4:40 — Close
+## 4:15–4:40 — 마무리
 
-Screen: final product statement.
+나레이션:
 
-Narration:
+> QProver는 search, execute, minimize, replay로 이어지는 closed validation loop를 사용합니다. Executable witness가 supplied invariant violation을 재현할 때만 결과를 proven으로 인정합니다.
 
-> QProver uses a closed validation loop: search, execute, minimize and replay. A result is proven only when the executable witness reproduces the supplied invariant violation.
-
-Final text:
+마지막 문구:
 
 > **QProver — Search. Execute. Prove. Replay.**
