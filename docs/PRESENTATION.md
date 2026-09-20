@@ -1,7 +1,6 @@
-# QProver Pitch Deck Content
+# QProver 발표 자료 메모
 
-Notes for a short technical presentation. Keep visuals simple and terminal evidence
-readable.
+짧은 기술 발표용 구성입니다. 시각 요소는 단순하게 유지하고 terminal evidence가 읽히게 구성합니다.
 
 ## Slide 1 — QProver
 
@@ -9,13 +8,13 @@ readable.
 
 > Search → Execute → Prove → Replay
 
-Subtitle:
+부제:
 
-**A vulnerability warning is not an exploit. QProver returns executable evidence.**
+**취약점 경고는 exploit이 아닙니다. QProver는 실행 가능한 evidence를 반환합니다.**
 
-## Slide 2 — Why execution matters
+## Slide 2 — 왜 실행이 중요한가
 
-### A warning is not a counterexample
+### Warning은 counterexample이 아님
 
 ```text
 "This function looks vulnerable"
@@ -23,16 +22,14 @@ Subtitle:
 "Here is a transaction sequence that breaks the supplied invariant"
 ```
 
-Constraints:
+핵심 문제:
 
-- static warnings can produce false positives;
-- multi-transaction attacks create sequence/state explosion;
-- generated PoCs can revert or fail to violate the property;
-- audit pipelines need executable ground truth.
+- static warning은 false positive를 만들 수 있음
+- multi-transaction attack은 sequence/state explosion을 만듦
+- generated PoC는 revert하거나 property를 깨지 못할 수 있음
+- audit pipeline에는 executable ground truth가 필요함
 
 ## Slide 3 — QProver loop
-
-Show:
 
 ```text
 Analyze
@@ -50,36 +47,36 @@ Invariant violated? ── No ──> feedback → search
 Minimize → PoC → 3× cold replay → certificate
 ```
 
-Key line:
+핵심 문장:
 
-**The EVM—not the model—is the final referee.**
+**최종 판단자는 model이 아니라 EVM입니다.**
 
-## Slide 4 — Why QUBO?
+## Slide 4 — 왜 QUBO인가
 
-Problem:
+문제:
 
 ```text
 Which sequence/state path should we spend our limited EVM budget on next?
 ```
 
-QUBO objective combines:
+QUBO objective는 다음을 조합합니다.
 
-- exploitability/static utility;
-- useful action transitions;
-- hypothesis relevance;
-- revert penalties and execution feedback;
-- sequence/repetition constraints.
+- exploitability/static utility
+- useful action transition
+- hypothesis relevance
+- revert penalty와 execution feedback
+- sequence/repetition constraint
 
-Clarification:
+중요:
 
-**QUBO prioritizes candidates. It does not prove the exploit.**
+**QUBO는 candidate를 prioritization할 뿐 exploit을 증명하지 않습니다.**
 
-Current backend: seeded classical simulated annealing. Exact classical solving is
-also available for bounded models.
+현재 backend는 seeded classical simulated annealing이며,
+bounded model에는 exact classical solving도 사용할 수 있습니다.
 
-## Slide 5 — Proof, not prediction
+## Slide 5 — Prediction이 아니라 Proof
 
-Show actual demo bundle:
+실제 demo bundle:
 
 ```text
 certificate.json
@@ -89,7 +86,7 @@ qubo.json
 poc/QProverReplay_<id>.t.sol
 ```
 
-Verified demo:
+검증된 demo:
 
 - QUBO search: 3 steps
 - minimized proof: 2 steps
@@ -97,9 +94,7 @@ Verified demo:
 - cold replay: **3/3**
 - portable evidence paths
 
-## Slide 6 — 480-run result
-
-Headline:
+## Slide 6 — 480-run 결과
 
 ### QUBO confirmed 75% of vulnerable runs
 
@@ -110,17 +105,11 @@ Headline:
 | Risk | 33.3% |
 | **QUBO** | **75.0%** |
 
-Footer:
+**Strategy별 negative false-confirmation: 0/60 observed**
 
-**0/60 negative false-confirmations observed per strategy.**
+제한 사항: synthetic/public/white-box paired MicroBench.
 
-Small-print limitation:
-
-Synthetic/public/white-box paired MicroBench.
-
-## Slide 7 — Family breakdown
-
-Use a grouped bar chart from this table:
+## Slide 7 — Family별 결과
 
 | Family | Coverage | Random | Risk | QUBO |
 |---|---:|---:|---:|---:|
@@ -131,53 +120,53 @@ Use a grouped bar chart from this table:
 | Side entrance | 2/10 | 5/10 | 0/10 | 10/10 |
 | Signature replay | 1/10 | 1/10 | 0/10 | 3/10 |
 
-Talking point: Risk ranking performs well on specific motifs. In this benchmark,
-QUBO has nonzero confirmation results across every family.
+Risk ranking은 특정 motif에서 강하고,
+이 benchmark에서 QUBO는 모든 family에서 nonzero confirmation을 기록했습니다.
 
-## Slide 8 — Search efficiency vs compute trade-off
+## Slide 8 — Search efficiency / compute trade-off
 
 QUBO:
 
 - 15.6 candidates / confirmation
 - 34.2 search tx / confirmation
-- lowest candidate cost among tested strategies
+- tested strategy 중 가장 낮은 candidate cost
 
-But:
+대신:
 
-- solver compute is additional overhead;
-- 184.43 s cumulative annealing time in full MicroBench.
+- solver compute는 추가 overhead
+- full MicroBench cumulative annealing time: 184.43 s
 
-Message: In this benchmark, QUBO exchanges additional solver compute for fewer
-candidate and EVM operations per confirmation.
+이 benchmark에서 QUBO는 추가 solver compute와
+더 적은 candidate/EVM operation per confirmation을 trade-off합니다.
 
-Do not claim wall-clock speedup.
+Wall-clock speedup을 주장하지 않습니다.
 
 ## Slide 9 — Engineering / reproducibility
 
-Verified gates:
+검증 항목:
 
 - 1,237 Python tests
 - 12/12 Foundry tests
-- strict JSON schemas
+- strict JSON schema
 - identity-pinned artifact publication
 - immutable label-free benchmark journal
-- deterministic report hashes
+- deterministic report hash
 - exact 3-replay proof gate
 
 Safety:
 
-- local Anvil only for bundled workflows
-- no public-chain broadcast
-- fail closed on unsupported semantics
+- bundled workflow는 local Anvil only
+- public-chain broadcast 없음
+- unsupported semantics는 fail closed
 
-## Slide 10 — Current scope
+## Slide 10 — 현재 범위
 
-- bounded search can miss long prerequisite chains;
-- nested cross-contract and complex ABI reasoning remain limited;
-- QUBO prioritizes execution and is not a proof oracle;
-- the benchmark is synthetic and does not measure hidden-target performance;
-- fresh EVM replay remains the success boundary.
+- bounded search는 긴 prerequisite chain을 놓칠 수 있음
+- nested cross-contract / complex ABI reasoning은 제한적
+- QUBO는 execution priority를 정할 뿐 proof oracle이 아님
+- benchmark는 synthetic이며 hidden-target performance를 측정하지 않음
+- fresh EVM replay가 최종 success boundary
 
-Closing line:
+마무리:
 
-> **QProver turns “this looks vulnerable” into “this exact executable sequence breaks the property—and here is the replay proof.”**
+> **QProver는 "취약해 보인다"를 "이 정확한 실행 sequence가 property를 깨고, 여기 replay proof가 있다"로 바꿉니다.**
