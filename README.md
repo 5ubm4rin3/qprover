@@ -40,18 +40,7 @@ Revert 역시 단순한 global blacklist로 처리하지 않고, 해당 state와
 
 QProver는 주최 측이 제공하는 `Target.sol`, `Invariants.sol`, `manifest.json`을 입력으로 받아 Solidity compiler 기반의 semantic facts를 추출하고, attacker가 실제로 실행할 수 있는 ABI call sequence를 탐색합니다.
 
-핵심 설계 원칙은 **production Track 04 path에 vulnerability-specific exploit macro를 넣지 않는 것**입니다.
-
-예를 들어 다음과 같은 식의 정답 템플릿을 planner에 직접 넣지 않습니다.
-
-```text
-reentrancy macro
-access-control macro
-oracle macro
-unchecked-accounting macro
-```
-
-대신 탐색은 다음과 같은 일반 정보에 기반합니다.
+탐색은 다음과 같은 일반 정보에 기반합니다.
 
 - compiler-derived storage read/write
 - internal / external call relation
