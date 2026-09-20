@@ -1,25 +1,25 @@
-# QProver Release / TRUST404 Submission Checklist
+# QProver Release / TRUST404 제출 체크리스트
 
-Use this checklist on the exact commit that will be submitted.
+실제 제출할 exact commit에서 이 checklist를 확인합니다.
 
-## 1. Repository state
+## 1. Repository 상태
 
-- [ ] `git status` is clean in the real development Git metadata.
-- [ ] intended default branch contains the verified feature commits.
-- [ ] GitHub remote contains the exact candidate commit.
-- [ ] repository visibility is **public** before submission.
-- [ ] no secrets, private keys, RPC tokens or `.env` files are committed.
-- [ ] Apache-2.0 `LICENSE` is present.
+- [ ] 실제 development Git metadata에서 `git status`가 clean
+- [ ] default branch에 검증된 feature commit 포함
+- [ ] GitHub remote에 exact candidate commit 존재
+- [ ] 제출 전 repository visibility가 **public**
+- [ ] secret, private key, RPC token, `.env` 미포함
+- [ ] Apache-2.0 `LICENSE` 존재
 
 ## 2. Verification
 
-Run:
+실행:
 
 ```bash
 make verify
 ```
 
-Record the exact outputs for:
+다음 결과를 확인:
 
 - [ ] `uv lock --check`
 - [ ] `uv run ruff format --check .`
@@ -29,7 +29,7 @@ Record the exact outputs for:
 - [ ] `uv run qprover doctor --json`
 - [ ] `uv run qprover demo --json --out /private/tmp/qprover-demo-core`
 
-The demo must show:
+Demo 확인 항목:
 
 - [ ] `ok=true`
 - [ ] `status=CONFIRMED`
@@ -40,38 +40,39 @@ The demo must show:
 
 ## 3. Benchmark evidence
 
-- [ ] `benchmarks/config/full.json` is committed.
-- [ ] full benchmark regenerates 480 terminal rows.
-- [ ] scorer emits 480 score rows only after matrix completion.
-- [ ] report reproduction command points to `full.json`.
-- [ ] aggregate summary matches `benchmarks/results/microbench-2026-09-15-summary.json`.
-- [ ] benchmark claims include limitations/no-quantum-advantage wording.
+- [ ] `benchmarks/config/full.json` committed
+- [ ] full benchmark가 480 terminal row 재생성
+- [ ] matrix 완료 후에만 scorer가 480 score row 생성
+- [ ] report reproduction command가 `full.json`을 가리킴
+- [ ] aggregate summary가 `benchmarks/results/microbench-2026-09-15-summary.json`과 일치
+- [ ] benchmark claim에 limitation / no-quantum-advantage 표현 포함
 
-## 4. CI and review
+## 4. CI / Review
 
-- [ ] GitHub Actions CI is green on the exact candidate.
-- [ ] final whole-branch code review completed.
-- [ ] final proof-integrity/security review completed.
-- [ ] all Critical/Important findings resolved or explicitly blocked with evidence.
+- [ ] exact candidate에서 GitHub Actions CI green
+- [ ] final whole-branch code review 완료
+- [ ] final proof-integrity/security review 완료
+- [ ] Critical/Important finding 해결 또는 evidence와 함께 명시적으로 blocked
 
-## 5. TRUST404 deliverables
+## 5. TRUST404 제출물
 
-- [ ] README run instructions checked from a clean clone.
-- [ ] pitch deck exported to PDF.
-- [ ] demo video is ≤5 minutes.
-- [ ] demo video visibly shows the build running, not only slides.
-- [ ] public repository URL verified.
-- [ ] AI assistance disclosure included where required.
-- [ ] license compliance reviewed.
-- [ ] official participant package / schema compatibility rechecked if available.
+- [ ] clean clone에서 README 실행 방법 확인
+- [ ] pitch deck PDF export
+- [ ] demo video ≤5 minutes
+- [ ] demo video에 실제 build/run 화면 포함
+- [ ] public repository URL 확인
+- [ ] 필요한 AI assistance disclosure 포함
+- [ ] license compliance 확인
+- [ ] 가능하면 official participant package/schema compatibility 재확인
 
 ## 6. Release
 
-After every gate above is green:
+위 gate가 모두 green이면:
 
 ```bash
 git tag -a v0.1.0-trust404 -m "QProver TRUST404 submission candidate"
 git push origin v0.1.0-trust404
 ```
 
-Create a GitHub release from the tag and attach the pitch-deck PDF if desired. Do not tag before the exact release commit passes CI and final review.
+Tag에서 GitHub release를 만들고 필요하면 pitch-deck PDF를 첨부합니다.
+Exact release commit이 CI와 final review를 통과하기 전에는 tag를 만들지 않습니다.
