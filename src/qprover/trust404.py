@@ -201,6 +201,8 @@ class _RuntimeUintSource:
     signature: str
     argument_mode: str
     reads: tuple[str, ...]
+    function_id: str | None = None
+    source_id: str | None = None
 
     @property
     def identity(self) -> tuple[tuple[str, ...], str, str]:
@@ -555,6 +557,8 @@ def _runtime_uint_sources(
                 signature=function.signature,
                 argument_mode=mode,
                 reads=tuple(sorted(reads)),
+                function_id=function.canonical_id,
+                source_id=function.canonical_id,
             )
             sources[source.identity] = source
 
@@ -571,6 +575,7 @@ def _runtime_uint_sources(
                         signature=signature,
                         argument_mode="none",
                         reads=reads,
+                        source_id=str(storage_id),
                     )
                     sources[source.identity] = source
                 continue
@@ -582,6 +587,7 @@ def _runtime_uint_sources(
                         signature=signature,
                         argument_mode="self",
                         reads=reads,
+                        source_id=str(storage_id),
                     )
                     sources[source.identity] = source
     return tuple(sources[key] for key in sorted(sources))
@@ -784,6 +790,13 @@ def build_search_model(
         for function in contract.functions:
             source_constants.update(
                 item.constant for item in getattr(function, "parameter_constraints", ())
+            )
+            source_constants.update(getattr(function, "comparison_constants", ()))
+            source_constants.update(
+                item.constant for item in getattr(function, "storage_guards", ())
+            )
+            source_constants.update(
+                item.constant for item in getattr(function, "storage_assignments", ())
             )
 
     return Track04SearchModel(

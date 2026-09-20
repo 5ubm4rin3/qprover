@@ -206,6 +206,19 @@ def _is_target_identifier(node: object, target_declaration: int | None) -> bool:
     )
 
 
+def _is_target_reference(node: object, target_declaration: int | None) -> bool:
+    if _is_target_identifier(node, target_declaration):
+        return True
+    if not isinstance(node, Mapping) or node.get("nodeType") != "FunctionCall":
+        return False
+    if node.get("kind") != "typeConversion":
+        return False
+    arguments = tuple(node.get("arguments", ()))
+    return len(arguments) == 1 and _is_target_reference(
+        arguments[0], target_declaration
+    )
+
+
 def _is_target_balance(node: object, target_declaration: int | None) -> bool:
     return (
         isinstance(node, Mapping)
@@ -237,7 +250,7 @@ def _target_calls(body: object, target_declaration: int | None) -> tuple[str, ..
         if (
             isinstance(expression, Mapping)
             and expression.get("nodeType") == "MemberAccess"
-            and _is_target_identifier(expression.get("expression"), target_declaration)
+            and _is_target_reference(expression.get("expression"), target_declaration)
             and isinstance(expression.get("memberName"), str)
         ):
             members.add(str(expression["memberName"]))

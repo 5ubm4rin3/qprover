@@ -338,12 +338,12 @@ def _skeleton_problem(
                 sender_slot=0,
                 args=variant.args,
                 value_wei=variant.value_wei,
-                max_repetitions=variant.max_repetitions,
+                max_repetitions=3,
                 argument_provenance=tuple(("track04-skeleton",) for _ in variant.args),
                 value_provenance=("track04-skeleton",),
             )
         )
-    repetition_limits = {action.id: 2 for action in model.actions}
+    repetition_limits = {action.id: 3 for action in model.actions}
     discounts = tuple(1.0 / (index + 1) for index in range(active_horizon))
     return SearchProblem(
         actions=tuple(action.id for action in model.actions),
@@ -450,11 +450,32 @@ def _semantic_hypotheses(
         for contract in getattr(report, "contracts", ())
         for function in getattr(contract, "functions", ())
     }
-    storage_declarations = {
-        int(storage.declaration_id)
+    contracts = {
+        str(contract.name): contract
         for contract in getattr(report, "contracts", ())
+        if isinstance(getattr(contract, "name", None), str)
+    }
+    storage_by_declaration = {
+        int(storage.declaration_id): storage
+        for contract in contracts.values()
         for storage in getattr(contract, "storage", ())
         if type(getattr(storage, "declaration_id", None)) is int
+    }
+    storage_by_contract_name = {
+        (str(contract.name), str(storage.name)): storage
+        for contract in contracts.values()
+        for storage in getattr(contract, "storage", ())
+    }
+    storage_by_id = {
+        str(storage.canonical_id): storage
+        for contract in contracts.values()
+        for storage in getattr(contract, "storage", ())
+    }
+    root_contract = contracts.get(str(getattr(model.analysis, "contract_name", "")))
+    root_signatures = {
+        str(function.signature)
+        for function in getattr(root_contract, "functions", ())
+        if isinstance(getattr(function, "signature", None), str)
     }
     address_cache: dict[tuple[str, ...], str | None] = {}
 
@@ -475,136 +496,483 @@ def _semantic_hypotheses(
     def fact(action: object) -> object | None:
         return functions.get(str(getattr(action, "function_id", "")))
 
-    def receiver_address(action: object, call: object) -> str | None:
-        name = getattr(call, "receiver_name", None)
-        if not isinstance(name, str) or not name:
-            return None
+    def receiver_path(
+        base_path: tuple[str, ...], call: object
+    ) -> tuple[str, ...] | None:
         declaration = getattr(call, "receiver_declaration", None)
+        name = getattr(call, "receiver_name", None)
         if (
-            storage_declarations
-            and type(declaration) is int
-            and declaration not in storage_declarations
+            type(declaration) is not int
+            or declaration not in storage_by_declaration
+            or not isinstance(name, str)
+            or not name
         ):
             return None
-        path = (*tuple(getattr(action, "target_path", ())), f"{name}()")
-        return address(path)
+        return (*base_path, f"{name}()")
 
-    def token_inputs(action: object) -> tuple[str, ...]:
+    def receiver_contract_name(call: object) -> str | None:
+        type_name = getattr(call, "receiver_type", None)
+        if not isinstance(type_name, str):
+            return None
+        match = re.match(r"^(?:contract|interface)\s+([A-Za-z_]\w*)", type_name)
+        return match.group(1) if match is not None else None
+
+    effect_cache: dict[
+        str,
+        tuple[
+            frozenset[tuple[str, str]],
+            frozenset[tuple[str, str]],
+            tuple[tuple[str, object], ...],
+            tuple[tuple[str, object], ...],
+        ],
+    ] = {}
+
+    def action_effects(action: object):
+        cached = effect_cache.get(str(action.id))
+        if cached is not None:
+            return cached
+
+        def collect(
+            function: object,
+            path: tuple[str, ...],
+            active: frozenset[tuple[str, tuple[str, ...]]],
+        ) -> tuple[
+            set[tuple[str, str]],
+            set[tuple[str, str]],
+            list[tuple[str, object]],
+            list[tuple[str, object]],
+        ]:
+            function_id = str(getattr(function, "canonical_id", ""))
+            marker = (function_id, path)
+            if marker in active:
+                return set(), set(), [], []
+            instance = address(path)
+            if instance is None:
+                return set(), set(), [], []
+            reads = {
+                (instance, str(storage_id))
+                for storage_id in getattr(function, "storage_reads", ())
+            }
+            writes = {
+                (instance, str(storage_id))
+                for storage_id in getattr(function, "storage_writes", ())
+            }
+            guards = [
+                (instance, guard) for guard in getattr(function, "storage_guards", ())
+            ]
+            assignments = [
+                (instance, assignment)
+                for assignment in getattr(function, "storage_assignments", ())
+            ]
+            next_active = active | frozenset({marker})
+            for call in getattr(function, "calls", ()):
+                kind = str(getattr(call, "kind", ""))
+                callee = functions.get(str(getattr(call, "callee_id", "")))
+                if kind == "internal" and callee is not None:
+                    nested = collect(callee, path, next_active)
+                else:
+                    nested_path = receiver_path(path, call)
+                    if nested_path is None:
+                        continue
+                    nested_address = address(nested_path)
+                    if nested_address is None:
+                        continue
+                    if callee is not None:
+                        nested = collect(callee, nested_path, next_active)
+                    else:
+                        contract_name = receiver_contract_name(call)
+                        storage = storage_by_contract_name.get(
+                            (str(contract_name), str(getattr(call, "member_name", "")))
+                        )
+                        if storage is None:
+                            continue
+                        nested = (
+                            {(nested_address, str(storage.canonical_id))},
+                            set(),
+                            [],
+                            [],
+                        )
+                reads.update(nested[0])
+                writes.update(nested[1])
+                guards.extend(nested[2])
+                assignments.extend(nested[3])
+            return reads, writes, guards, assignments
+
         function = fact(action)
         if function is None:
-            return ()
-        return tuple(
-            asset
-            for call in getattr(function, "calls", ())
-            if getattr(call, "member_name", None) == "transferFrom"
-            and (asset := receiver_address(action, call)) is not None
-        )
-
-    def token_outputs(action: object) -> tuple[tuple[int, str], ...]:
-        function = fact(action)
-        if function is None:
-            return ()
-        priorities = {"mint": 0, "transfer": 1}
-        return tuple(
-            (priorities[member], asset)
-            for call in getattr(function, "calls", ())
-            if (member := getattr(call, "member_name", None)) in priorities
-            and (asset := receiver_address(action, call)) is not None
-        )
-
-    def producer(asset: str, consumer_id: str) -> object | None:
-        ranked: list[tuple[object, ...]] = []
-        for candidate in actions.values():
-            if candidate.id == consumer_id:
-                continue
-            matching = tuple(
-                priority
-                for priority, output_asset in token_outputs(candidate)
-                if output_asset == asset
+            result = (frozenset(), frozenset(), (), ())
+        else:
+            reads, writes, guards, assignments = collect(
+                function,
+                tuple(getattr(action, "target_path", ())),
+                frozenset(),
             )
-            if not matching:
+            result = (
+                frozenset(reads),
+                frozenset(writes),
+                tuple(guards),
+                tuple(assignments),
+            )
+        effect_cache[str(action.id)] = result
+        return result
+
+    def action_key(action: object) -> tuple[str, str | None]:
+        return (
+            str(getattr(action, "function_id", "")),
+            address(tuple(getattr(action, "target_path", ()))),
+        )
+
+    def dependency_chain(
+        action: object,
+        active: frozenset[tuple[str, str | None]] = frozenset(),
+        *,
+        alternative_index: int | None = None,
+        choice_counter: list[int] | None = None,
+    ) -> tuple[str, ...]:
+        if choice_counter is None:
+            choice_counter = [0]
+        current_key = action_key(action)
+        if current_key in active:
+            return ()
+        next_active = active | frozenset({current_key})
+        reads, _, _, _ = action_effects(action)
+        function = fact(action)
+        action_address = address(tuple(getattr(action, "target_path", ())))
+        if function is not None and action_address is not None:
+            contextual_storage = {
+                str(getattr(expression, "source_id", ""))
+                for expression in getattr(function, "parameter_expressions", ())
+                if getattr(expression, "source_kind", None) == "storage"
+            }
+            contextual_storage.update(
+                str(getattr(guard, "storage_id", ""))
+                for guard in getattr(function, "storage_guards", ())
+            )
+            has_low_level_call = any(
+                getattr(call, "kind", None) == "low_level"
+                for call in getattr(function, "calls", ())
+            )
+            local_writes = {
+                (action_address, str(storage_id))
+                for storage_id in getattr(function, "storage_writes", ())
+                if str(storage_id) not in contextual_storage
+                and not (
+                    has_low_level_call
+                    and str(
+                        getattr(storage_by_id.get(str(storage_id)), "type_name", "")
+                    ).startswith("mapping")
+                )
+            }
+            reads = reads - local_writes
+        prerequisite_candidates: dict[str, object] = {}
+        covered_locations: set[tuple[str, str]] = set()
+        for location in sorted(reads):
+            if location in covered_locations:
                 continue
-            ranked.append(
-                (
-                    min(matching),
-                    len(token_inputs(candidate)),
-                    bool(getattr(candidate, "callback_enabled", False)),
-                    len(tuple(getattr(candidate, "target_path", ()))),
-                    -float(getattr(candidate, "utility", 0.0)),
-                    str(candidate.id),
-                    candidate,
+            ranked: list[tuple[object, ...]] = []
+            for candidate in actions.values():
+                if action_key(candidate) in next_active:
+                    continue
+                candidate_function = fact(candidate)
+                if candidate_function is None:
+                    continue
+                fixed_role_guard = any(
+                    not str(
+                        getattr(storage_by_id.get(str(storage_id)), "type_name", "")
+                    ).startswith("mapping")
+                    for storage_id in getattr(candidate_function, "role_guards", ())
+                )
+                if fixed_role_guard:
+                    continue
+                candidate_reads, candidate_writes, _, _ = action_effects(candidate)
+                if location not in candidate_writes:
+                    continue
+                candidate_calls_root = any(
+                    str(getattr(call, "callee_signature", "")) in root_signatures
+                    for call in getattr(candidate_function, "calls", ())
+                )
+                effect_instances = {
+                    instance for instance, _ in candidate_reads | candidate_writes
+                }
+                if (
+                    tuple(getattr(candidate, "target_path", ()))
+                    and not candidate_calls_root
+                    and location in candidate_reads
+                    and len(effect_instances) == 1
+                    and bool(tuple(getattr(candidate_function, "calls", ())))
+                ):
+                    continue
+                ranked.append(
+                    (
+                        len(tuple(getattr(candidate, "target_path", ()))),
+                        -float(getattr(candidate, "utility", 0.0)),
+                        len(candidate_reads),
+                        str(candidate.id),
+                        candidate,
+                    )
+                )
+            if ranked:
+                ordered_candidates = sorted(ranked)
+                candidate_index = 0
+                if len(ordered_candidates) > 1:
+                    current_choice = choice_counter[0]
+                    choice_counter[0] += 1
+                    if current_choice == alternative_index:
+                        candidate_index = 1
+                selected = ordered_candidates[candidate_index][-1]
+                prerequisite_candidates[str(selected.id)] = selected
+                covered_locations.update(action_effects(selected)[1])
+
+        ordered = sorted(
+            prerequisite_candidates.values(),
+            key=lambda candidate: (
+                int("address" in tuple(getattr(candidate, "param_types", ()))),
+                len(action_effects(candidate)[0]),
+                str(candidate.id),
+            ),
+        )
+        chain: list[str] = []
+        for predecessor in ordered:
+            chain.extend(
+                dependency_chain(
+                    predecessor,
+                    next_active,
+                    alternative_index=alternative_index,
+                    choice_counter=choice_counter,
                 )
             )
-        return min(ranked)[-1] if ranked else None
+        if action.id not in chain:
+            chain.append(action.id)
+        deduplicated: list[str] = []
+        seen_keys: set[tuple[str, str | None]] = set()
+        for action_id in chain:
+            key = action_key(actions[action_id])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduplicated.append(action_id)
+        return tuple(deduplicated)
 
-    def approval(asset: str) -> object | None:
-        matches = [
-            candidate
-            for candidate in actions.values()
-            if candidate.signature == "approve(address,uint256)"
-            and address(tuple(candidate.target_path)) == asset
-        ]
-        return min(
-            matches,
-            key=lambda item: (
-                len(item.target_path),
-                bool(item.callback_enabled),
-                item.id,
-            ),
-            default=None,
-        )
+    def satisfies(operator: str, value: int, constant: int) -> bool:
+        return {
+            "==": value == constant,
+            "!=": value != constant,
+            "<": value < constant,
+            "<=": value <= constant,
+            ">": value > constant,
+            ">=": value >= constant,
+        }.get(operator, False)
 
-    def expand(action: object, active: frozenset[str] = frozenset()) -> tuple[str, ...]:
+    def guard_chain(
+        action: object,
+        active: frozenset[str] = frozenset(),
+    ) -> tuple[str, ...]:
         if action.id in active:
             return ()
-        chain: list[str] = []
+        function = fact(action)
+        if function is None:
+            return (action.id,)
         next_active = active | frozenset({action.id})
-        for asset in token_inputs(action):
-            source = producer(asset, action.id)
-            if source is not None:
-                chain.extend(expand(source, next_active))
-            permit = approval(asset)
-            if permit is not None and permit.id not in chain:
-                chain.append(permit.id)
+        chain: list[str] = []
+        action_address = address(tuple(getattr(action, "target_path", ())))
+        for guard in getattr(function, "storage_guards", ()):
+            candidates: list[tuple[object, ...]] = []
+            for candidate in actions.values():
+                if candidate.id in next_active:
+                    continue
+                candidate_function = fact(candidate)
+                if candidate_function is None:
+                    continue
+                candidate_address = address(
+                    tuple(getattr(candidate, "target_path", ()))
+                )
+                if action_address is None or candidate_address != action_address:
+                    continue
+                matching = tuple(
+                    assignment
+                    for assignment in getattr(
+                        candidate_function, "storage_assignments", ()
+                    )
+                    if getattr(assignment, "storage_id", None)
+                    == getattr(guard, "storage_id", None)
+                    and type(getattr(assignment, "constant", None)) is int
+                    and type(getattr(guard, "constant", None)) is int
+                    and satisfies(
+                        str(getattr(guard, "operator", "")),
+                        int(assignment.constant),
+                        int(guard.constant),
+                    )
+                )
+                if not matching:
+                    continue
+                candidates.append(
+                    (
+                        len(getattr(candidate_function, "storage_guards", ())),
+                        -len(matching),
+                        -float(getattr(candidate, "utility", 0.0)),
+                        str(candidate.id),
+                        candidate,
+                    )
+                )
+            if candidates:
+                predecessor = min(candidates)[-1]
+                chain.extend(guard_chain(predecessor, next_active))
         if action.id not in chain:
             chain.append(action.id)
         return tuple(chain)
 
     hypotheses: set[tuple[str, ...]] = set()
-    for endpoint in actions.values():
-        endpoint_fact = fact(endpoint)
-        if endpoint_fact is None:
-            continue
-        relevant = set(getattr(endpoint_fact, "storage_reads", ()))
-        if not relevant:
-            continue
-        endpoint_address = address(tuple(endpoint.target_path))
-        predecessors = [
-            candidate
-            for candidate in actions.values()
-            if candidate.id != endpoint.id
-            and not candidate.callback_enabled
-            and address(tuple(candidate.target_path)) == endpoint_address
-            and set(candidate.storage_writes).intersection(relevant)
-        ]
-        predecessors.sort(
-            key=lambda item: (
-                -len(set(item.storage_writes).intersection(relevant)),
-                -item.utility,
-                item.id,
-            )
+    property_calls = {
+        str(member)
+        for property_fact in getattr(
+            getattr(model.analysis, "property_analysis", None), "facts", ()
         )
-        for predecessor in predecessors:
-            sequence = (*expand(predecessor), *expand(endpoint))
-            deduplicated = tuple(dict.fromkeys(sequence))
-            if 1 < len(deduplicated) <= model.max_sequence_length:
-                hypotheses.add(deduplicated)
+        for member in getattr(property_fact, "target_calls", ())
+    }
+    property_storage = {
+        str(storage.canonical_id)
+        for storage in getattr(root_contract, "storage", ())
+        if str(getattr(storage, "name", "")) in property_calls
+    }
+    root_address = address(())
+    property_direct = {
+        str(action.id)
+        for action in actions.values()
+        if not tuple(getattr(action, "target_path", ()))
+        and root_address is not None
+        and any(
+            instance == root_address and storage_id in property_storage
+            for instance, storage_id in action_effects(action)[1]
+        )
+    }
+    hypotheses.update((action_id,) for action_id in property_direct)
+
+    def order_authorization_writers(sequence: tuple[str, ...]) -> tuple[str, ...]:
+        ordered = list(sequence)
+        for action_id in sequence:
+            producer = actions[action_id]
+            if "address" not in tuple(getattr(producer, "param_types", ())):
+                continue
+            writes = action_effects(producer)[1]
+            if not writes:
+                continue
+            consumers = [
+                consumer_id
+                for consumer_id in ordered
+                if consumer_id != action_id
+                and writes.intersection(action_effects(actions[consumer_id])[0])
+            ]
+            if not consumers:
+                continue
+            consumer_id = min(
+                consumers,
+                key=lambda item: (
+                    len(tuple(getattr(actions[item], "target_path", ()))),
+                    ordered.index(item),
+                ),
+            )
+            ordered.remove(action_id)
+            ordered.insert(ordered.index(consumer_id), action_id)
+        return tuple(ordered)
+
+    def add_hypothesis(sequence: tuple[str, ...], endpoint: object) -> None:
+        sequence = order_authorization_writers(sequence)
+        candidates = [sequence]
+        if len(sequence) == model.max_sequence_length + 1:
+            for index, action_id in enumerate(sequence[:-1]):
+                writes = action_effects(actions[action_id])[1]
+                covered = frozenset().union(
+                    *(
+                        action_effects(actions[other_id])[1]
+                        for other_index, other_id in enumerate(sequence)
+                        if other_index != index
+                    )
+                )
+                if writes and writes.issubset(covered):
+                    candidates.append((*sequence[:index], *sequence[index + 1 :]))
+        for candidate in candidates:
+            if 1 < len(candidate) <= model.max_sequence_length:
+                hypotheses.add(candidate)
+        reads, writes, _, _ = action_effects(endpoint)
+        if not reads.intersection(writes):
+            return
+        if bool(getattr(endpoint, "payable", False)):
+            return
+        endpoint_function = fact(endpoint)
+        calls_root = any(
+            str(getattr(call, "callee_signature", "")) in root_signatures
+            for call in getattr(endpoint_function, "calls", ())
+        )
+        if tuple(getattr(endpoint, "target_path", ())) and not calls_root:
+            return
+        if any(
+            str(getattr(call, "kind", "")) == "low_level"
+            or (
+                str(getattr(call, "kind", "")) == "external"
+                and (
+                    (callee := functions.get(str(getattr(call, "callee_id", ""))))
+                    is None
+                    or bool(tuple(getattr(callee, "storage_writes", ())))
+                )
+            )
+            for call in getattr(endpoint_function, "calls", ())
+        ):
+            return
+        guarded_storage = {
+            str(getattr(guard, "storage_id", ""))
+            for guard in getattr(endpoint_function, "storage_guards", ())
+            if type(getattr(guard, "constant", None)) is int
+        }
+        assigned_storage = {
+            str(getattr(assignment, "storage_id", ""))
+            for assignment in getattr(endpoint_function, "storage_assignments", ())
+            if type(getattr(assignment, "constant", None)) is int
+        }
+        if guarded_storage.intersection(assigned_storage):
+            return
+        for additional_repetitions in (1, 2):
+            repeated = (*sequence, *((str(endpoint.id),) * additional_repetitions))
+            if len(repeated) <= model.max_sequence_length:
+                hypotheses.add(repeated)
+
+    for endpoint in actions.values():
+        guarded = tuple(dict.fromkeys(guard_chain(endpoint)))
+        add_hypothesis(guarded, endpoint)
+        dependent_variants = {dependency_chain(endpoint)}
+        dependent_variants.update(
+            dependency_chain(endpoint, alternative_index=index) for index in range(32)
+        )
+        for dependent in sorted(dependent_variants):
+            add_hypothesis(dependent, endpoint)
+            combined = tuple(
+                dict.fromkeys((*dependent[:-1], *guarded[:-1], str(endpoint.id)))
+            )
+            add_hypothesis(combined, endpoint)
 
     def rank(sequence: tuple[str, ...]) -> tuple[object, ...]:
+        first = actions[sequence[0]]
         endpoint = actions[sequence[-1]]
+        endpoint_function = fact(endpoint)
+        calls_root = any(
+            str(getattr(call, "callee_signature", "")) in root_signatures
+            for call in getattr(endpoint_function, "calls", ())
+        )
+        dependency_inversions = sum(
+            bool(
+                action_effects(actions[sequence[later]])[1].intersection(
+                    action_effects(actions[sequence[earlier]])[0]
+                )
+            )
+            for earlier in range(len(sequence))
+            for later in range(earlier + 1, len(sequence))
+        )
         return (
-            int(bool(endpoint.target_path)),
+            int(str(endpoint.id) not in property_direct),
+            int(bool(endpoint.target_path) and not calls_root),
             -len(sequence),
+            int(bool(first.target_path)),
+            len(first.param_types),
+            dependency_inversions,
             -sum(bool(actions[action_id].callback_enabled) for action_id in sequence),
             -endpoint.utility,
             sequence,
@@ -636,6 +1004,98 @@ def _hypothesis_skeleton(
             )
         )
     return Candidate(tuple(steps))
+
+
+def _semantic_value_hints(
+    model: Track04SearchModel,
+    skeleton: object,
+) -> tuple[
+    dict[tuple[int, int], int],
+    dict[int, int],
+    dict[tuple[int, int], TargetAddress],
+]:
+    """Derive bounded numeric hints from compiler comparisons along one trace."""
+
+    report = getattr(model.analysis, "report", None)
+    functions = {
+        str(function.canonical_id): function
+        for contract in getattr(report, "contracts", ())
+        for function in getattr(contract, "functions", ())
+    }
+    root = next(
+        (
+            contract
+            for contract in getattr(report, "contracts", ())
+            if getattr(contract, "source_name", None)
+            == getattr(model.analysis, "source_name", None)
+            and getattr(contract, "name", None)
+            == getattr(model.analysis, "contract_name", None)
+        ),
+        None,
+    )
+    root_by_signature = {
+        str(function.signature): function for function in getattr(root, "functions", ())
+    }
+    actions = {action.id: action for action in model.actions}
+
+    def constants(action: object) -> tuple[int, ...]:
+        function = functions.get(str(getattr(action, "function_id", "")))
+        if function is None:
+            return ()
+        values = {
+            value
+            for value in getattr(function, "comparison_constants", ())
+            if type(value) is int and 0 < value <= 10 * 10**18
+        }
+        for call in getattr(function, "calls", ()):
+            callee = functions.get(str(getattr(call, "callee_id", "")))
+            if callee is not None:
+                values.update(
+                    value
+                    for value in getattr(callee, "comparison_constants", ())
+                    if type(value) is int and 0 < value <= 10 * 10**18
+                )
+            root_callee = root_by_signature.get(
+                str(getattr(call, "callee_signature", ""))
+            )
+            if root_callee is not None:
+                values.update(
+                    value
+                    for value in getattr(root_callee, "comparison_constants", ())
+                    if type(value) is int and 0 < value <= 10 * 10**18
+                )
+        return tuple(sorted(values))
+
+    steps = tuple(getattr(skeleton, "steps", ()))
+    by_step = tuple(constants(actions[step.action_id]) for step in steps)
+    parameter_hints: dict[tuple[int, int], int] = {}
+    value_hints: dict[int, int] = {}
+    address_hints: dict[tuple[int, int], TargetAddress] = {}
+    for index, step in enumerate(steps):
+        action = actions[step.action_id]
+        function = functions.get(str(action.function_id))
+        calls_root = any(
+            str(getattr(call, "callee_signature", "")) in root_by_signature
+            for call in getattr(function, "calls", ())
+        )
+        if calls_root:
+            for parameter_index, abi_type in enumerate(action.param_types):
+                if abi_type == "address":
+                    address_hints[(index, parameter_index)] = TargetAddress()
+        if action.payable:
+            payable_candidates = {value for later in by_step[index:] for value in later}
+            if payable_candidates:
+                value_hints[index] = max(payable_candidates)
+        candidates = by_step[index]
+        if not candidates:
+            candidates = next((item for item in by_step[index + 1 :] if item), ())
+        if not candidates:
+            continue
+        hint = max(candidates)
+        for parameter_index, abi_type in enumerate(action.param_types):
+            if abi_type.startswith(("uint", "int")):
+                parameter_hints[(index, parameter_index)] = hint
+    return parameter_hints, value_hints, address_hints
 
 
 def _resolve_value_expr(value: object, runtime: object) -> object:
@@ -920,11 +1380,19 @@ def _run_search(
                     metadata={"note": "budget"},
                 )
 
+            semantic_hints = (
+                _semantic_value_hints(model, skeleton)
+                if active_strategy == "semantic"
+                else ({}, {}, {})
+            )
             contextual_state = (
                 SimpleNamespace(
                     runtime_uint_sources=model.runtime_uint_sources,
                     previous_returns=(),
                     runtime_instances=tuple(getattr(runtime, "instances", ())),
+                    parameter_hints=semantic_hints[0],
+                    value_hints=semantic_hints[1],
+                    address_hints=semantic_hints[2],
                 )
                 if runtime is not None
                 else None
@@ -1097,7 +1565,7 @@ def _run_search(
         active_strategy = "semantic"
         semantic_problem = _skeleton_problem(model)
         semantic_attempts = 0
-        semantic_limit = min(1, max(0, attempt_budget - ledger.attempts - 1))
+        semantic_limit = min(3, max(0, attempt_budget - ledger.attempts - 1))
         for sequence in _semantic_hypotheses(model, runtime):
             if semantic_attempts >= semantic_limit or deadline - clock() <= 0:
                 break

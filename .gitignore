@@ -28,6 +28,7 @@ task-5-report.md
 
 # TRUST404 local Foundry dependencies
 trust404/harness/lib/
+trust404/harness/.qprover-verify.lock
 
 
 # TRUST404 local input/output

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
@@ -133,6 +134,15 @@ def verify_exploit(
     setup_dst = scratch / "_qprover_setup.sol"
     generated = (target_dst, invariants_dst, exploit_dst, attempt_dst, setup_dst)
 
+    lock_file = None
+    try:
+        lock_file = (hdir / ".qprover-verify.lock").open("a+", encoding="utf-8")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    except OSError as error:
+        if lock_file is not None:
+            lock_file.close()
+        return VerificationResult(False, "", "infrastructure", str(error))
+
     setup_import = ""
     if manifest.setup is not None:
         setup_path = manifest.path.parent / manifest.setup
@@ -233,3 +243,6 @@ def verify_exploit(
         for path in generated:
             with suppress(OSError):
                 path.unlink(missing_ok=True)
+        with suppress(OSError):
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()

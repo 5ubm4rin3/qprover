@@ -159,6 +159,31 @@ class ParameterConstraintFact:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageGuardFact:
+    storage_id: str
+    operator: str
+    constant: int
+    source_span: str
+
+
+@dataclass(frozen=True, slots=True)
+class StorageAssignmentFact:
+    storage_id: str
+    constant: int
+    source_span: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParameterExpressionFact:
+    parameter_index: int
+    operator: str
+    source_kind: str
+    source_id: str
+    offset: int
+    source_span: str
+
+
+@dataclass(frozen=True, slots=True)
 class FunctionFacts:
     source_name: str
     contract: str
@@ -185,6 +210,11 @@ class FunctionFacts:
     transitive_storage_writes: tuple[str, ...]
     transitive_calls: tuple[str, ...]
     parameter_constraints: tuple[ParameterConstraintFact, ...] = ()
+    storage_guards: tuple[StorageGuardFact, ...] = ()
+    storage_assignments: tuple[StorageAssignmentFact, ...] = ()
+    parameter_expressions: tuple[ParameterExpressionFact, ...] = ()
+    parameter_declarations: tuple[int, ...] = ()
+    comparison_constants: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,6 +497,10 @@ def _literal_integer(
                 return parsed
             multiplier = _SUBDENOMINATION_MULTIPLIERS.get(str(denomination))
             return parsed * multiplier if multiplier is not None else None
+    if node.get("nodeType") == "FunctionCall" and node.get("kind") == "typeConversion":
+        arguments = tuple(node.get("arguments", ()))
+        if len(arguments) == 1:
+            return _literal_integer(arguments[0], declarations)
     if node.get("nodeType") == "UnaryOperation" and node.get("operator") == "-":
         nested = _literal_integer(node.get("subExpression"), declarations)
         return -nested if nested is not None else None
@@ -526,47 +560,46 @@ def _parameter_constraint_facts(
         arguments = candidate.get("arguments", ())
         if not isinstance(arguments, (tuple, list)) or not arguments:
             continue
-        condition = arguments[0]
-        if (
-            not isinstance(condition, Mapping)
-            or condition.get("nodeType") != "BinaryOperation"
-            or condition.get("operator") not in reverse_operator
-        ):
-            continue
-        operator = str(condition["operator"])
-        left = condition.get("leftExpression")
-        right = condition.get("rightExpression")
+        for condition in _walk(arguments[0]):
+            if (
+                condition.get("nodeType") != "BinaryOperation"
+                or condition.get("operator") not in reverse_operator
+            ):
+                continue
+            operator = str(condition["operator"])
+            left = condition.get("leftExpression")
+            right = condition.get("rightExpression")
 
-        left_ref = (
-            left.get("referencedDeclaration")
-            if isinstance(left, Mapping) and left.get("nodeType") == "Identifier"
-            else None
-        )
-        right_ref = (
-            right.get("referencedDeclaration")
-            if isinstance(right, Mapping) and right.get("nodeType") == "Identifier"
-            else None
-        )
-        if left_ref in parameter_ids:
-            constant = _literal_integer(right, declarations)
-            parameter_index = parameter_ids[left_ref]
-            normalized = operator
-        elif right_ref in parameter_ids:
-            constant = _literal_integer(left, declarations)
-            parameter_index = parameter_ids[right_ref]
-            normalized = reverse_operator[operator]
-        else:
-            continue
-        if constant is None:
-            continue
-        facts.append(
-            ParameterConstraintFact(
-                parameter_index=parameter_index,
-                operator=normalized,
-                constant=constant,
-                source_span=str(condition.get("src", "unknown")),
+            left_ref = (
+                left.get("referencedDeclaration")
+                if isinstance(left, Mapping) and left.get("nodeType") == "Identifier"
+                else None
             )
-        )
+            right_ref = (
+                right.get("referencedDeclaration")
+                if isinstance(right, Mapping) and right.get("nodeType") == "Identifier"
+                else None
+            )
+            if left_ref in parameter_ids:
+                constant = _literal_integer(right, declarations)
+                parameter_index = parameter_ids[left_ref]
+                normalized = operator
+            elif right_ref in parameter_ids:
+                constant = _literal_integer(left, declarations)
+                parameter_index = parameter_ids[right_ref]
+                normalized = reverse_operator[operator]
+            else:
+                continue
+            if constant is None:
+                continue
+            facts.append(
+                ParameterConstraintFact(
+                    parameter_index=parameter_index,
+                    operator=normalized,
+                    constant=constant,
+                    source_span=str(condition.get("src", "unknown")),
+                )
+            )
     return tuple(
         sorted(
             set(facts),
@@ -578,6 +611,304 @@ def _parameter_constraint_facts(
             ),
         )
     )
+
+
+def _storage_reference(
+    node: object,
+    state_facts: Mapping[int, StorageFacts],
+) -> str | None:
+    if not isinstance(node, Mapping) or node.get("nodeType") != "Identifier":
+        return None
+    reference = node.get("referencedDeclaration")
+    storage = state_facts.get(reference) if isinstance(reference, int) else None
+    return storage.canonical_id if storage is not None else None
+
+
+def _storage_guard_facts(
+    node: Mapping[str, Any],
+    declarations: Mapping[int, Mapping[str, Any]],
+    state_facts: Mapping[int, StorageFacts],
+) -> tuple[StorageGuardFact, ...]:
+    reverse_operator = {
+        "<": ">",
+        "<=": ">=",
+        ">": "<",
+        ">=": "<=",
+        "==": "==",
+        "!=": "!=",
+    }
+    facts: set[StorageGuardFact] = set()
+    for candidate in _walk(node.get("body")):
+        if candidate.get("nodeType") != "FunctionCall":
+            continue
+        expression = _call_expression(candidate)
+        if not expression or expression.get("name") not in {"require", "assert"}:
+            continue
+        arguments = candidate.get("arguments", ())
+        if not isinstance(arguments, (tuple, list)) or not arguments:
+            continue
+        for condition in _walk(arguments[0]):
+            if (
+                condition.get("nodeType") != "BinaryOperation"
+                or condition.get("operator") not in reverse_operator
+            ):
+                continue
+            operator = str(condition["operator"])
+            left = condition.get("leftExpression")
+            right = condition.get("rightExpression")
+            left_storage = _storage_reference(left, state_facts)
+            right_storage = _storage_reference(right, state_facts)
+            if left_storage is not None:
+                storage_id = left_storage
+                constant = _literal_integer(right, declarations)
+                normalized = operator
+            elif right_storage is not None:
+                storage_id = right_storage
+                constant = _literal_integer(left, declarations)
+                normalized = reverse_operator[operator]
+            else:
+                continue
+            if constant is None:
+                continue
+            facts.add(
+                StorageGuardFact(
+                    storage_id=storage_id,
+                    operator=normalized,
+                    constant=constant,
+                    source_span=str(condition.get("src", "unknown")),
+                )
+            )
+    return tuple(
+        sorted(
+            facts,
+            key=lambda item: (
+                item.storage_id,
+                item.operator,
+                item.constant,
+                item.source_span,
+            ),
+        )
+    )
+
+
+def _storage_assignment_facts(
+    node: Mapping[str, Any],
+    declarations: Mapping[int, Mapping[str, Any]],
+    state_facts: Mapping[int, StorageFacts],
+) -> tuple[StorageAssignmentFact, ...]:
+    facts: set[StorageAssignmentFact] = set()
+    for candidate in _walk(node.get("body")):
+        if (
+            candidate.get("nodeType") != "Assignment"
+            or candidate.get("operator") != "="
+        ):
+            continue
+        storage_id = _storage_reference(candidate.get("leftHandSide"), state_facts)
+        constant = _literal_integer(candidate.get("rightHandSide"), declarations)
+        if storage_id is None or constant is None:
+            continue
+        facts.add(
+            StorageAssignmentFact(
+                storage_id=storage_id,
+                constant=constant,
+                source_span=str(candidate.get("src", "unknown")),
+            )
+        )
+    return tuple(
+        sorted(
+            facts,
+            key=lambda item: (item.storage_id, item.constant, item.source_span),
+        )
+    )
+
+
+def _parameter_affine(
+    node: object,
+    parameter_ids: Mapping[int, int],
+    declarations: Mapping[int, Mapping[str, Any]],
+) -> tuple[int, int] | None:
+    if not isinstance(node, Mapping):
+        return None
+    if node.get("nodeType") == "Identifier":
+        reference = node.get("referencedDeclaration")
+        if reference in parameter_ids:
+            return parameter_ids[reference], 0
+        return None
+    if node.get("nodeType") != "BinaryOperation" or node.get("operator") not in {
+        "+",
+        "-",
+    }:
+        return None
+    left = _parameter_affine(node.get("leftExpression"), parameter_ids, declarations)
+    right_constant = _literal_integer(node.get("rightExpression"), declarations)
+    if left is not None and right_constant is not None:
+        index, offset = left
+        return index, offset + (
+            right_constant if node.get("operator") == "+" else -right_constant
+        )
+    if node.get("operator") == "+":
+        right = _parameter_affine(
+            node.get("rightExpression"), parameter_ids, declarations
+        )
+        left_constant = _literal_integer(node.get("leftExpression"), declarations)
+        if right is not None and left_constant is not None:
+            return right[0], right[1] + left_constant
+    return None
+
+
+def _context_source_affine(
+    node: object,
+    declarations: Mapping[int, Mapping[str, Any]],
+    function_identities: Mapping[int, tuple[_ContractIdentity, str, str]],
+    state_facts: Mapping[int, StorageFacts],
+) -> tuple[str, str, int] | None:
+    storage_id = _storage_reference(node, state_facts)
+    if storage_id is not None:
+        return "storage", storage_id, 0
+    nested_storage = {
+        state_facts[item["referencedDeclaration"]].canonical_id
+        for item in _state_identifiers(node, state_facts)
+    }
+    if len(nested_storage) == 1:
+        return "storage", next(iter(nested_storage)), 0
+    if isinstance(node, Mapping) and node.get("nodeType") == "FunctionCall":
+        arguments = node.get("arguments", ())
+        expression = _call_expression(node)
+        reference = expression.get("referencedDeclaration") if expression else None
+        function = (
+            function_identities.get(reference) if isinstance(reference, int) else None
+        )
+        if function is not None and not arguments:
+            return "function", function[2], 0
+    if (
+        not isinstance(node, Mapping)
+        or node.get("nodeType") != "BinaryOperation"
+        or node.get("operator") not in {"+", "-"}
+    ):
+        return None
+    left = _context_source_affine(
+        node.get("leftExpression"), declarations, function_identities, state_facts
+    )
+    right_constant = _literal_integer(node.get("rightExpression"), declarations)
+    if left is not None and right_constant is not None:
+        kind, source_id, offset = left
+        return (
+            kind,
+            source_id,
+            offset
+            + (right_constant if node.get("operator") == "+" else -right_constant),
+        )
+    if node.get("operator") == "+":
+        right = _context_source_affine(
+            node.get("rightExpression"), declarations, function_identities, state_facts
+        )
+        left_constant = _literal_integer(node.get("leftExpression"), declarations)
+        if right is not None and left_constant is not None:
+            return right[0], right[1], right[2] + left_constant
+    return None
+
+
+def _parameter_expression_facts(
+    node: Mapping[str, Any],
+    declarations: Mapping[int, Mapping[str, Any]],
+    function_identities: Mapping[int, tuple[_ContractIdentity, str, str]],
+    state_facts: Mapping[int, StorageFacts],
+) -> tuple[ParameterExpressionFact, ...]:
+    parameters = tuple(node.get("parameters", {}).get("parameters", ()))
+    parameter_ids = {
+        int(item["id"]): index
+        for index, item in enumerate(parameters)
+        if isinstance(item, Mapping) and isinstance(item.get("id"), int)
+    }
+    reverse_operator = {
+        "<": ">",
+        "<=": ">=",
+        ">": "<",
+        ">=": "<=",
+        "==": "==",
+        "!=": "!=",
+    }
+    facts: set[ParameterExpressionFact] = set()
+    for candidate in _walk(node.get("body")):
+        if candidate.get("nodeType") != "FunctionCall":
+            continue
+        expression = _call_expression(candidate)
+        if not expression or expression.get("name") not in {"require", "assert"}:
+            continue
+        arguments = candidate.get("arguments", ())
+        if not isinstance(arguments, (tuple, list)) or not arguments:
+            continue
+        for condition in _walk(arguments[0]):
+            if (
+                condition.get("nodeType") != "BinaryOperation"
+                or condition.get("operator") not in reverse_operator
+            ):
+                continue
+            operator = str(condition["operator"])
+            left_node = condition.get("leftExpression")
+            right_node = condition.get("rightExpression")
+            left_parameter = _parameter_affine(left_node, parameter_ids, declarations)
+            right_parameter = _parameter_affine(right_node, parameter_ids, declarations)
+            if left_parameter is not None:
+                source = _context_source_affine(
+                    right_node, declarations, function_identities, state_facts
+                )
+                normalized = operator
+                parameter = left_parameter
+            elif right_parameter is not None:
+                source = _context_source_affine(
+                    left_node, declarations, function_identities, state_facts
+                )
+                normalized = reverse_operator[operator]
+                parameter = right_parameter
+            else:
+                continue
+            if source is None:
+                continue
+            parameter_index, parameter_offset = parameter
+            source_kind, source_id, source_offset = source
+            facts.add(
+                ParameterExpressionFact(
+                    parameter_index=parameter_index,
+                    operator=normalized,
+                    source_kind=source_kind,
+                    source_id=source_id,
+                    offset=source_offset - parameter_offset,
+                    source_span=str(condition.get("src", "unknown")),
+                )
+            )
+    return tuple(
+        sorted(
+            facts,
+            key=lambda item: (
+                item.parameter_index,
+                item.operator,
+                item.source_kind,
+                item.source_id,
+                item.offset,
+                item.source_span,
+            ),
+        )
+    )
+
+
+def _comparison_constants(
+    node: Mapping[str, Any],
+    declarations: Mapping[int, Mapping[str, Any]],
+) -> tuple[int, ...]:
+    values: set[int] = set()
+    comparison_operators = {"<", "<=", ">", ">=", "==", "!="}
+    for candidate in _walk(node.get("body")):
+        if (
+            candidate.get("nodeType") != "BinaryOperation"
+            or candidate.get("operator") not in comparison_operators
+        ):
+            continue
+        for expression in _walk(candidate):
+            value = _literal_integer(expression, declarations)
+            if value is not None:
+                values.add(value)
+    return tuple(sorted(values))
 
 
 def _extract_function(
@@ -732,6 +1063,20 @@ def _extract_function(
         transitive_storage_writes=tuple(sorted(write_ids)),
         transitive_calls=(),
         parameter_constraints=_parameter_constraint_facts(node, declarations),
+        storage_guards=_storage_guard_facts(node, declarations, state_facts),
+        storage_assignments=_storage_assignment_facts(node, declarations, state_facts),
+        parameter_expressions=_parameter_expression_facts(
+            node,
+            declarations,
+            function_identities,
+            state_facts,
+        ),
+        parameter_declarations=tuple(
+            int(item["id"])
+            for item in node.get("parameters", {}).get("parameters", ())
+            if isinstance(item, Mapping) and isinstance(item.get("id"), int)
+        ),
+        comparison_constants=_comparison_constants(node, declarations),
     )
 
 

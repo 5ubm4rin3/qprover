@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from qprover.trust404_values import (
+    Add,
     CallbackProgram,
     Const,
     ContractAddress,
@@ -11,6 +12,8 @@ from qprover.trust404_values import (
     ReadUint,
     Scale,
     SelfAddress,
+    Sub,
+    TargetAddress,
     complete_parameters,
 )
 
@@ -295,3 +298,167 @@ def test_multistep_runtime_read_is_positive_and_capped_by_source_constant() -> N
     bounded = Min(Max(read, Const(1)), Const(10))
     assert completed[0].steps[0].args == (bounded,)
     assert completed[0].steps[1].args == (bounded,)
+
+
+def test_parameter_source_prefers_read_only_resource_over_updated_accumulator() -> None:
+    action = _action(
+        "call:omega(uint256)",
+        ("uint256",),
+        reads=("storage:limit", "storage:total"),
+        writes=("storage:total",),
+    )
+    analysis = SimpleNamespace(
+        actions=(action,),
+        parameter_constraints=(),
+        source_constants=(),
+    )
+    state = SimpleNamespace(
+        runtime_uint_sources=(
+            SimpleNamespace(
+                instance_id="instance:root",
+                signature="accumulator()",
+                argument_mode="none",
+                reads=("storage:total",),
+            ),
+            SimpleNamespace(
+                instance_id="instance:root",
+                signature="resourceLimit()",
+                argument_mode="none",
+                reads=("storage:limit",),
+            ),
+        ),
+        previous_returns=(),
+    )
+    skeleton = SimpleNamespace(
+        steps=(_step(action.id, "instance:root"),),
+    )
+
+    completed = complete_parameters(skeleton, state, analysis, limit=1)
+
+    assert completed[0].steps[0].args == (
+        ReadUint("instance:root", "resourceLimit()", ()),
+    )
+
+
+def test_exact_contextual_parameter_expression_precedes_generic_values() -> None:
+    action = _action("call:omega(uint256)", ("uint256",))
+    expression = SimpleNamespace(
+        parameter_index=0,
+        operator="==",
+        source_kind="function",
+        source_id="function:threshold",
+        offset=1,
+    )
+    function = SimpleNamespace(
+        canonical_id=action.function_id,
+        parameter_constraints=(),
+        parameter_expressions=(expression,),
+        calls=(),
+    )
+    source = SimpleNamespace(
+        instance_id="instance:root",
+        signature="threshold()",
+        argument_mode="none",
+        reads=(),
+        function_id="function:threshold",
+        source_id="function:threshold",
+    )
+    analysis = SimpleNamespace(
+        actions=(action,),
+        parameter_constraints=(),
+        report=SimpleNamespace(contracts=(SimpleNamespace(functions=(function,)),)),
+    )
+    state = SimpleNamespace(
+        runtime_uint_sources=(source,),
+        previous_returns=(),
+    )
+    skeleton = SimpleNamespace(steps=(_step(action.id, "instance:root"),))
+
+    completed = complete_parameters(skeleton, state, analysis, limit=1)
+
+    read = ReadUint("instance:root", "threshold()")
+    assert completed[0].steps[0].args == (Add(read, Const(1)),)
+
+
+def test_storage_relative_parameter_expression_supports_subtraction() -> None:
+    action = _action("call:omega(uint256)", ("uint256",), reads=("storage:seal",))
+    expression = SimpleNamespace(
+        parameter_index=0,
+        operator="==",
+        source_kind="storage",
+        source_id="storage:seal",
+        offset=-7,
+    )
+    function = SimpleNamespace(
+        canonical_id=action.function_id,
+        parameter_constraints=(),
+        parameter_expressions=(expression,),
+        calls=(),
+    )
+    source = SimpleNamespace(
+        instance_id="instance:root",
+        signature="seal()",
+        argument_mode="none",
+        reads=("storage:seal",),
+        function_id=None,
+        source_id="storage:seal",
+    )
+    analysis = SimpleNamespace(
+        actions=(action,),
+        parameter_constraints=(),
+        report=SimpleNamespace(contracts=(SimpleNamespace(functions=(function,)),)),
+    )
+    state = SimpleNamespace(
+        runtime_uint_sources=(source,),
+        previous_returns=(),
+    )
+    skeleton = SimpleNamespace(steps=(_step(action.id, "instance:root"),))
+
+    completed = complete_parameters(skeleton, state, analysis, limit=1)
+
+    read = ReadUint("instance:root", "seal()")
+    assert completed[0].steps[0].args == (Sub(read, Const(7)),)
+
+
+def test_semantic_hints_seed_uint_arguments_and_payable_value() -> None:
+    action = _action("call:alpha(uint256)", ("uint256",))
+    action.payable = True
+    function = SimpleNamespace(
+        canonical_id=action.function_id,
+        parameter_constraints=(),
+        parameter_expressions=(),
+        calls=(),
+    )
+    analysis = SimpleNamespace(
+        actions=(action,),
+        parameter_constraints=(),
+        source_constants=(11,),
+        report=SimpleNamespace(contracts=(SimpleNamespace(functions=(function,)),)),
+    )
+    state = SimpleNamespace(
+        runtime_uint_sources=(),
+        previous_returns=(),
+        parameter_hints={(0, 0): 11},
+        value_hints={0: 2 * 10**18},
+    )
+    skeleton = SimpleNamespace(steps=(_step(action.id, "instance:root"),))
+
+    completed = complete_parameters(skeleton, state, analysis, limit=1)
+
+    assert completed[0].steps[0].args == (Const(11),)
+    assert completed[0].steps[0].value_wei == 2 * 10**18
+
+
+def test_semantic_address_hint_can_prioritize_root_target() -> None:
+    action = _action("call:alpha(address)", ("address",))
+    analysis = SimpleNamespace(actions=(action,), parameter_constraints=())
+    state = SimpleNamespace(
+        runtime_uint_sources=(),
+        previous_returns=(),
+        address_hints={(0, 0): TargetAddress()},
+    )
+    skeleton = SimpleNamespace(steps=(_step(action.id, "instance:helper"),))
+
+    completed = complete_parameters(skeleton, state, analysis, limit=1)
+
+    assert completed[0].steps[0].args == (TargetAddress(),)

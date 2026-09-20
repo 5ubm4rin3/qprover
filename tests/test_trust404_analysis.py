@@ -207,3 +207,94 @@ contract Target {
     assert fact.parameter_index == 0
     assert fact.operator == ">="
     assert fact.constant == 7
+
+
+def test_track04_compiler_extracts_constant_state_transitions_and_derived_values(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    src = root / "src"
+    src.mkdir(parents=True)
+    target = src / "Neutral.sol"
+    target.write_text(
+        """// SPDX-License-Identifier: MIT
+pragma solidity 0.8.24;
+
+contract Stage {
+    uint256 public phase;
+    address public pending;
+
+    function threshold() public view returns (uint256) {
+        return phase + 6;
+    }
+
+    function advance(uint256 amount) external {
+        require(phase == 1);
+        require(amount == threshold() + 1);
+        phase = 2;
+    }
+
+    function finish(uint256 amount) external {
+        require(amount + 3 == phase);
+        phase = 4;
+    }
+
+    function clear() external {
+        require(pending != address(0));
+        pending = address(0);
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    analysis = compile_track04_target(
+        target,
+        target_name="Stage",
+        target_src="src/Neutral.sol",
+        solc_version="0.8.24",
+        evm_version="cancun",
+    )
+
+    phase = analysis.report.storage("src/Neutral.sol", "Stage", "phase")
+    threshold = analysis.report.function("src/Neutral.sol", "Stage", "threshold()")
+    advance = analysis.report.function("src/Neutral.sol", "Stage", "advance(uint256)")
+    finish = analysis.report.function("src/Neutral.sol", "Stage", "finish(uint256)")
+    clear = analysis.report.function("src/Neutral.sol", "Stage", "clear()")
+    pending = analysis.report.storage("src/Neutral.sol", "Stage", "pending")
+
+    assert tuple(
+        (fact.storage_id, fact.operator, fact.constant)
+        for fact in advance.storage_guards
+    ) == ((phase.canonical_id, "==", 1),)
+    assert tuple(
+        (fact.storage_id, fact.constant) for fact in advance.storage_assignments
+    ) == ((phase.canonical_id, 2),)
+    assert tuple(
+        (
+            fact.parameter_index,
+            fact.operator,
+            fact.source_kind,
+            fact.source_id,
+            fact.offset,
+        )
+        for fact in advance.parameter_expressions
+    ) == ((0, "==", "function", threshold.canonical_id, 1),)
+    assert tuple(
+        (
+            fact.parameter_index,
+            fact.operator,
+            fact.source_kind,
+            fact.source_id,
+            fact.offset,
+        )
+        for fact in finish.parameter_expressions
+    ) == ((0, "==", "storage", phase.canonical_id, -3),)
+    assert advance.comparison_constants == (1,)
+    assert finish.comparison_constants == (3,)
+    assert tuple(
+        (fact.storage_id, fact.operator, fact.constant) for fact in clear.storage_guards
+    ) == ((pending.canonical_id, "!=", 0),)
+    assert tuple(
+        (fact.storage_id, fact.constant) for fact in clear.storage_assignments
+    ) == ((pending.canonical_id, 0),)

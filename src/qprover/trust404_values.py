@@ -309,6 +309,7 @@ def _constraint_models(
 def _address_domain(
     steps: tuple[object, ...],
     index: int,
+    parameter_index: int,
     state: object,
 ) -> tuple[ValueExpr, ...]:
     values: list[ValueExpr] = []
@@ -317,6 +318,10 @@ def _address_domain(
         if value not in values:
             values.append(value)
 
+    hints = getattr(state, "address_hints", {})
+    hint = hints.get((index, parameter_index)) if hasattr(hints, "get") else None
+    if isinstance(hint, ValueExpr):
+        add(hint)
     if index + 1 < len(steps):
         add(ContractAddress(_step_target(steps[index + 1])))
     for prior in reversed(steps[:index]):
@@ -359,8 +364,10 @@ def _uint_domain(
     )
     previous_target = _step_target(steps[step_index - 1]) if step_index > 0 else None
 
-    def rank(source: object) -> tuple[int, int, int, str, str]:
-        overlap = len(set(getattr(source, "reads", ())) & (reads | writes))
+    def rank(source: object) -> tuple[int, int, int, int, int, str, str]:
+        source_reads = set(getattr(source, "reads", ()))
+        read_only_overlap = len(source_reads & (reads - writes))
+        overlap = len(source_reads & (reads | writes))
         same_target = int(getattr(source, "instance_id", "") == target)
         recent_asset_balance = int(
             consumes_token
@@ -369,10 +376,13 @@ def _uint_domain(
             and getattr(source, "signature", "") == "balanceOf(address)"
             and getattr(source, "argument_mode", "none") == "self"
         )
+        derived_getter = int(getattr(source, "function_id", None) is not None)
         return (
             -recent_asset_balance,
+            -read_only_overlap,
             -overlap,
             -same_target,
+            -derived_getter,
             str(getattr(source, "instance_id", "")),
             str(getattr(source, "signature", "")),
         )
@@ -382,6 +392,21 @@ def _uint_domain(
     def add(value: ValueExpr) -> None:
         if value not in result:
             result.append(value)
+
+    def read_source(source: object) -> ReadUint | None:
+        mode = getattr(source, "argument_mode", "none")
+        if mode == "self":
+            args: tuple[ValueExpr, ...] = (SelfAddress(),)
+        elif mode == "none":
+            args = ()
+        else:
+            return None
+        read = ReadUint(
+            str(getattr(source, "instance_id", target)),
+            str(getattr(source, "signature", "")),
+            args,
+        )
+        return read if read.signature else None
 
     bounds = _integer_bounds(abi_type)
     positive_constants = tuple(
@@ -412,21 +437,50 @@ def _uint_domain(
     if len(result) >= limit:
         return tuple(result[:limit])
 
-    for source in sorted(sources, key=rank):
-        mode = getattr(source, "argument_mode", "none")
-        args: tuple[ValueExpr, ...]
-        if mode == "self":
-            args = (SelfAddress(),)
-        elif mode == "none":
-            args = ()
-        else:
+    for expression in getattr(function, "parameter_expressions", ()):
+        if (
+            getattr(expression, "parameter_index", None) != parameter_index
+            or getattr(expression, "operator", None) != "=="
+        ):
             continue
-        read = ReadUint(
-            str(getattr(source, "instance_id", target)),
-            str(getattr(source, "signature", "")),
-            args,
-        )
-        if not read.signature:
+        source_kind = getattr(expression, "source_kind", None)
+        source_id = getattr(expression, "source_id", None)
+        matching = []
+        for source in sources:
+            if source_kind == "function":
+                matches = getattr(source, "function_id", None) == source_id
+            elif source_kind == "storage":
+                matches = source_id in set(getattr(source, "reads", ()))
+            else:
+                matches = False
+            if matches:
+                matching.append(source)
+        for source in sorted(matching, key=rank):
+            read = read_source(source)
+            if read is None:
+                continue
+            offset = getattr(expression, "offset", None)
+            if type(offset) is not int:
+                continue
+            if offset > 0:
+                add(Add(read, Const(offset)))
+            elif offset < 0:
+                add(Sub(read, Const(-offset)))
+            else:
+                add(read)
+            if len(result) >= limit:
+                return tuple(result[:limit])
+
+    hints = getattr(state, "parameter_hints", {})
+    hint = hints.get((step_index, parameter_index)) if hasattr(hints, "get") else None
+    if type(hint) is int and bounds is not None and bounds[0] <= hint <= bounds[1]:
+        add(Const(hint))
+        if len(result) >= limit:
+            return tuple(result[:limit])
+
+    for source in sorted(sources, key=rank):
+        read = read_source(source)
+        if read is None:
             continue
         if runtime_cap is not None:
             add(Min(Max(read, Const(1)), Const(runtime_cap)))
@@ -492,7 +546,7 @@ def _parameter_domains(
         tuple(getattr(action, "param_types", ()))
     ):
         if abi_type == "address":
-            domain = _address_domain(steps, index, state)
+            domain = _address_domain(steps, index, parameter_index, state)
         elif _integer_bounds(abi_type) is not None:
             domain = _uint_domain(
                 steps,
@@ -561,6 +615,7 @@ def complete_parameters(
 
     candidates: list[ValueCandidate] = []
     seen: set[str] = set()
+    value_hints = getattr(state, "value_hints", {})
     for selected in itertools.product(*per_step):
         mutable_steps = [
             ValueStep(
@@ -568,10 +623,14 @@ def complete_parameters(
                 target_instance_id=_step_target(step),
                 signature=str(step.signature),
                 args=tuple(args),
-                value_wei=int(getattr(step, "value_wei", 0)),
+                value_wei=int(
+                    value_hints.get(index, getattr(step, "value_wei", 0))
+                    if hasattr(value_hints, "get")
+                    else getattr(step, "value_wei", 0)
+                ),
                 sender_slot=int(getattr(step, "sender_slot", 0)),
             )
-            for step, args in zip(steps, selected, strict=True)
+            for index, (step, args) in enumerate(zip(steps, selected, strict=True))
         ]
         actions = _actions(analysis)
         for index in range(len(mutable_steps)):

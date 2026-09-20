@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from qprover.trust404 import Track04Manifest
@@ -80,6 +82,60 @@ def test_verify_exploit_parses_proven_result_and_cleans_scratch(tmp_path: Path) 
     assert "1735689600" in seen["test"]
     assert "contract Exploit" in seen["exploit"]
     assert not list((hdir / "test").glob("_qprover_*"))
+
+
+def test_verify_exploit_serializes_shared_harness_scratch(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    target = tmp_path / "src" / "Demo.sol"
+    target.parent.mkdir()
+    target.write_text("contract Demo {}", encoding="utf-8")
+    invariants = tmp_path / "Invariants.sol"
+    invariants.write_text("contract Invariants {}", encoding="utf-8")
+    hdir = _harness(tmp_path)
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    call_lock = threading.Lock()
+    seen: list[str] = []
+    calls = 0
+
+    def runner(*args, **kwargs):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_entered.set()
+            second_entered.wait(0.2)
+        else:
+            second_entered.set()
+        seen.append(
+            (hdir / "test" / "_qprover_exploit.sol").read_text(encoding="utf-8")
+        )
+        return subprocess.CompletedProcess(args[0], 0, "AGENT_RESULT NOT_PROVEN\n", "")
+
+    def verify(marker: str):
+        return verify_exploit(
+            hdir,
+            target,
+            invariants,
+            f"contract Exploit {{ string constant marker = '{marker}'; }}",
+            manifest,
+            timeout_seconds=12,
+            runner=runner,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(verify, "alpha")
+        assert first_entered.wait(1)
+        second = pool.submit(verify, "beta")
+        results = (first.result(), second.result())
+
+    assert [result.category for result in results] == [
+        "not_proven",
+        "not_proven",
+    ]
+    assert "alpha" in seen[0]
+    assert "beta" in seen[1]
 
 
 def test_verify_exploit_rewrites_setup_target_import(tmp_path: Path) -> None:

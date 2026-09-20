@@ -173,6 +173,78 @@ def test_extracts_target_balance_property_fact() -> None:
     assert fact.bound_from_check_all is True
 
 
+def test_extracts_target_call_through_interface_type_conversion() -> None:
+    target = _parameter("target", 110)
+    converted_target = {
+        "nodeType": "FunctionCall",
+        "id": 111,
+        "kind": "typeConversion",
+        "expression": {
+            "nodeType": "ElementaryTypeNameExpression",
+            "id": 112,
+        },
+        "arguments": [_identifier("target", 110, 113)],
+    }
+    getter_call = {
+        "nodeType": "FunctionCall",
+        "id": 114,
+        "expression": {
+            "nodeType": "MemberAccess",
+            "id": 115,
+            "memberName": "protected",
+            "expression": converted_target,
+        },
+        "arguments": [],
+    }
+    predicate = _function(
+        "protectedUnchanged",
+        120,
+        parameters=(target,),
+        body={
+            "nodeType": "Block",
+            "id": 121,
+            "statements": [
+                {
+                    "nodeType": "Return",
+                    "id": 122,
+                    "expression": getter_call,
+                }
+            ],
+        },
+    )
+    check_all = _function(
+        "checkAll",
+        130,
+        parameters=(_parameter("target", 131),),
+        body={
+            "nodeType": "Block",
+            "id": 132,
+            "statements": [
+                {
+                    "nodeType": "ExpressionStatement",
+                    "expression": {
+                        "nodeType": "FunctionCall",
+                        "id": 133,
+                        "expression": {
+                            "nodeType": "Identifier",
+                            "referencedDeclaration": 120,
+                        },
+                        "arguments": [_identifier("target", 131, 134)],
+                    },
+                }
+            ],
+        },
+    )
+
+    analysis = extract_property_analysis(
+        (_source_unit((predicate, check_all)),),
+        invariants_source_name="Invariants.sol",
+        predicates=("protectedUnchanged",),
+    )
+
+    assert analysis.fact("protectedUnchanged").target_calls == ("protected",)
+
+
 def test_predicate_not_called_from_check_all_is_unknown() -> None:
     target = _parameter("target", 50)
     predicate = _function(
