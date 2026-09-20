@@ -78,15 +78,15 @@ Narration:
 
 Then show family table for ~15 seconds.
 
-> Importantly, this improvement is not limited to reentrancy. QUBO led or tied across five of six families.
+> The family breakdown shows where each strategy succeeded. QUBO led or tied across five of six families.
 
-## 3:50–4:15 — Honest trade-off
+## 3:50–4:15 — Trade-off
 
 Screen: candidates/confirmed and solver time.
 
 Narration:
 
-> QUBO used only 15.6 candidate evaluations per confirmed exploit, but it spent additional simulated-annealing compute. We claim improved prioritization and search yield—not a wall-clock speedup and not quantum advantage.
+> QUBO used 15.6 candidate evaluations per confirmed exploit and spent additional simulated-annealing compute. The benchmark measures prioritization and search yield, not wall-clock speedup.
 
 ## 4:15–4:40 — Close
 
@@ -94,7 +94,7 @@ Screen: final product statement.
 
 Narration:
 
-> QProver turns exploit discovery into a closed validation loop: search, execute, minimize and replay. The next step is running the same proof engine against TRUST404's unpublished targets and comparing additional optimization backends.
+> QProver uses a closed validation loop: search, execute, minimize and replay. A result is proven only when the executable witness reproduces the supplied invariant violation.
 
 Final text:
 

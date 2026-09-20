@@ -2,9 +2,10 @@
 
 ## Goal
 
-Demonstrate the core TRUST404 value proposition in under two minutes of terminal time:
-
-> QProver autonomously searches for a transaction sequence, executes it on a local EVM, verifies a supplied invariant violation, minimizes the sequence, generates a Foundry PoC, and proves reproducibility with three cold replays.
+Run an end-to-end local example in under two minutes of terminal time. The demo
+searches for a transaction sequence, executes it on Anvil, checks the supplied
+invariant, minimizes the witness, generates a Foundry PoC, and performs three cold
+replays.
 
 ## Pre-demo check
 
@@ -53,13 +54,12 @@ Expected verified shape:
 }
 ```
 
-## What to narrate while it runs
+## Narration
 
-1. **"We do not ask an LLM whether this contract looks vulnerable."**
-2. **"QProver turns the attack path into a search problem."**
-3. **"QUBO only prioritizes candidates—the local EVM decides whether an exploit is real."**
-4. **"If the invariant does not break, the result feeds back into search."**
-5. **"Once it breaks, QProver minimizes the sequence and independently cold-replays the proof three times."**
+1. QProver represents the attack path as a bounded search problem.
+2. QUBO prioritizes candidates; local EVM execution determines their outcome.
+3. Failed candidates feed execution evidence back into the search.
+4. A violation is minimized, rendered as a PoC, and cold-replayed three times.
 
 ## Show the evidence bundle
 
@@ -103,7 +103,7 @@ sed -n '1,240p' \
   /private/tmp/qprover-demo-core/runs/<run-id>/poc/QProverReplay_<run-id>.t.sol
 ```
 
-Explain that this is generated executable evidence, not prose.
+Show the generated calls and assertions.
 
 ### QUBO evidence
 
@@ -123,9 +123,10 @@ uv run qprover replay \
   --json
 ```
 
-## Benchmark slide/demo fallback
+## Recorded fallback
 
-If live search time is risky during a stage presentation, show the already generated full benchmark summary and then run only the deterministic one-command demo.
+If live search cannot be completed during a presentation, show the recorded evidence
+bundle and the full benchmark summary before running the deterministic demo.
 
 Main benchmark numbers:
 
@@ -140,12 +141,5 @@ Negative false-confirmed: 0/60 for every strategy
 
 ## Failure fallback
 
-If `doctor` fails, do not hide the failure. Show its JSON diagnostic and switch to the recorded evidence bundle/video. QProver is designed to fail closed rather than fabricate confirmation.
-
-## Demo safety
-
-- fresh local Anvil only;
-- no wallet/private key input;
-- no public RPC required;
-- no public-chain broadcast;
-- organizer/authorized targets only.
+If `doctor` fails, show its JSON diagnostic and switch to the recorded evidence
+bundle or video. Do not present the recorded artifact as a live run.

@@ -1,44 +1,42 @@
-# METHOD — QProver v2.5
+# METHOD — QProver
 
 ## 1. 접근 방식
 
-QProver는 TRUST404 Track 04의 입력인 `Target.sol`, `Invariants.sol`,
-`manifest.json`을 그대로 받아 실행 가능한 invariant counterexample을 찾는다. 정적
-분석 결과, search score, QUBO energy 또는 symbolic model은 proof로 취급하지 않는다.
-후보를 standalone `Exploit.sol`로 생성하고, 원본 입력을 사용하는 fresh organizer
-Harness가 실제 invariant violation을 재현할 때만 `PROVEN`으로 판정한다.
+QProver는 TRUST404 Track 04 입력인 `Target.sol`, `Invariants.sol`,
+`manifest.json`을 받아 실행 가능한 invariant counterexample을 탐색한다. 후보를
+standalone `Exploit.sol`로 생성하고, 원본 입력을 사용하는 fresh organizer Harness가
+같은 invariant violation을 재현할 때만 `PROVEN`으로 판정한다. 정적 분석 결과,
+search score, QUBO energy, symbolic model은 proof가 아니다.
 
-핵심 제약은 production Track 04 경로에 공개 target 이름, 알려진 witness 값,
-알려진 action trace 또는 vulnerability-class exploit macro를 넣지 않는 것이다.
-reentrancy, access control, oracle, accounting 같은 분류는 정답 template로 사용하지
-않는다. 대신 compiler에서 얻은 storage read/write, call, value flow, guard,
-call/write ordering과 supplied property의 dependency를 일반적인 attacker action
-search로 변환한다.
+Compiler에서 얻은 storage read/write, internal/external call, value flow, guard,
+call/write ordering과 supplied property dependency를 attacker action search로 변환한다.
+Production Track 04 경로는 public target 이름, 알려진 witness 값, 알려진 action trace,
+vulnerability-class exploit macro를 정답 template로 사용하지 않는다.
 
-QProver는 기존 QProver core를 확장한 프로젝트다. 기존 compiler-backed analysis,
-generic search abstraction, local EVM execution, replay infrastructure 위에 TRUST404
-기간 동안 official Track 04 adapter, PropertyFact/PropertySlice, contextual
-parameter completion, persistent SearchAttacker, generic callback lowering,
-execution-backed minimization 및 fresh Harness proof 경계를 구현했다.
+QProver는 앞선 연구 prototype을 기반으로 한다. TRUST404 기간에는 Track 04
+interface, property-directed exploit search, execution feedback/self-validation,
+standalone PoC generation, fresh-Harness verification을 구현했다. 이 설명은 대회 규정상
+prior-code disclosure이며, 현재 시스템의 proof 기준은 모든 실행 경로에 동일하게
+적용된다.
 
 ## 2. 에이전트 아키텍처
 
 ```text
 Target.sol + Invariants.sol + manifest.json
         ↓
-input/manifest binding validation
+input and manifest validation
         ↓
-solc compact AST + ABI + storage layout
+solc AST + ABI + storage layout
         ↓
-ProgramFact + PropertyFact + PropertySlice
+semantic facts + property-directed slice
         ↓
-generic ABI action graph / reachable instances
+attacker action graph + reachable instances
         ↓
-deterministic search portfolio
+best-first / QUBO / coverage search
         ↓
-contextual typed ValueExpr completion
+contextual parameter completion
         ↓
-persistent SearchAttacker + local Anvil snapshots
+local Anvil execution
         ↓
 original Invariants.checkAll(target)
         ↓
@@ -49,51 +47,48 @@ standalone Exploit.sol
 fresh organizer Harness replay
 ```
 
-Compiler analysis는 visibility/mutability, storage dependency, internal/external call,
-receiver identity, value flow, guard와 transitive dependency를 추출한다. Track 04
-adapter는 분석용 임시 compiler workspace를 만들 수 있지만 organizer가 제공한
-source를 수정하지 않으며, 최종 proof는 원본 target/invariants/manifest binding을
-사용한다.
+Compiler analysis는 visibility, mutability, storage dependency, receiver identity,
+internal/external calls, value flow, guards와 transitive dependency를 추출한다. 분석용
+temporary compiler workspace를 만들 수 있지만 supplied source는 수정하지 않는다.
 
-Search-time runtime과 final proof는 분리되어 있다. 각 candidate는 동일한 Anvil
-baseline snapshot에서 `SearchAttacker`를 통해 실행된다. 위반 후보가 발견되면 실제
-재실행으로 action을 최소화하고 generic lowering으로 `Exploit.sol`을 만든다. 마지막에
-fresh Harness deployment가 같은 supplied predicate violation을 재현하지 못하면 exit
-code 0을 반환하지 않는다. `NOT_FOUND`/`ERROR`도 이전 성공 artifact를 재사용하지 않고
-명백한 no-op `Exploit.sol`을 기록한다.
+각 candidate는 controlled Anvil baseline에서 실행된다. Pass, revert, observation과
+state change는 다음 candidate의 우선순위와 parameter 선택에 반영된다. Runtime에서
+위반을 찾으면 concrete replay로 action을 최소화하고 generic lowering으로
+`Exploit.sol`을 생성한다.
+
+Search-time runtime과 final proof는 분리한다. Fresh Harness deployment가 supplied
+predicate violation을 재현하지 못하면 exit code `0`을 반환하지 않는다.
+`NOT_FOUND`와 `ERROR`는 stale success artifact 대신 no-op `Exploit.sol`을 기록한다.
 
 ## 3. 탐색 전략
 
-Action은 `call:f(...)` 형태의 일반적인 ABI call이다. 한 함수의 write가 다른
-함수의 read/write와 연결되거나 property-relevant resource에 영향을 주는 관계를
-compiler evidence에서 만들어 sequence를 우선순위화한다. 공개 exploit의 알려진
-호출 순서를 직접 encoding하지 않는다.
+Action은 `call:f(...)` 형태의 일반적인 ABI call이다. 한 함수의 write가 다른 함수의
+read/write 또는 property-relevant resource와 연결되는 관계를 compiler evidence에서
+구성하고, 이 관계로 sequence를 우선순위화한다.
 
-탐색은 하나의 SearchProblem과 concrete execution feedback을 공유하는 deterministic
-portfolio다.
+탐색 전략은 하나의 search problem과 concrete execution feedback을 공유한다.
 
 - risk-guided best-first search
 - bounded short-horizon QUBO prioritization
 - coverage/state-novelty search
-- shortest-first iterative deepening과 state-local revert feedback
+- shortest-first iterative deepening
+- state-local, parameter-local revert feedback
 
-QUBO는 proof oracle이 아니라 먼저 실행할 후보를 정하는 search backend다. 현재
-backend는 seeded classical simulated annealing이며 quantum advantage를 주장하지
-않는다.
+QUBO는 먼저 실행할 candidate를 정하는 search backend다. Proof 판정에는 사용하지
+않는다. Backend는 seeded classical simulated annealing을 사용한다.
 
-Parameter는 typed `ValueExpr`로 표현한다. 주소 후보에는 attacker/self/root target,
-reachable contract instance와 이전 producer가 포함된다. 정수 후보에는 runtime
-getter, prior observation, scaled value, compiler constant, ABI boundary와 compiler가
-안전하게 추출한 bounded Z3 constraint가 포함된다. 정확한 equality constraint는
-관련 없는 getter보다 먼저 평가하지만, 모든 값은 concrete EVM execution으로 다시
-검증된다.
+Parameter는 typed value expression으로 표현한다. 주소 후보에는 attacker, self,
+root target, reachable contract instance와 앞선 action에서 관찰한 address가 포함된다.
+정수 후보에는 runtime getter, prior observation, scaled value, compiler constant, ABI
+boundary와 compiler에서 추출한 bounded Z3 constraint가 포함된다. 모든 concrete 값은
+EVM 실행으로 검증한다.
 
 Self-validation loop는 `--timeout`과 `--max-attempts`를 hard budget으로 사용한다.
 
 ```text
 search → complete parameters → execute → check original invariant
             ↑                         │
-            └── feedback on pass/revert
+            └── pass/revert feedback ─┘
                                       └── violation → minimize → fresh proof
 ```
 
@@ -101,56 +96,48 @@ search → complete parameters → execute → check original invariant
 
 ### 런타임
 
-제출된 runtime exploit search는 외부 LLM, hosted model 또는 API를 호출하지 않는다.
-별도의 runtime prompt도 없다. compiler-backed analysis, deterministic
-search/optimization, local Foundry/Anvil execution만으로 동작하며 scoring 환경의
-`--network=none` 실행을 지원한다.
+Runtime exploit search는 외부 LLM, hosted model 또는 API를 호출하지 않는다. Runtime
+prompt도 없다. Compiler analysis, deterministic search/optimization, local
+Foundry/Anvil execution으로 동작하며 `--network=none` 환경을 지원한다.
 
 ### 개발 과정
 
-개발에는 ChatGPT 및 OpenAI coding agents를 포함한 AI-assisted development tool을
-사용했다. 사용 범위는 implementation draft, refactoring, debugging, test 작성,
-documentation 및 code-review assistance였다. AI가 runtime 공격 경로를 원격으로
-선택하는 구조는 아니며, 최종 architecture/security boundary 결정과 실제 실행 결과
-검토 및 제출 책임은 참가자에게 있다.
+개발에는 ChatGPT와 OpenAI coding agents를 포함한 AI-assisted coding tool을 사용했다.
+사용 범위는 drafting, refactoring, debugging, testing, documentation, code review였다.
+Architecture와 security boundary 결정, 실행 결과 검토와 제출 책임은 참가자에게 있다.
 
 ## 5. 결정론 보장 방법
 
 동일 source, manifest, CLI seed와 pinned toolchain에 대해 compiler-derived action
 ordering, action identifier, parameter domain, transition/BQM construction, seeded
 annealing, candidate ordering과 log formatting을 고정한다. `attempts.log`에는
-wall-clock timestamp를 넣지 않는다.
+wall-clock timestamp를 기록하지 않는다.
 
-각 search candidate는 baseline snapshot으로 되돌린 뒤 실행하며, standalone proof는
-fresh deployment를 사용한다. Proof parser는 official result marker, manifest에 선언된
-predicate, compiler에서 확인한 declaration/checkAll binding과 predicate order를 함께
-검증한다. Runtime violation, minimized trace와 최종 generated source는 각각 concrete
-replay를 통과해야 한다.
+Search candidate 실행 전에는 baseline snapshot으로 복구한다. Standalone proof는 fresh
+deployment를 사용한다. Proof parser는 official result marker, manifest predicate,
+compiler에서 확인한 declaration/`checkAll` binding과 predicate order를 함께 검증한다.
+Runtime violation, minimized trace와 generated source는 각각 concrete replay를 통과해야
+한다.
 
-Submission image는 Python 3.12.14, Foundry 1.7.1, solc 0.8.24 및 pinned forge-std를
-고정한다. 최종 root `Exploit.sol`은 이 고정 image의 `--network=none` 환경에서
-untouched official Harness로 독립적으로 10회 replay했고, 10회 모두 동일한 첫
-위반 predicate `ownerUnchanged`를 재현했다. 이 검증은 exploit을 10번 다시 생성한
-것이 아니라 동일한 submitted PoC를 fresh deployment에서 10번 실행한 결과다.
+Submission image는 Python 3.12.14, Foundry 1.7.1, solc 0.8.24와 pinned
+forge-std를 사용한다. 최종 root `Exploit.sol`은 이 image의 `--network=none` 환경에서
+untouched official Harness로 독립적으로 10회 replay했고, 10회 모두 동일한 첫 위반
+predicate `ownerUnchanged`를 재현했다. 이는 동일한 submitted PoC를 fresh deployment로
+10회 실행한 결과다.
 
 ## 6. 한계
 
-- 탐색은 bounded하다. 짧은 budget에서는 긴 prerequisite sequence나 매우 넓은
-  parameter/action space의 exploit을 찾지 못하고 `NOT_FOUND`가 될 수 있다.
-- 개별 transaction마다 block이 증가하는 persistent Anvil search는 한 Harness
-  transaction 안의 여러 external call이 동일 block을 관찰하는 의미와 다를 수 있다.
-  exact block-number multi-call 조건은 현재 탐색 범위의 알려진 제한이다.
-- proxy/delegatecall implementation recovery와 arbitrary CREATE/CREATE2 discovery는
-  지원 범위 밖이다.
-- complex tuple/struct/dynamic-array ABI와 arbitrary-selector callback synthesis는
-  bounded generic lowering 범위에서 제외될 수 있다.
-- indirect helper topology, nested asset prerequisites와 긴 callback prerequisites는
+- Bounded search는 긴 prerequisite sequence와 넓은 parameter/action space를 놓칠 수
+  있다.
+- Persistent search의 개별 transaction은 block을 증가시킨다. 한 Harness transaction
+  안의 여러 external call이 같은 block을 관찰하는 조건과 차이가 생길 수 있다.
+- Proxy/delegatecall implementation recovery와 arbitrary `CREATE`/`CREATE2` discovery는
+  제한적이다.
+- Complex tuple/struct/dynamic-array ABI와 arbitrary-selector callback synthesis는
+  bounded 범위만 지원한다.
+- Indirect helper topology, nested asset prerequisites와 긴 callback prerequisites는
   현재 action/instance horizon에서 누락될 수 있다.
-- compiler/build/setup semantics를 안전하게 해석할 수 없으면 fail closed 하며
-  `ERROR`로 반환한다.
-- 기존 QProver v1 MicroBench 결과는 v2.5 hidden-target generalization의 증거가
-  아니다. synthetic hidden-style suite 역시 official hidden target이나 contest
-  score로 주장하지 않는다.
-
-이 한계를 개선할 때도 공개 target 전용 분기, 알려진 witness 또는 vulnerability
-class answer template를 도입하지 않는 것을 설계 제약으로 유지한다.
+- Compiler, build 또는 setup semantics를 안전하게 해석할 수 없으면 `ERROR`로
+  fail closed한다.
+- MicroBench와 synthetic hidden-style suite는 official hidden-target 결과나 contest
+  score가 아니다.

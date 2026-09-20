@@ -1,6 +1,7 @@
 # QProver Pitch Deck Content
 
-Designed for a short hackathon pitch. Keep visuals dominant and terminal evidence readable.
+Notes for a short technical presentation. Keep visuals simple and terminal evidence
+readable.
 
 ## Slide 1 — QProver
 
@@ -12,9 +13,9 @@ Subtitle:
 
 **A vulnerability warning is not an exploit. QProver returns executable evidence.**
 
-## Slide 2 — The gap
+## Slide 2 — Why execution matters
 
-### Security AI often stops too early
+### A warning is not a counterexample
 
 ```text
 "This function looks vulnerable"
@@ -22,9 +23,9 @@ Subtitle:
 "Here is a transaction sequence that breaks the supplied invariant"
 ```
 
-Problems:
+Constraints:
 
-- static/LLM warnings produce false positives;
+- static warnings can produce false positives;
 - multi-transaction attacks create sequence/state explosion;
 - generated PoCs can revert or fail to violate the property;
 - audit pipelines need executable ground truth.
@@ -73,7 +74,8 @@ Clarification:
 
 **QUBO prioritizes candidates. It does not prove the exploit.**
 
-Current backend: classical simulated annealing. Backend boundary can later host exact, quantum annealing or QAOA experiments.
+Current backend: seeded classical simulated annealing. Exact classical solving is
+also available for bounded models.
 
 ## Slide 5 — Proof, not prediction
 
@@ -114,9 +116,9 @@ Footer:
 
 Small-print limitation:
 
-Synthetic/public/white-box paired MicroBench; no quantum-advantage claim.
+Synthetic/public/white-box paired MicroBench.
 
-## Slide 7 — Generalization across attack families
+## Slide 7 — Family breakdown
 
 Use a grouped bar chart from this table:
 
@@ -129,9 +131,8 @@ Use a grouped bar chart from this table:
 | Side entrance | 2/10 | 5/10 | 0/10 | 10/10 |
 | Signature replay | 1/10 | 1/10 | 0/10 | 3/10 |
 
-Talking point:
-
-**Risk heuristics dominate specific motifs; QUBO remains useful across more families.**
+Talking point: Risk ranking performs well on specific motifs. In this benchmark,
+QUBO has nonzero confirmation results across every family.
 
 ## Slide 8 — Search efficiency vs compute trade-off
 
@@ -146,9 +147,8 @@ But:
 - solver compute is additional overhead;
 - 184.43 s cumulative annealing time in full MicroBench.
 
-Message:
-
-**We trade cheap solver compute for more valuable EVM search decisions.**
+Message: In this benchmark, QUBO exchanges additional solver compute for fewer
+candidate and EVM operations per confirmation.
 
 Do not claim wall-clock speedup.
 
@@ -170,13 +170,13 @@ Safety:
 - no public-chain broadcast
 - fail closed on unsupported semantics
 
-## Slide 10 — What comes next
+## Slide 10 — Current scope
 
-1. TRUST404 participant-package adapter / hidden targets
-2. state-aware and higher-order QUBO transitions
-3. stronger governance/signature-replay search
-4. historical real-protocol benchmarks
-5. same QUBO formulation across classical exact / annealing / QA / QAOA backends
+- bounded search can miss long prerequisite chains;
+- nested cross-contract and complex ABI reasoning remain limited;
+- QUBO prioritizes execution and is not a proof oracle;
+- the benchmark is synthetic and does not measure hidden-target performance;
+- fresh EVM replay remains the success boundary.
 
 Closing line:
 

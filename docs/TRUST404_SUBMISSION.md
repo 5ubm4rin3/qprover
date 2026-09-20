@@ -1,47 +1,53 @@
-# TRUST404 Track 04 Submission Package — QProver v2.5
+# TRUST404 Track 04 Submission Interface — QProver
 
-## 제출 제목
+This document describes the official submission runtime and output contract. For
+system design, see [ARCHITECTURE.md](ARCHITECTURE.md). For contest methodology and
+required disclosures, see [METHOD.md](../METHOD.md).
 
-**QProver — Optimization-Guided Autonomous Exploit Prover**
+## Runtime Contract
 
-## 한 줄 설명
+QProver accepts the organizer-provided Solidity target, invariant contract, and
+manifest. It analyzes the supplied sources, searches for an executable invariant
+counterexample, writes a standalone `Exploit.sol`, and verifies successful output
+with an organizer-compatible Harness on a fresh deployment.
 
-QProver는 주최 측 Solidity target과 invariant를 compiler-backed 방식으로 분석하고, 취약점별 전용 macro 없이 generic 공격 경로를 탐색한 뒤 실제 Harness 실행으로 exploit 가능성을 증명합니다.
+The container entrypoint accepts seven required arguments:
 
-## 핵심 메시지
-
-> **QProver는 취약해 보인다는 예측에서 멈추지 않고, 실제 실행 가능한 PoC를 만들고 invariant violation으로 검증합니다.**
-
-QProver v2.5는 공개 타깃에 맞춘 reentrancy/access-control/oracle/accounting exploit template를 사용하지 않습니다. `solc` AST에서 storage read/write, calls, value-flow와 dependency를 추출하고, 이를 generic action search 문제로 변환합니다. QUBO는 어떤 call sequence를 먼저 검증할지 정하는 prioritization backend이며 proof oracle이 아닙니다.
-
-## Track 04 요구사항 대응
-
-| 요구사항 | QProver v2 |
+| Argument | Meaning |
 |---|---|
-| 입력 | 공식 `--contract`, `--invariants`, `--manifest`를 그대로 사용 |
-| 분석 | `solc` compiler AST / ABI / storage layout 기반 semantic analysis |
-| 탐색 | PropertySlice + shared state frontier 위에서 best-first/QUBO/coverage deterministic portfolio |
-| 파라미터 | contextual typed ValueExpr, runtime getter, compiler constraint + bounded Z3 completion |
-| 실행 | persistent SearchAttacker + Anvil snapshot/revert, original `Invariants.checkAll(target)` 직접 호출 |
-| 생성 | 최소화된 generic IR/callback program을 standalone `Exploit.sol`로 lowering |
-| Self-validation | fast runtime violation을 최소화한 뒤 organizer Harness에서 fresh final proof |
-| 출력 | `Exploit.sol`, `result.json`, `attempts.log`, exit 0/1/2 |
-| 결정론 | stable ordering, bounded parameter domains, seeded search, timestamp 없는 log |
-| 정상 타깃 | 실제 invariant violation이 없으면 `PROVEN`으로 처리하지 않음 |
-| 미공개 타깃 | 공개 exploit class를 production macro로 하드코딩하지 않음 |
+| `--contract` | Path to the target Solidity source |
+| `--invariants` | Path to the supplied `Invariants.sol` |
+| `--manifest` | Path to the supplied `manifest.json` |
+| `--out` | Writable output directory |
+| `--timeout` | Total wall-clock budget in seconds |
+| `--seed` | Deterministic search seed |
+| `--max-attempts` | Maximum number of concretely evaluated candidates |
 
-## 실행
+The manifest may reference an optional `Setup.s.sol` for supported deployment
+semantics. Input, compiler, deployment, and proof-binding errors fail closed.
 
-Docker image는 한 번만 빌드합니다.
+## Build
+
+From the repository root:
 
 ```bash
-docker build --platform=linux/amd64 -f agent/Dockerfile -t qprover-track04 .
+docker build \
+  --platform=linux/amd64 \
+  -f agent/Dockerfile \
+  -t qprover-track04 \
+  .
 ```
 
-그 뒤 주최 측 runner는 공식 인자만 전달하면 됩니다.
+The image contains the pinned Python environment, Foundry toolchain, Solidity
+compiler, forge-std revision, QProver package, and Harness artifacts needed for
+offline execution.
+
+## Run
 
 ```bash
-docker run --rm --network=none \
+docker run --rm \
+  --platform=linux/amd64 \
+  --network=none \
   -v /path/to/target:/target:ro \
   -v /path/to/output:/out \
   qprover-track04 \
@@ -54,56 +60,60 @@ docker run --rm --network=none \
   --max-attempts 5
 ```
 
-## 출력 설명
+The target mount can remain read-only. QProver uses temporary workspaces for
+analysis and writes only to its runtime workspace and `--out`.
 
-성공 시 `result.json`은 organizer Harness가 실제로 재현한 invariant만 기록합니다. 또한 최종 PoC의 action sequence와 설명을 함께 남겨, 어느 invariant가 어떤 실행 경로로 깨졌는지 제출 결과만으로 확인할 수 있습니다. 정적 분석이나 search score만으로 이 파일의 상태를 `PROVEN`으로 만들지 않습니다.
+The equivalent host command is:
 
-## Proof boundary
+```bash
+uv run qprover-trust404 \
+  --contract /path/to/Target.sol \
+  --invariants /path/to/Invariants.sol \
+  --manifest /path/to/manifest.json \
+  --out /path/to/out \
+  --timeout 300 \
+  --seed 42 \
+  --max-attempts 5
+```
 
-QProver가 내부적으로 사용하는 다음 정보는 **proof가 아닙니다.**
+## Output Contract
 
-- AST/graph analysis 결과
-- utility score
-- QUBO energy
-- candidate priority
-- static dependency hypothesis
+Each run writes:
 
-최종 성공은 organizer Harness에서 `Exploit.run(target)` 실행 후 supplied invariant가 실제로 깨졌을 때만 인정합니다.
+- `Exploit.sol` — the standalone exploit for a proven result, or an explicit no-op
+  artifact for `NOT_FOUND` and `ERROR`;
+- `result.json` — final status, violated predicate, action sequence, minimization
+  state, explanation, and Harness reproduction state;
+- `attempts.log` — deterministic records of concretely evaluated candidates and
+  their outcomes.
 
-## v1 benchmark와 v2의 구분
+Exit codes:
 
-저장소에 남아 있는 MicroBench 수치는 기존 QProver core/search backend를 비교한 **v1 synthetic benchmark**입니다. 해당 수치를 v2의 hidden-target 일반화 성능으로 주장하지 않습니다.
+| Code | Status | Meaning |
+|---:|---|---|
+| `0` | `PROVEN` | Fresh Harness execution reproduced a supplied invariant violation |
+| `1` | `NOT_FOUND` | No proof was found within the configured budget |
+| `2` | `ERROR` | Input, build, deployment, infrastructure, or unsupported-semantics failure |
 
-v2의 평가에서 특히 중요한 항목은 다음입니다.
+`NOT_FOUND` is not a safety result.
 
-- macro-free hidden-target generalization
-- false `PROVEN` 방지
-- deterministic replay
-- attempt/time budget 내 success rate
-- 성공 PoC의 최소성
+## Proof Semantics
 
-## 현재 v2.5 한계
+Analysis facts, dependency hypotheses, utility scores, QUBO energy, symbolic
+values, and search-time candidate priority are not proof.
 
-- proxy/delegatecall implementation recovery, arbitrary CREATE/CREATE2 discovery는 후속 범위입니다.
-- 복잡한 dynamic ABI type과 arbitrary selector callback은 현재 bounded scope 밖일 수 있습니다.
-- fast runtime 성공도 organizer Harness에서 fresh 재현되지 않으면 exit 0이 아닙니다.
-- QUBO가 다른 classical search보다 우수하다는 주장은 별도 ablation 없이는 하지 않습니다.
+Exit code `0` requires the generated `Exploit.sol` to build and execute against a
+fresh target and invariant deployment under the organizer-compatible Harness. The
+Harness must report that a predicate declared in the supplied manifest and bound
+to `Invariants.checkAll` is violated.
 
-이 한계를 해결할 때도 공개 취약점별 macro를 다시 도입하지 않습니다.
+Search-time execution and final proof use separate state. A runtime violation is
+minimized and rendered, but it remains a candidate until fresh Harness replay
+succeeds. Failed proof does not preserve a successful result or stale exploit.
 
-## 안전/권한 범위
+## Determinism and Offline Execution
 
-QProver는 organizer-provided, owned 또는 명시적으로 허가된 target을 위한 도구입니다. 기본 제출 경로는 로컬 Foundry/Harness에서 동작하며 public-chain transaction broadcast workflow를 제공하지 않습니다.
-
-## 제출 전 검증 체크리스트
-
-- [ ] CI가 exact submission commit에서 green
-- [ ] official participant-package validator 통과
-- [ ] Docker linux/amd64 build 통과
-- [ ] `--network=none` 실행 경로 확인
-- [ ] production Track04 code에 vulnerability macro identifier가 없음
-- [ ] public target name / expected witness hardcoding 없음
-- [ ] 동일 seed 반복 실행 결과 deterministic
-- [ ] README의 실행 예시와 실제 entrypoint가 일치
-- [ ] `Exploit.sol` / `result.json` / `attempts.log` / exit code 계약 유지
-- [ ] AI assistance disclosure와 라이선스 확인
+Stable compiler-derived ordering, bounded parameter domains, seeded search,
+deterministic artifact formatting, and timestamp-free attempt logs support replay.
+The submission image is intended to run with `--network=none` and does not require
+network access during exploit search.

@@ -1,4 +1,4 @@
-# QProver MicroBench v1
+# QProver MicroBench
 
 ## 1. Question
 
@@ -10,7 +10,8 @@ It does **not** ask whether quantum hardware is faster than classical computers.
 
 ## 2. Dataset
 
-MicroBench v1 contains six paired families:
+The frozen dataset is identified as `MicroBench v1` in the benchmark artifacts.
+It contains six paired families:
 
 - access control;
 - governance;
@@ -84,7 +85,9 @@ Relative confirmation rate:
 - vs Risk: ~**2.25×**
 - vs Coverage: **3.75×**
 
-No false confirmations were observed in 60 negative runs per strategy. That observation must not be paraphrased as zero risk: the exact 95% upper confidence bound for 0/60 is about **5.96%**.
+No false confirmations were observed in 60 negative runs per strategy. For 0/60,
+the exact 95% upper confidence bound is about **5.96%**; the observation does not
+establish zero risk.
 
 ## 5. Family breakdown
 
@@ -101,7 +104,8 @@ All corresponding negative B twins were 0/10 false-confirmed for every strategy.
 
 The deterministic Risk baseline is excellent on two strongly encoded motifs—access control and reentrancy—but collapses on the other four families. QUBO is either strongest or tied for strongest on five of six families and retains partial performance on the two hardest three-step/stateful families.
 
-Governance and signature replay remain clear weaknesses. Their witnesses require longer state progression and/or repeated actions. This motivates future higher-order transition/state-aware objectives rather than only pairwise sequence structure.
+Governance and signature replay remain clear weaknesses. Their witnesses require
+longer state progression and/or repeated actions than the stronger families.
 
 ## 6. Search-work efficiency
 
@@ -123,7 +127,7 @@ Equivalent yield:
 | Risk | 2.44 | 18.69 |
 | **QUBO** | **6.41** | **29.20** |
 
-This supports the claim that QUBO improved **search prioritization/yield** on this benchmark.
+QUBO had the highest **search prioritization/yield** in this benchmark.
 
 ## 7. Solver cost and wall-clock interpretation
 
@@ -139,11 +143,11 @@ QUBO solver totals:
 - maximum couplers: 384
 - exact fallback calls: 0
 
-Successful-search conditional mean time was higher for QUBO than the classical baselines because QUBO spends additional compute ranking paths. The defensible interpretation is:
+Successful-search conditional mean time was higher for QUBO than the classical baselines because QUBO spends additional compute ranking paths. The result supports this narrower interpretation:
 
 > **QUBO traded solver compute for a higher probability of reaching an executable exploit with fewer candidate/EVM search operations.**
 
-Do not claim that QUBO made the end-to-end search faster in wall-clock time.
+The experiment does not establish an end-to-end wall-clock speedup.
 
 ## 8. Censoring
 
@@ -194,7 +198,7 @@ report.md
 
 ## 11. Limitations
 
-MicroBench is deliberately useful but narrow:
+MicroBench is narrow:
 
 - six synthetic vulnerability families;
 - public white-box fixtures;
@@ -202,18 +206,6 @@ MicroBench is deliberately useful but narrow:
 - argument/action domains are bounded by manifests;
 - optimization weights were developed on public fixtures;
 - no hidden TRUST404 target is included in these numbers;
-- no quantum hardware was used;
-- no quantum advantage is claimed;
 - real protocols have larger cross-contract/state/action spaces.
 
-The benchmark therefore establishes **internal comparative evidence**, not universal superiority.
-
-## 12. Next evaluation
-
-The strongest next steps are:
-
-1. freeze weights before any hidden evaluation;
-2. run on organizer-provided unpublished targets when available;
-3. add external real-world historical exploit fixtures without leaking known witnesses into search;
-4. compare higher-order/state-aware QUBO objectives on governance/signature-replay families;
-5. compare simulated annealing, exact classical and optional quantum/QAOA backends under the same QUBO formulation.
+The benchmark therefore establishes **internal comparative evidence**, not universal superiority or hidden-target performance.

@@ -44,7 +44,7 @@ Every successful `result.json` reported both `minimized_candidate: true` and
 
 ## Root submission PoC
 
-The root `Exploit.sol` is copied byte-for-byte from the current agent output at
+The root `Exploit.sol` is copied byte-for-byte from the agent output at
 `trust404/results/latest/OpenVault/Exploit.sol` and was not manually edited.
 
 - SHA-256: `9d191132a8d42ebf5e1ac18c263946724785d77a88874af3fb07460c8a0c3bcd`
@@ -126,12 +126,13 @@ Generic failure classes were long/repeated prerequisites, protected intermediary
 asset calls, nested instance/action planning, search-horizon starvation, indirect
 callback propagation, resource-price prerequisites, and a semantic mismatch for
 multi-call exact-block logic. At a diagnostic budget of 100, the phase-sequencing
-case was found at attempt 65; six other misses remained. This result is retained
-as negative evidence rather than optimized away.
+case was found at attempt 65; six other misses remained. These misses are part of
+the recorded result.
 
 ## Fresh Holdout B
 
-Holdout B was generated and frozen only after the generic fixes, then run once.
+Holdout B was generated and frozen after the implementation was frozen for this
+evaluation, then run once.
 Its hash was
 `c4618b886ce7bf72cef5b645acd12e4c6dec13ca5cdf3733725b6e91e00caff5`.
 It changed names, constants, state layout, helper topology, predicate names,
@@ -182,37 +183,25 @@ Nine malformed/adversarial manifest cases all returned official exit 2 / `ERROR`
 and cleared a pre-seeded stale success artifact. No tested static analysis,
 heuristic, QUBO, or runtime-only result could produce final `PROVEN`.
 
-One proof-binding defect was found: a manifest predicate absent from the compiled
-invariant contract could previously degrade to `NOT_FOUND`. QProver now requires
+One proof-binding defect was found during the review: a manifest predicate absent
+from the compiled invariant contract could degrade to `NOT_FOUND`. QProver requires
 each predicate to be declared exactly once, bound by `checkAll`, and ordered like
 the compiler-derived `checkAll` calls. Invalid bindings fail closed as `ERROR`.
 
-## Generic changes from the evaluation
+## Validated compiler and proof bindings
 
-1. Exact compiler-derived integer equality models now precede unrelated runtime
-   getters in bounded parameter domains. This is a semantic relevance rule, not a
-   target/function-name rule. A neutral regression demonstrates `x == 37` remains
-   available even when an unrelated getter would otherwise consume the limit.
-2. Manifest predicates are compiler-bound to declarations and `checkAll` in the
-   declared order while non-predicate helper calls are ignored. Neutral tests cover
-   missing, unbound, reordered, and helper-interleaved predicates.
-3. `METHOD.md` was reorganized into the official six required topics, with runtime
-   and development-time LLM usage clearly separated.
-4. Root `Exploit.sol` was replaced only by an exact current generator output.
+- Exact compiler-derived integer equality models precede unrelated runtime getters
+  in bounded parameter domains. A neutral regression confirms that `x == 37`
+  remains available when an unrelated getter would otherwise consume the limit.
+- Manifest predicates are compiler-bound to declarations and `checkAll` in the
+  declared order. Non-predicate helper calls are ignored. Neutral tests cover
+  missing, unbound, reordered, and helper-interleaved predicates.
 
 Holdout B was not used for tuning. Its 3/4 vulnerable result and zero false
-positives are the fresh evidence for the generic parameter-priority change.
+positives are local holdout evidence for the frozen behavior.
 
-## Judging-rubric evidence matrix
-
-| Category | Concrete evidence and strengths | Weak evidence / limitations |
-|---|---|---|
-| Problem Definition | README/METHOD explicitly distinguish security-AI suspicion from executable invariant counterexamples; the output is independently replayable evidence useful to audit triage. | No claim is made that bounded NOT_FOUND proves safety. |
-| Security Validity | PROVEN requires concrete runtime violation plus standalone fresh Harness replay; malformed bindings fail closed; public and 16 synthetic sound cases produced zero false PROVEN. | Synthetic sound cases cannot cover every unsupported EVM/build semantic. |
-| Working Implementation | Seven-argument live agent, actual Anvil loop, generated PoC, minimization, official outputs, and offline Docker execution were exercised end-to-end. | Long/nested prerequisite coverage remains bounded. |
-| Verifiability | Deterministic logs, result metadata, exact toolchain, untouched external Harness, byte provenance, generator repeat checks, and official-style same-PoC N=10 are recorded. | Synthetic evaluation artifacts intentionally remain outside Git. |
-| Scalability | Compiler-backed facts, property slicing, target-independent action/instance model, and modular best-first/QUBO/coverage search avoid fixture-specific macros. | Search growth and action starvation affect longer traces. |
-| Technical Originality & Impact | Property-directed counterexample-guided synthesis combines semantic dependencies, contextual runtime values, concrete execution feedback, minimization, and a strict EVM proof boundary. | QUBO is prioritization only; no quantum-advantage claim or hidden-target score is made. |
+Across the synthetic suites reported above, all 16 sound cases produced zero false
+`PROVEN` results.
 
 ## Final verification
 
@@ -254,7 +243,3 @@ output directory was fresh.
   synthesis are outside the declared scope.
 - These local suites measure specific capabilities and are not official hidden
   target results.
-
-No public target names, known witness constants, known exploit traces, or
-vulnerability-class answer templates were found in production QProver or Harness
-source during the final scan.

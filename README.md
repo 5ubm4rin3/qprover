@@ -1,166 +1,136 @@
 # QProver
 
+QProver is a QUBO-guided autonomous exploit prover for smart contracts.
+
+It receives a target contract, supplied invariants, and a manifest; searches for
+executable attack sequences; validates candidates through concrete EVM execution;
+and emits a standalone `Exploit.sol`. A result is `PROVEN` only when the generated
+exploit reproduces the invariant violation under a fresh organizer-compatible
+Harness deployment.
+
 ## Overview
 
-**QProver**는 TRUST404 Track 04의 **Autonomous Exploit Prover**를 목표로 만든 스마트 컨트랙트 공격 탐색기입니다.
+QProver treats exploit discovery as a bounded counterexample search. Compiler
+artifacts describe callable functions, storage dependencies, value flow, guards,
+and contract relationships. The supplied invariants focus that evidence on the
+state and resources relevant to the property being checked.
 
-단순히 “이 코드가 취약해 보인다”는 예측에서 끝나는 것이 아니라, 실제 공격 경로를 탐색하고 `Exploit.sol`을 생성한 뒤, EVM에서 실행하여 supplied invariant가 실제로 깨지는지 검증합니다.
+The search combines deterministic best-first ranking, bounded QUBO prioritization,
+and coverage/state-novelty exploration. Candidate action skeletons are completed
+with addresses and values derived from compiler facts, runtime observations, ABI
+boundaries, and bounded constraints.
 
-> **QProver searches for an attack, executes it, and returns reproducible evidence.**
+Every candidate is executed on a local EVM. Passes, reverts, observations, and
+state changes feed back into the search. Static analysis and optimization guide
+the order of execution; neither can establish an exploit by itself.
 
-현재 Track 04 경로는 **property-directed, counterexample-guided exploit synthesis** 구조를 사용합니다. 공개 타깃의 알려진 exploit path나 vulnerability-class macro를 정답처럼 선택하지 않습니다.
-
-```text
-Target.sol + Invariants.sol + optional Setup
-  -> compiler-backed ProgramFact + PropertyFact
-  -> PropertySlice / resource relevance
-  -> deterministic best-first + QUBO + coverage portfolio
-  -> contextual typed ValueExpr parameter completion
-  -> persistent SearchAttacker on local Anvil snapshots
-  -> original Invariants.checkAll(target)
-  -> execution-backed witness minimization
-  -> standalone Exploit.sol
-  -> fresh organizer Harness proof
-```
-
-Search-time execution과 final proof는 의도적으로 분리되어 있습니다. 빠른 runtime에서 invariant violation이 발견되어도 그것은 아직 **candidate witness**일 뿐입니다.
-
-최종적으로 생성된 standalone exploit이 fresh organizer Harness 환경에서 동일한 violation을 다시 재현해야만 exit code `0`을 반환합니다.
-
-Revert 역시 단순한 global blacklist로 처리하지 않고, 해당 state와 parameter context에 대한 **state-local feedback**으로 사용합니다.
-
-현재 bounded scope에서는 다음 항목들이 제한될 수 있습니다.
-
-- proxy/delegatecall implementation recovery
-- arbitrary CREATE/CREATE2 discovery
-- arbitrary-selector callback synthesis
-- broad tuple/array ABI synthesis
-
-## Design Principles
-
-QProver는 주최 측이 제공하는 `Target.sol`, `Invariants.sol`, `manifest.json`을 입력으로 받아 Solidity compiler 기반의 semantic facts를 추출하고, attacker가 실제로 실행할 수 있는 ABI call sequence를 탐색합니다.
-
-탐색은 다음과 같은 일반 정보에 기반합니다.
-
-- compiler-derived storage read/write
-- internal / external call relation
-- value flow
-- guard / call-write ordering
-- PropertySlice와 resource relevance
-- concrete execution feedback
-- state novelty / coverage
-- contextual parameter observations
-
-즉 vulnerability name을 맞히는 시스템이 아니라, **실제로 실행 가능한 counterexample을 찾는 시스템**을 목표로 합니다.
-
-## What Was Newly Implemented During TRUST404
-
-QProver는 기존 QProver core를 기반으로 확장한 프로젝트입니다. 기존 core에는 compiler-backed program analysis, generic search abstraction, local EVM execution, PoC/replay infrastructure, 그리고 v1 benchmark harness가 있었습니다.
-
-이번 TRUST404 build period에는 Track 04 요구사항에 맞추기 위해 다음 부분을 새로 구현하거나 크게 재설계했습니다.
-
-- organizer 제공 `Target.sol` / `Invariants.sol` / `manifest.json`을 읽는 Track 04 CLI 및 adapter
-- supplied invariant를 compiler AST에서 읽어 search guidance로 바꾸는 `PropertyFact` / `PropertySlice`
-- public target name이나 known exploit witness에 의존하지 않는 macro-free generic action model
-- reachable contract discovery와 compiler-derived read/write/call/value dependency 기반 transition model
-- shortest-first horizon search와 best-first / bounded QUBO / coverage portfolio
-- runtime getter, contract instance, compiler constant, ABI boundary, bounded Z3 constraint를 사용하는 typed contextual `ValueExpr` parameter completion
-- persistent `SearchAttacker` + local Anvil snapshot 기반 Self-validation Loop
-- state fingerprint, state-local revert feedback, feasibility/frontier infrastructure
-- vulnerability-specific template 대신 generic callback IR과 standalone `Exploit.sol` lowering
-- execution-backed witness minimization
-- search-time runtime과 분리된 fresh organizer Harness final proof
-- `result.json`을 통한 violated invariant / exploit path / proof status 설명
-- pinned Python / Foundry / solc / forge-std를 사용하는 exact submission Docker image 및 `--network=none` CI verification
-- official Track 04 submission-format validator를 CI gate로 통합
-
-기존 QProver v1 benchmark 결과는 repository에 남아 있지만, 해당 결과를 이번 v2.5 hidden-target generalization 성능으로 주장하지 않습니다.
-
-## AI-assisted Development Disclosure
-
-이번 프로젝트 개발에는 **ChatGPT 및 OpenAI coding agents를 포함한 AI-assisted development tools**를 사용했습니다. AI 도구는 implementation draft, refactoring, debugging, test 작성, documentation, code review 보조에 폭넓게 사용되었습니다.
-
-최종 architecture와 security boundary를 결정하고, 실제 test/CI/runtime 결과를 확인하며, generated code와 문서를 검토하고 제출물에 대한 책임을 지는 것은 참가자입니다.
-
-또한 QProver의 **runtime exploit search 자체는 외부 LLM/API에 의존하지 않습니다.** 제출된 agent는 compiler-backed analysis, deterministic search/optimization, local EVM execution으로 동작하며 offline scoring 환경에서도 실행되도록 구성되어 있습니다.
-
-## Simplest Run
-
-TRUST404가 배포한 **실제 공개 Track 04 타깃 6개**를 repository의 `trust404/targets/`에 그대로 포함합니다.
+## How It Works
 
 ```text
-trust404/
-├── targets/
-│   ├── BadAccounting/
-│   ├── BoundedOwner/
-│   ├── NaiveOracle/
-│   ├── OpenVault/
-│   ├── ReentrantVault/
-│   └── SafeVault/
-└── results/
+Target + Invariants + Manifest
+        ↓
+Compiler Analysis
+        ↓
+Property-directed Action Space
+        ↓
+Best-first / QUBO / Coverage Search
+        ↓
+Contextual Parameter Completion
+        ↓
+Concrete EVM Execution
+        ↓
+Witness Minimization
+        ↓
+Exploit.sol
+        ↓
+Fresh Harness
+        ↓
+PROVEN
 ```
 
-공개 타깃 전체를 실행하려면 repository root에서 한 줄만 실행합니다.
+- **Compiler analysis** extracts the ABI, storage reads and writes, call edges,
+  value flow, guards, and deployment facts.
+- **Property-directed action construction** selects attacker-accessible actions
+  and resources connected to the supplied invariants.
+- **Search** constructs bounded call sequences and decides which candidate to
+  execute next.
+- **Parameter completion** fills typed arguments and call values from static and
+  runtime evidence.
+- **Concrete execution** evaluates each candidate against the original invariant
+  on local Anvil state.
+- **Minimization and proof** remove unnecessary actions, render `Exploit.sol`, and
+  replay it in a fresh Harness deployment.
+
+### QUBO
+
+QUBO is used to prioritize candidate action sequences. It is not a proof oracle:
+a low-energy sequence still has to execute and violate the supplied invariant.
+The current backend uses seeded classical optimization, including simulated
+annealing for bounded models. QProver makes no quantum-advantage claim.
+
+## Control Flow
+
+1. Compile the target and supplied invariants.
+2. Extract semantic facts from compiler artifacts.
+3. Derive property-relevant actions, state, and resources.
+4. Construct bounded candidate action sequences.
+5. Prioritize candidates with best-first, QUBO, and coverage search.
+6. Complete parameters from compiler facts and runtime observations.
+7. Execute candidates on a local EVM from a controlled baseline.
+8. Feed pass, revert, and state-change evidence back into the search.
+9. Minimize a successful witness through concrete replay.
+10. Replay the standalone `Exploit.sol` under a fresh Harness.
+
+The self-validation loop covers steps 4–8. A failed candidate is evidence about
+one sequence, state, and parameter context; it does not end the search or prove
+the target safe. A runtime violation advances to minimization and fresh proof,
+and failed fresh proof returns a non-success result.
+
+## Usage
+
+Local execution requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and
+[Foundry](https://book.getfoundry.sh/). Install the locked Python environment with
+`uv sync --frozen`.
+
+### Public target
+
+Run one bundled public target:
 
 ```bash
-make track04
+make track04 TARGET=OpenVault
 ```
 
-첫 실행에서 pinned `forge-std`와 Track 04 Harness artifact가 없으면 QProver가 자동으로 준비합니다.
+Run all bundled public targets with `make track04`.
 
-전체 실행 결과는 target별로 분리됩니다.
+### Generic target/package
 
-```text
-trust404/results/latest/
-├── BadAccounting/
-│   ├── Exploit.sol
-│   ├── result.json
-│   └── attempts.log
-├── BoundedOwner/
-├── NaiveOracle/
-├── OpenVault/
-├── ReentrantVault/
-├── SafeVault/
-└── summary.json
-```
-
-특정 공개 타깃 하나만 실행하려면:
+Pass a TRUST404-compatible package directory containing the manifest and sources:
 
 ```bash
-make track04 TARGET=ReentrantVault
+uv run qprover track04 /path/to/target
 ```
 
-또는 직접:
+Use `--out`, `--timeout`, `--seed`, or `--max-attempts` to override package
+defaults.
+
+### Official low-level CLI
 
 ```bash
-uv run qprover track04 trust404/targets/ReentrantVault \
-  --out trust404/results/latest/ReentrantVault
+uv run qprover-trust404 \
+  --contract /path/to/Target.sol \
+  --invariants /path/to/Invariants.sol \
+  --manifest /path/to/manifest.json \
+  --out /path/to/out \
+  --timeout 300 \
+  --seed 42 \
+  --max-attempts 5
 ```
 
-공개셋은 주최 측 participant package에 포함된 실제 평가용 타깃입니다.
+### Docker
 
-- Vulnerable: `ReentrantVault`, `OpenVault`, `BadAccounting`, `NaiveOracle`
-- Sound negative: `SafeVault`, `BoundedOwner`
-
-따라서 전체 실행에서 `PROVEN`과 `NOT_FOUND`는 모두 정상적인 결과일 수 있습니다. Batch 실행 자체는 infrastructure/internal `ERROR`가 있을 때만 실패합니다.
-
-별도의 organizer package 하나를 실행할 때는 경로만 전달하면 됩니다.
+Build the pinned submission image:
 
 ```bash
-uv run qprover track04 /path/to/organizer-package
-```
-
-또한 로컬 비공개 target을 `trust404/target/`에 넣으면, 인자 없는 `uv run qprover track04`은 해당 단일 target을 공개셋보다 우선하여 실행합니다. `trust404/target/`의 내용과 `trust404/results/`는 Git에서 ignore됩니다.
-
-## Official Docker Interface
-
-
-### 1. Build the submission image
-
-```bash
-git clone https://github.com/5ubm4rin3/qprover.git
-cd qprover
-
 docker build \
   --platform=linux/amd64 \
   -f agent/Dockerfile \
@@ -168,9 +138,7 @@ docker build \
   .
 ```
 
-### 2. Run the Track 04 interface
-
-Container의 `ENTRYPOINT`가 이미 공식 Track 04 runner를 실행하도록 구성되어 있습니다.
+Run it with read-only inputs and a writable output directory:
 
 ```bash
 docker run --rm \
@@ -188,307 +156,82 @@ docker run --rm \
   --max-attempts 5
 ```
 
-주최 측 runner가 mount를 직접 구성한다면 container에는 공식 CLI argument만 전달하면 됩니다.
-
-## Advanced Official CLI
-
-아래 인터페이스는 organizer/scoring compatibility를 위해 그대로 유지하는 저수준 CLI입니다. 평소 로컬 실행에는 위의 `make track04`를 권장합니다.
-
-Python 3.12+, `uv`, Foundry가 설치되어 있다면 다음과 같이 모든 값을 직접 지정할 수도 있습니다.
-
-```bash
-uv sync --frozen
-
-uv run qprover-trust404 \
-  --contract /path/to/target/src/Target.sol \
-  --invariants /path/to/target/Invariants.sol \
-  --manifest /path/to/target/manifest.json \
-  --out trust404/results/manual \
-  --timeout 300 \
-  --seed 42 \
-  --max-attempts 5
-```
-
-일반적인 실행에서는 `TRUST404_HARNESS_DIR`을 별도로 지정할 필요가 없습니다. QProver가 저장소/컨테이너에 포함된 organizer-compatible Harness를 자동으로 사용합니다.
-
 ## Inputs
 
-Track 04 CLI는 다음 7개의 공식 argument를 사용합니다.
+- **Target Solidity source** — the contract under test and its source closure.
+- **`Invariants.sol`** — the supplied property contract and `checkAll` binding.
+- **`manifest.json`** — target identity, deployment settings, predicates, search
+  budget, seed, and supported execution settings.
+- **`Setup.s.sol`** — optional deployment setup referenced by the manifest.
 
-```text
---contract      Target Solidity source file
---invariants    Organizer-supplied Invariants.sol
---manifest      Organizer-supplied manifest.json
---out           Output directory
---timeout       Total wall-clock budget in seconds
---seed          Deterministic search seed
---max-attempts  Maximum number of concretely validated candidates
-```
-
-QProver는 주최 측 원본 source를 수정하지 않습니다.
-
-Analysis를 위해 temporary compiler workspace를 만들 수는 있지만, final proof는 원본 target / invariants와 organizer Harness semantics를 기준으로 수행합니다.
+QProver may create a temporary compiler workspace for analysis. It does not
+modify the supplied target or invariant sources.
 
 ## Outputs
 
-모든 실행은 `--out` 아래에 다음 결과를 생성합니다.
+- **`Exploit.sol`** — standalone executable proof when successful; an explicit
+  no-op artifact for `NOT_FOUND` or `ERROR`.
+- **`result.json`** — status, violated invariant, action sequence, minimization
+  state, and fresh-Harness reproduction result.
+- **`attempts.log`** — deterministic records of concretely evaluated candidates.
 
-- `Exploit.sol` — standalone executable PoC. 성공 시 실제 invariant violation을 재현하며, `NOT_FOUND`/`ERROR`에서는 false exploit으로 오인되지 않도록 명백한 no-op exploit을 기록합니다.
-- `result.json` — final status, violated invariant, exploit action sequence, organizer proof 여부, minimization 여부, human-readable explanation을 기록합니다.
-- `attempts.log` — concretely validated candidate와 outcome을 deterministic format으로 기록합니다.
+The official low-level CLI uses these exit codes:
 
-Exit code:
+- `0` — `PROVEN`
+- `1` — `NOT_FOUND`
+- `2` — `ERROR`
 
-- `0` — fresh organizer Harness 실행에서 invariant violation 재현 성공
-- `1` — configured time / attempt budget 안에서 valid exploit을 찾지 못함
-- `2` — input, environment, infrastructure, unsupported deployment error
+`NOT_FOUND` does not mean `SAFE`. It means that no proof was found within the
+configured search budget.
 
-## Architecture
+## Proof Boundary
 
-```text
-Target.sol + Invariants.sol + manifest.json
-                    |
-                    v
-            Input validation
-                    |
-                    v
-         Solidity compiler / AST
-                    |
-                    v
-      Compiler-backed semantic facts
-       READ / WRITE / CALL / VALUE
-                    |
-                    v
-           Property-directed slice
-                    |
-                    v
-      Generic attacker action space
-       call:f(...), call:g(...)
-                    |
-                    v
-  Best-first + QUBO + coverage search
-                    |
-                    v
-     Contextual parameter completion
-                    |
-                    v
-      Persistent runtime execution
-                    |
-                    v
-       Candidate invariant violation
-                    |
-                    v
-       Execution-backed minimization
-                    |
-                    v
-             Exploit.sol
-                    |
-                    v
-        Fresh organizer Harness proof
-              |               |
-         NOT_PROVEN         PROVEN
-              |               |
-        feedback/search        v
-                         final result
-```
+None of the following is proof:
 
-## 1. Compiler-backed Analysis
+- a static warning or dependency hypothesis;
+- a heuristic score or candidate priority;
+- QUBO energy;
+- a symbolic candidate;
+- search-time suspicion.
 
-QProver는 regex 기반 vulnerability pattern matching 대신 Solidity compiler가 제공하는 AST / ABI / storage information을 기반으로 프로그램 구조를 읽습니다.
+`PROVEN` requires all of the following:
 
-주요 분석 대상은 다음과 같습니다.
+- a generated standalone `Exploit.sol`;
+- a fresh target and invariant deployment;
+- execution through the organizer-compatible Harness; and
+- an actual violation of a supplied invariant.
 
-- function visibility / mutability
-- ABI signature / selector
-- storage read / write
-- internal / external call
-- value flow
-- guard와 call/write ordering
-- transitive dependency
-- property-relevant resource
+## Limitations
 
-이 정보는 단순 reporting용이 아니라 이후 action ranking과 sequence search에 직접 사용됩니다.
-
-## 2. Search
-
-Candidate action은 일반적인 ABI call로 표현됩니다.
-
-```text
-call:deposit()
-call:transfer(address,uint256)
-call:borrow(uint256)
-call:withdraw(uint256)
-```
-
-Search backend는 deterministic portfolio 형태로 구성되어 있습니다.
-
-- risk-guided best-first search
-- bounded QUBO prioritization
-- coverage / state-novelty search
-
-QUBO는 **proof oracle이 아닙니다.** 어떤 action sequence를 먼저 검증할지를 정하는 search backend일 뿐이며, 최종 판정은 항상 concrete EVM execution이 담당합니다.
-
-> **The EVM is the final referee.**
-
-## 3. Parameter Completion
-
-Action skeleton은 typed `ValueExpr`을 이용해 concrete parameter로 완성됩니다.
-
-활용되는 정보의 예시는 다음과 같습니다.
-
-- attacker / self / target address
-- reachable contract instance
-- runtime getter value
-- previous observation
-- compiler-derived constant
-- ABI boundary value
-- bounded Z3-supported integer constraint
-
-Solver나 heuristic이 만든 값도 최종적으로는 concrete EVM execution에서 다시 검증됩니다.
-
-## 4. PoC Generation
-
-선택된 candidate는 vulnerability-specific renderer가 아니라 하나의 generic lowering path를 통해 standalone Solidity exploit으로 변환됩니다.
-
-```solidity
-contract Exploit {
-    function run(address target) external payable {
-        // generated ABI calls
-    }
-}
-```
-
-동일한 lowering path는 ordinary ABI call뿐 아니라 bounded callback program도 처리합니다.
-
-## 5. Self-validation Loop
-
-Track 04의 핵심은 candidate를 만드는 것 자체가 아니라 **실패한 candidate를 다시 search feedback으로 사용하는 반복 구조**입니다.
-
-```text
-search
-  -> generate candidate
-  -> execute candidate
-  -> check original invariant
-       |-- pass/revert -> state-local feedback -> search again
-       '-- violation   -> minimize -> render Exploit.sol
-                          -> fresh organizer Harness proof
-```
-
-Static analysis 결과나 search score, QUBO energy만으로 `PROVEN`을 만들지 않습니다.
-
-Candidate가 invariant를 깨지 못하면 search와 generation을 계속 반복합니다.
-
-## 6. Final Proof Boundary
-
-Search-time execution과 final proof는 분리되어 있습니다.
-
-QProver가 최종 성공으로 인정하려면 다음 조건이 모두 필요합니다.
-
-1. runtime execution에서 invariant violation이 실제로 발생해야 함
-2. 가능한 경우 execution-backed minimization을 수행해야 함
-3. standalone `Exploit.sol`을 fresh organizer Harness 환경에서 다시 build / execute해야 함
-4. supplied invariant가 다시 실제로 깨져야 함
-
-Final fresh proof가 실패하면 exit code `0`을 반환하지 않습니다.
-
-이 구조는 “위험해 보이는 report”와 “실제로 실행 가능한 exploit”을 구분하기 위한 핵심 proof boundary입니다.
-
-## Core Modules
-
-| Area | Main modules | Role |
-|---|---|---|
-| Compiler analysis | `analysis.py`, `artifacts.py` | AST, storage, calls, value flow 분석 |
-| Graph | `graph.py` | Typed program / dependency graph |
-| Search | `search/*` | QUBO/BQM, risk, coverage, search control |
-| Execution | `evm.py`, `evaluator.py` | Local EVM execution과 evaluation |
-| Proof | `minimizer.py`, `certificate.py`, `replay.py` | Witness minimization과 replay evidence |
-| Track 04 | `trust404*.py` | Official input adapter, property search, runtime, proof loop |
-
-## Reproducibility & Validation
-
-Local environment를 확인하려면:
-
-```bash
-uv run qprover doctor --json
-```
-
-전체 repository verification:
-
-```bash
-make verify
-```
-
-Core verification command:
-
-```bash
-uv lock --check
-uv run ruff format --check .
-uv run ruff check .
-node trust404/scripts/validate-submission.mjs .
-uv run pytest -q
-forge test --root benchmarks/foundry -vv
-```
-
-CI에서는 이 외에도 exact submission Docker image를 build하고, bundled toolchain과 Track 04 Harness가 `--network=none` 환경에서도 정상 동작하는지 검증합니다.
-
-## Determinism
-
-동일한 source, manifest, CLI seed, pinned toolchain을 기준으로 다음 요소를 deterministic하게 유지하도록 설계되어 있습니다.
-
-- compiler-derived action ordering
-- action identifier
-- parameter domain
-- transition construction
-- QUBO / BQM construction
-- seeded annealing
-- candidate / log formatting
-
-`attempts.log`에는 wall-clock timestamp를 넣지 않습니다.
-
-최종 root `Exploit.sol`은 pinned linux/amd64 submission image, `--network=none`,
-untouched official Harness 조건에서 동일한 PoC를 fresh deployment로 10회 독립
-replay했습니다. 10회 모두 `ownerUnchanged`를 첫 위반 predicate로 재현했습니다.
-이는 generator 10회 비교가 아니라 official `DETERMINISM.md`가 요구하는 same-PoC
-N=10 replay입니다.
-
-## Benchmark Note
-
-`benchmarks/`와 `docs/BENCHMARK.md`에는 기존 QProver core / search backend 비교 실험이 포함되어 있습니다.
-
-다만 이 결과를 **v2.5 hidden-target generalization performance의 증거로 주장하지 않습니다.**
-
-Track 04 v2.5는 public target에 맞춘 exploit macro를 제거한 상태이며, 실제 generalization 성능은 organizer의 unseen target 평가에서 확인되어야 합니다.
-
-## Current Limitations
-
-현재 bounded scope에서는 다음 영역이 충분히 지원되지 않을 수 있습니다.
-
-- proxy/delegatecall implementation recovery
-- arbitrary CREATE/CREATE2 discovery
-- arbitrary-selector callback synthesis
-- complex dynamic array / struct / tuple-heavy ABI
-
-지원하지 못하는 source/build environment는 exploit 성공으로 오인하지 않고 **fail closed**합니다.
-
-## Safety Scope
-
-QProver는 organizer-provided, owned, 또는 명시적으로 허가된 security target을 위한 도구입니다.
-
-- 기본 workflow는 local Foundry / Anvil 환경에서 실행됩니다.
-- public chain으로 exploit transaction을 broadcast하지 않습니다.
-- static warning을 confirmed exploit으로 취급하지 않습니다.
-- exit code `0`에는 실제 invariant violation이 필요합니다.
-- private key나 production RPC credential이 필요하지 않습니다.
+- Bounded search can miss long or repeated prerequisite chains.
+- Complex cross-contract and nested-resource reasoning remains difficult.
+- Proxy/delegatecall recovery and arbitrary `CREATE`/`CREATE2` discovery are
+  limited.
+- Callback synthesis and tuple/struct/dynamic-array ABI construction are bounded.
+- Exact block-sensitive behavior can differ between search execution and a
+  multi-call Harness transaction.
 
 ## Documentation
 
-- `docs/ARCHITECTURE.md` — system architecture
-- `docs/TRUST404_SUBMISSION.md` — Track 04 submission interface와 proof boundary
-- `docs/BENCHMARK.md` — benchmark methodology, historical result, limitation
-- `docs/DEMO.md` — demo flow
-- `docs/PRESENTATION.md` — presentation notes
-- `docs/TRUST404_FINAL_EVALUATION.md` — public, synthetic holdout, determinism 및 proof-integrity evidence
+- [Methodology](METHOD.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [TRUST404 submission interface](docs/TRUST404_SUBMISSION.md)
+- [Benchmark methodology and results](docs/BENCHMARK.md)
+- [Final evaluation evidence](docs/TRUST404_FINAL_EVALUATION.md)
+- [Demo runbook](docs/DEMO.md)
+
+## Development Note
+
+QProver builds on an earlier research prototype. During TRUST404, the project was
+extended with the Track 04 interface, property-directed exploit search, execution
+feedback and self-validation, standalone PoC generation, and fresh-Harness
+verification.
+
+## AI-assisted Development
+
+AI-assisted coding tools were used for drafting, debugging, testing, refactoring,
+and documentation. Runtime exploit search does not rely on an external LLM or API.
 
 ## License
 
-Apache-2.0. 자세한 내용은 `LICENSE`를 참고하세요.
+QProver is licensed under the [Apache License 2.0](LICENSE).
