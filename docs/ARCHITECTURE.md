@@ -1,26 +1,27 @@
-# QProver Architecture
+# QProver 아키텍처
 
-## Goal
+## 목표
 
-QProver searches for executable invariant counterexamples. Analysis and
-optimization identify promising candidates; only concrete EVM execution can
-establish a violation. The Track 04 success boundary adds a fresh
-organizer-compatible Harness replay of the generated standalone exploit.
+QProver는 실행 가능한 invariant counterexample을 탐색합니다.
+Analysis와 optimization은 유망한 candidate를 찾는 데 사용되며,
+실제 violation은 concrete EVM execution으로만 확정합니다.
+Track 04의 최종 성공 기준은 생성된 standalone exploit을 fresh
+organizer-compatible Harness에서 다시 실행해 같은 violation을 재현하는 것입니다.
 
-The architecture separates four concerns:
+아키텍처는 크게 네 가지 관심사를 분리합니다.
 
-1. identify property-relevant code and state;
-2. choose an attack sequence to evaluate;
-3. complete the sequence with concrete addresses and values;
-4. execute, minimize, and reproduce the violation.
+1. property와 관련된 code/state 식별
+2. 평가할 attack sequence 선택
+3. concrete address/value로 sequence 구체화
+4. 실행, minimization, fresh replay
 
-## System Flow
+## 전체 흐름
 
 ```mermaid
 flowchart TD
-    A[Target + Invariants + Manifest] --> B[Input and source binding]
+    A[Target + Invariants + Manifest] --> B[Input / source binding]
     B --> C[Compiler-backed analysis]
-    C --> D[Property and dependency model]
+    C --> D[Property / dependency model]
     D --> E[Attacker action space]
     E --> F1[Best-first search]
     E --> F2[QUBO prioritization]
@@ -34,140 +35,142 @@ flowchart TD
     J --> E
     I -- Yes --> K[Witness minimization]
     K --> L[Standalone Exploit.sol]
-    L --> M[Fresh Harness deployment and replay]
+    L --> M[Fresh Harness deployment / replay]
     M --> N{Violation reproduced?}
     N -- No --> O[NOT_FOUND or ERROR]
     N -- Yes --> P[PROVEN]
 ```
 
-## Component Map
+## 주요 컴포넌트
 
-| Area | Main modules | Responsibility |
+| 영역 | 주요 모듈 | 역할 |
 |---|---|---|
-| Input and artifacts | `manifest.py`, `artifacts.py`, `trust404.py` | Validate inputs, bind source identity, build compiler artifacts |
-| Semantic analysis | `analysis.py`, `graph.py`, `trust404_analysis.py` | Extract ABI, storage, call, value-flow, guard, and property facts |
-| Search model | `models.py`, `hypotheses.py`, `trust404_frontier.py`, `trust404_resources.py` | Build actions, transitions, relevance, and bounded domains |
-| Search strategies | `search/` | Best-first, risk, coverage, random, and QUBO candidate ordering |
-| Execution | `evm.py`, `evaluator.py`, `trust404_runner.py` | Manage Anvil state, execute candidates, and evaluate invariants |
-| Proof | `minimizer.py`, `trust404_harness.py`, `certificate.py`, `replay.py` | Minimize witnesses and produce replayable evidence |
-| Publication | `safeio.py`, `report.py` | Publish artifacts and deterministic reports |
+| Input / artifact | `manifest.py`, `artifacts.py`, `trust404.py` | 입력 검증, source identity binding, compiler artifact 생성 |
+| Semantic analysis | `analysis.py`, `graph.py`, `trust404_analysis.py` | ABI, storage, call, value-flow, guard, property fact 추출 |
+| Search model | `models.py`, `hypotheses.py`, `trust404_frontier.py`, `trust404_resources.py` | action, transition, relevance, bounded domain 구성 |
+| Search strategy | `search/` | best-first, risk, coverage, random, QUBO candidate ordering |
+| Execution | `evm.py`, `evaluator.py`, `trust404_runner.py` | Anvil state 관리, candidate 실행, invariant 평가 |
+| Proof | `minimizer.py`, `trust404_harness.py`, `certificate.py`, `replay.py` | witness minimization, replayable evidence 생성 |
+| Publication | `safeio.py`, `report.py` | artifact와 deterministic report 기록 |
 
-## Inputs and Compiler Evidence
+## 입력과 Compiler Evidence
 
-The manifest binds source identity, deployment rules, actors, balances, predicates,
-search budgets, and execution settings. The TRUST404 adapter validates the supplied
-target, invariant contract, manifest, and optional setup script before search.
+Manifest는 source identity, deployment rule, actor, balance, predicate,
+search budget, execution setting을 정의합니다.
+TRUST404 adapter는 search 전에 target, invariant contract, manifest,
+optional setup script를 검증합니다.
 
-Compiler artifacts provide:
+Compiler artifact에서 다음 정보를 사용합니다.
 
-- function visibility, mutability, signatures, and selectors;
-- storage reads and writes;
-- internal, external, and low-level calls;
-- receiver identity and value transfer;
-- guards and call/write ordering;
-- source-qualified contract and function identities;
-- constants and bounded constraints used by parameter completion.
+- function visibility, mutability, signature, selector
+- storage read/write
+- internal/external/low-level call
+- receiver identity와 value transfer
+- guard와 call/write ordering
+- source-qualified contract/function identity
+- parameter completion에 사용하는 constant와 bounded constraint
 
-Analysis operates on the compiled source closure. Temporary build workspaces do not
-replace or modify the sources used for final proof.
+분석은 compiled source closure를 대상으로 수행합니다.
+Temporary build workspace를 사용할 수 있지만 final proof에 사용되는 supplied source를
+교체하거나 수정하지 않습니다.
 
-## Property and Action Model
+## Property / Action Model
 
-The invariant compiler pass binds every manifest predicate to its declaration and
-its position in `Invariants.checkAll`. Property dependencies identify relevant
-storage, calls, values, and reachable contract instances.
+Invariant compiler pass는 manifest predicate를 declaration과
+`Invariants.checkAll` 내 위치에 binding합니다.
+Property dependency를 통해 관련 storage, call, value, reachable contract instance를 찾습니다.
 
-Attacker actions are generic ABI calls. Edges between actions represent compiler-
-derived read/write relationships, call relationships, value dependencies, and
-property relevance. Callback behavior uses a bounded generic instruction model;
-it does not select vulnerability-specific exploit templates.
+Attacker action은 generic ABI call입니다.
+Action 간 edge는 compiler-derived read/write relationship, call relationship,
+value dependency, property relevance를 나타냅니다.
+Callback은 bounded generic instruction model을 사용하며,
+특정 vulnerability용 exploit template를 선택하지 않습니다.
 
 ## Search Portfolio
 
-All strategies operate on a shared search problem and common budgets:
+모든 strategy는 동일한 search problem과 공통 budget을 사용합니다.
 
-- **best-first/risk-guided search** ranks prefixes by semantic relevance,
-  transition value, feasibility, and observed outcomes;
-- **QUBO-guided search** samples bounded sequence models containing action utility,
-  pairwise transition value, repetition cost, and execution feedback;
-- **coverage-guided search** retains and mutates sequences that expose new trace or
-  state features;
-- **random search** provides a seeded comparison baseline in benchmark workflows.
+- **best-first / risk-guided search** — semantic relevance, transition value,
+  feasibility, observed outcome으로 prefix를 ranking
+- **QUBO-guided search** — action utility, pairwise transition value,
+  repetition cost, execution feedback을 포함한 bounded sequence model을 sampling
+- **coverage-guided search** — 새로운 trace/state feature를 노출한 sequence를 유지·변형
+- **random search** — benchmark에서 seeded comparison baseline 제공
 
-QUBO produces candidate sequences, not verdicts. The current backend uses seeded
-classical simulated annealing, with exact classical solving available for bounded
-models.
+QUBO는 candidate sequence를 만들고 prioritization할 뿐 verdict를 만들지 않습니다.
+현재 backend는 seeded classical simulated annealing을 사용하며,
+bounded model에는 exact classical solving도 사용할 수 있습니다.
 
-`SearchController` applies candidate, transaction, and wall-clock limits. Strategy
-results are comparable only when they share those EVM-work budgets.
+`SearchController`는 candidate, transaction, wall-clock budget을 적용합니다.
+Strategy 비교는 동일한 EVM-work budget을 사용할 때만 의미가 있습니다.
 
 ## Contextual Parameter Completion
 
-Action skeletons contain typed value expressions. Address candidates can refer to
-the attacker, the current contract, the root target, reachable instances, and
-addresses observed from earlier actions. Integer candidates can use runtime getters,
-prior observations, scaled values, compiler constants, ABI boundaries, and bounded
-Z3-supported constraints.
+Action skeleton은 typed value expression을 가집니다.
+Address candidate는 attacker, current contract, root target, reachable instance,
+이전 action에서 관찰한 address 등을 참조할 수 있습니다.
 
-Candidate values remain hypotheses until execution. A solver result cannot bypass
-the EVM or the supplied invariant.
+Integer candidate는 runtime getter, prior observation, scaled value,
+compiler constant, ABI boundary, bounded Z3-supported constraint를 사용할 수 있습니다.
 
-## Execution and Feedback
+Candidate value는 실행되기 전까지 hypothesis입니다.
+Solver 결과만으로 EVM execution이나 supplied invariant check를 우회할 수 없습니다.
 
-Anvil supplies controlled deployment state and snapshots. The runtime executes a
-candidate, calls the original `Invariants.checkAll(target)`, and records one of:
+## 실행과 Feedback
+
+Anvil은 controlled deployment state와 snapshot을 제공합니다.
+Runtime은 candidate를 실행한 뒤 원본 `Invariants.checkAll(target)`을 호출하고
+다음 중 하나를 기록합니다.
 
 ```text
 PASS / REVERT / INCONCLUSIVE / INFRA_ERROR / VIOLATION
 ```
 
-Passes, reverts, observations, and state fingerprints update the shared frontier.
-Revert feedback is scoped to the state and parameter context that produced it.
-Compiler or infrastructure failures are not learned as action reverts.
+Pass, revert, observation, state fingerprint는 shared frontier를 갱신합니다.
+Revert feedback은 해당 state/parameter context에만 적용됩니다.
+Compiler 또는 infrastructure failure를 action revert로 학습하지 않습니다.
 
-The loop continues until it finds a violation or exhausts the configured time and
-attempt budgets.
+Configured time/attempt budget 안에서 violation을 찾거나 budget을 소진할 때까지 반복합니다.
 
-## Minimization and Proof
+## Minimization / Proof
 
-A violating sequence is replayed while unnecessary actions are removed. The
-minimized candidate is lowered through a generic renderer to `Exploit.sol`.
+Violation을 만든 sequence는 concrete replay를 통해 불필요한 action을 제거합니다.
+최소화된 candidate는 generic renderer를 거쳐 `Exploit.sol`로 생성됩니다.
 
-The Track 04 proof path then:
+Track 04 proof 경로는 다음과 같습니다.
 
-1. creates a fresh target and invariant deployment;
-2. builds and executes the standalone exploit through the organizer-compatible
-   Harness;
-3. evaluates the supplied predicates in their validated order;
-4. returns `PROVEN` only when the violation is reproduced.
+1. fresh target/invariant deployment 생성
+2. standalone exploit을 organizer-compatible Harness에서 build/execute
+3. validated order로 supplied predicate 평가
+4. violation이 다시 재현될 때만 `PROVEN` 반환
 
-The demo and benchmark interfaces also emit certificates, generated Foundry replay
-tests, execution hashes, and three cold replay records. These artifacts use the
-same rule that concrete execution, rather than search output, establishes a result.
+Demo와 benchmark interface는 certificate, generated Foundry replay test,
+execution hash, cold replay record도 생성합니다.
+이 artifact들 역시 search output이 아니라 concrete execution을 결과 기준으로 사용합니다.
 
 ## Artifact Publication
 
-Proof artifacts are written through fail-closed publication rules. Output handling
-rejects symlinks and special files, pins directory identity, validates tree hashes,
-and uses atomic rename where applicable. `NOT_FOUND` and `ERROR` replace stale
-success output with an explicit no-op exploit.
+Proof artifact는 fail-closed 규칙으로 기록됩니다.
+Output handling은 symlink/special file을 거부하고 directory identity와 tree hash를 검증하며,
+가능한 경우 atomic rename을 사용합니다.
 
-The local-host boundary does not claim protection against a malicious process with
-the same user identity.
+`NOT_FOUND`와 `ERROR`는 stale success artifact를 explicit no-op exploit으로 교체합니다.
+
+Local-host boundary는 동일한 user identity를 가진 malicious process까지 방어한다고 주장하지 않습니다.
 
 ## Benchmark Isolation
 
-The benchmark runner never receives labels. It writes an append-oriented
-`runs.jsonl` journal, validates the complete run matrix, and only then allows the
-scorer to open `labels.json`. Suite, configuration, source, tool, matrix, journal,
-and artifact hashes prevent results from being silently combined across different
-experiments.
+Benchmark runner는 label을 받지 않습니다.
+Append-oriented `runs.jsonl` journal을 기록하고 전체 run matrix를 검증한 뒤에만
+scorer가 `labels.json`을 읽습니다.
 
-## Security Boundaries
+Suite, configuration, source, tool, matrix, journal, artifact hash를 통해
+서로 다른 experiment의 결과가 조용히 섞이는 것을 방지합니다.
 
-- Bundled workflows execute on local Anvil and do not broadcast public-chain
-  transactions.
-- Unsupported compiler, deployment, setup, or proof semantics fail closed.
-- Search scores, symbolic candidates, and solver exhaustion are not proof.
+## 보안 경계
+
+- Bundled workflow는 local Anvil에서 실행되며 public-chain transaction을 broadcast하지 않습니다.
+- 지원하지 않는 compiler/deployment/setup/proof semantics는 fail closed합니다.
+- Search score, symbolic candidate, solver exhaustion은 proof가 아닙니다.
 - Proxy/delegatecall recovery, arbitrary contract creation, complex ABI synthesis,
-  and unrestricted callbacks are outside the complete-support boundary.
+  unrestricted callback은 complete-support boundary 밖에 있습니다.
