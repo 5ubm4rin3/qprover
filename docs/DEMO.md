@@ -1,34 +1,33 @@
-# QProver Live Demo Runbook
+# QProver 라이브 데모 가이드
 
-## Goal
+## 목표
 
-Run an end-to-end local example in under two minutes of terminal time. The demo
-searches for a transaction sequence, executes it on Anvil, checks the supplied
-invariant, minimizes the witness, generates a Foundry PoC, and performs three cold
-replays.
+2분 이내의 terminal 실행으로 end-to-end 동작을 확인합니다.
+Demo는 transaction sequence를 탐색하고 Anvil에서 실행한 뒤 supplied invariant를 검사하고,
+witness를 최소화해 Foundry PoC를 생성한 다음 3회의 cold replay를 수행합니다.
 
-## Pre-demo check
+## 데모 전 확인
 
-From the repository root:
+Repository root에서 실행합니다.
 
 ```bash
 uv sync --frozen
 uv run qprover doctor --json
 ```
 
-Expected high-level result:
+정상적인 high-level 결과:
 
 ```json
 {"ok": true}
 ```
 
-`doctor` checks:
+`doctor`는 다음을 확인합니다.
 
-- Python / uv;
-- Forge / Anvil;
-- fresh local Anvil startup/cleanup;
-- offline fixture build;
-- writable output location.
+- Python / uv
+- Forge / Anvil
+- fresh local Anvil startup/cleanup
+- offline fixture build
+- writable output location
 
 ## One-command demo
 
@@ -39,7 +38,7 @@ uv run qprover demo \
   --out /private/tmp/qprover-demo-core
 ```
 
-Expected verified shape:
+검증된 결과 형태:
 
 ```json
 {
@@ -54,22 +53,22 @@ Expected verified shape:
 }
 ```
 
-## Narration
+## 설명 포인트
 
-1. QProver represents the attack path as a bounded search problem.
-2. QUBO prioritizes candidates; local EVM execution determines their outcome.
-3. Failed candidates feed execution evidence back into the search.
-4. A violation is minimized, rendered as a PoC, and cold-replayed three times.
+1. QProver는 attack path를 bounded search problem으로 표현합니다.
+2. QUBO는 candidate priority를 정하고, 실제 결과는 local EVM execution이 결정합니다.
+3. 실패한 candidate도 execution evidence로 다음 search에 반영됩니다.
+4. Violation은 최소화된 PoC로 생성되고 3회 cold replay됩니다.
 
-## Show the evidence bundle
+## Evidence bundle 확인
 
-The JSON response returns a relative output root. Inspect it:
+JSON 응답은 relative output root를 반환합니다.
 
 ```bash
 find /private/tmp/qprover-demo-core -maxdepth 4 -type f | sort
 ```
 
-Important files inside the confirmed run:
+Confirmed run의 주요 파일:
 
 ```text
 certificate.json
@@ -86,15 +85,15 @@ python3 -m json.tool \
   /private/tmp/qprover-demo-core/runs/<run-id>/certificate.json | less
 ```
 
-Point out:
+확인할 항목:
 
-- target identity;
-- selected invariant;
-- initial/final observations;
-- exact attack sequence;
-- minimized proof;
-- replay recipe;
-- three successful replay records.
+- target identity
+- selected invariant
+- initial/final observation
+- exact attack sequence
+- minimized proof
+- replay recipe
+- 3개의 successful replay record
 
 ### Generated Foundry PoC
 
@@ -103,7 +102,7 @@ sed -n '1,240p' \
   /private/tmp/qprover-demo-core/runs/<run-id>/poc/QProverReplay_<run-id>.t.sol
 ```
 
-Show the generated calls and assertions.
+Generated call과 assertion을 확인합니다.
 
 ### QUBO evidence
 
@@ -112,9 +111,9 @@ python3 -m json.tool \
   /private/tmp/qprover-demo-core/runs/<run-id>/qubo.json | less
 ```
 
-Point out problem/model hashes, objective evidence and backend statistics.
+Problem/model hash, objective evidence, backend statistic을 확인합니다.
 
-## Replay a saved certificate
+## 저장된 certificate replay
 
 ```bash
 uv run qprover replay \
@@ -125,10 +124,10 @@ uv run qprover replay \
 
 ## Recorded fallback
 
-If live search cannot be completed during a presentation, show the recorded evidence
-bundle and the full benchmark summary before running the deterministic demo.
+라이브 search가 발표 중 완료되지 않으면 recorded evidence bundle과
+전체 benchmark summary를 먼저 보여준 뒤 deterministic demo를 실행할 수 있습니다.
 
-Main benchmark numbers:
+주요 benchmark 수치:
 
 ```text
 Coverage 12/60 vulnerable confirmed
@@ -139,7 +138,7 @@ QUBO     45/60
 Negative false-confirmed: 0/60 for every strategy
 ```
 
-## Failure fallback
+## 실패 시 대응
 
-If `doctor` fails, show its JSON diagnostic and switch to the recorded evidence
-bundle or video. Do not present the recorded artifact as a live run.
+`doctor`가 실패하면 JSON diagnostic을 확인하고 recorded evidence bundle이나
+사전 녹화 영상을 사용합니다. Recorded artifact를 live run처럼 설명하지 않습니다.
