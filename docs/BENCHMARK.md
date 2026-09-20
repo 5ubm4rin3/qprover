@@ -1,35 +1,37 @@
 # QProver MicroBench
 
-## 1. Question
+## 1. 질문
 
-The primary experiment asks:
+이 benchmark의 핵심 질문은 다음과 같습니다.
 
-> **Can optimization/QUBO-guided transaction-sequence prioritization increase the rate at which an exploit prover reaches executable invariant violations under equal search budgets?**
+> **동일한 search budget에서 optimization/QUBO 기반 transaction-sequence prioritization이 exploit prover가 실행 가능한 invariant violation에 도달하는 비율을 높일 수 있는가?**
 
-It does **not** ask whether quantum hardware is faster than classical computers. The current QUBO backend is classical simulated annealing.
+이 실험은 quantum hardware가 classical computer보다 빠른지를 묻는 실험이 아닙니다.
+현재 QUBO backend는 classical simulated annealing입니다.
 
 ## 2. Dataset
 
-The frozen dataset is identified as `MicroBench v1` in the benchmark artifacts.
-It contains six paired families:
+Frozen dataset은 benchmark artifact에서 `MicroBench v1`로 식별됩니다.
+총 6개의 paired family를 포함합니다.
 
-- access control;
-- governance;
-- oracle manipulation;
-- reentrancy;
-- side entrance;
-- signature replay.
+- access control
+- governance
+- oracle manipulation
+- reentrancy
+- side entrance
+- signature replay
 
-Each family has:
+각 family는 다음 두 fixture를 가집니다.
 
-- an **A** vulnerable fixture;
-- a **B** sound twin with a similar public action surface.
+- **A**: vulnerable fixture
+- **B**: 유사한 public action surface를 가진 sound twin
 
-The labels file is scorer-only. Search strategies receive no expected class or supplied witness.
+Label file은 scorer 전용입니다.
+Search strategy는 expected class나 supplied witness를 받지 않습니다.
 
 ## 3. Protocol
 
-Verified full configuration: `benchmarks/config/full.json`.
+검증된 full configuration: `benchmarks/config/full.json`
 
 - Targets: 12
 - Seeds: 10 (`11, 23, 37, 41, 53, 67, 79, 83, 97, 101`)
@@ -41,39 +43,40 @@ Verified full configuration: `benchmarks/config/full.json`.
 - QUBO reads: 64
 - QUBO sweeps: 120
 
-Total scheduled executions:
+전체 실행 수:
 
 ```text
 12 targets × 10 seeds × 4 strategies = 480 cells
 ```
 
-Verified matrix ID:
+검증된 matrix ID:
 
 ```text
 b2ff4d9988c6af854e599b6b2b5f07f181f5f7551bfea6937d80c41c9d5b3529
 ```
 
-Verified toolchain for the reported run:
+Reported run의 toolchain:
 
 - Python 3.14.7
 - uv 0.12.11
 - Forge 1.4.0
 - Anvil 1.4.0
 
-All 480 cells completed; no benchmark cell was recorded as a controlled failure or incomplete cancellation.
+480개 cell 모두 완료됐으며 controlled failure나 incomplete cancellation로 기록된 cell은 없습니다.
 
-## 4. Primary result
+## 4. 주요 결과
 
-Because every strategy had 60 vulnerable and 60 negative runs, the positive-confirmation comparison is direct.
+모든 strategy가 60 vulnerable run과 60 negative run을 가지므로
+positive confirmation을 직접 비교할 수 있습니다.
 
-| Strategy | Positive confirmed | Rate | 95% Clopper–Pearson CI | Negative false-confirmed |
+| Strategy | Positive confirmed | 비율 | 95% Clopper–Pearson CI | Negative false-confirmed |
 |---|---:|---:|---:|---:|
 | Coverage | 12/60 | 20.0% | 10.8–32.3% | 0/60 |
 | Random | 21/60 | 35.0% | 23.1–48.4% | 0/60 |
 | Risk | 20/60 | 33.3% | 21.7–46.7% | 0/60 |
 | **QUBO** | **45/60** | **75.0%** | **62.1–85.3%** | **0/60** |
 
-Absolute QUBO improvement:
+QUBO의 absolute improvement:
 
 - vs Random: **+40.0 percentage points**
 - vs Risk: **+41.7 percentage points**
@@ -85,11 +88,11 @@ Relative confirmation rate:
 - vs Risk: ~**2.25×**
 - vs Coverage: **3.75×**
 
-No false confirmations were observed in 60 negative runs per strategy. For 0/60,
-the exact 95% upper confidence bound is about **5.96%**; the observation does not
-establish zero risk.
+모든 strategy에서 60개의 negative run 중 false confirmation은 관찰되지 않았습니다.
+0/60의 exact 95% upper confidence bound는 약 **5.96%**이며,
+이 관찰이 risk가 0임을 증명하는 것은 아닙니다.
 
-## 5. Family breakdown
+## 5. Family별 결과
 
 | Strategy | Access control | Governance | Oracle | Reentrancy | Side entrance | Signature replay |
 |---|---:|---:|---:|---:|---:|---:|
@@ -98,18 +101,22 @@ establish zero risk.
 | Risk | 10/10 | 0/10 | 0/10 | 10/10 | 0/10 | 0/10 |
 | **QUBO** | **10/10** | **4/10** | **8/10** | **10/10** | **10/10** | **3/10** |
 
-All corresponding negative B twins were 0/10 false-confirmed for every strategy.
+모든 corresponding negative B twin은 모든 strategy에서 0/10 false-confirmed였습니다.
 
-### Interpretation
+### 해석
 
-The deterministic Risk baseline is excellent on two strongly encoded motifs—access control and reentrancy—but collapses on the other four families. QUBO is either strongest or tied for strongest on five of six families and retains partial performance on the two hardest three-step/stateful families.
+Deterministic Risk baseline은 access control과 reentrancy처럼 강하게 encode된 두 motif에서는
+매우 강하지만 나머지 네 family에서는 성능이 크게 떨어집니다.
 
-Governance and signature replay remain clear weaknesses. Their witnesses require
-longer state progression and/or repeated actions than the stronger families.
+QUBO는 6개 family 중 5개에서 가장 강하거나 공동 최고였으며,
+상대적으로 어려운 3-step/stateful family에서도 일부 성능을 유지했습니다.
 
-## 6. Search-work efficiency
+Governance와 signature replay는 명확한 약점입니다.
+두 family의 witness는 더 긴 state progression 또는 repeated action을 요구합니다.
 
-Totals over all 120 scheduled cells per strategy:
+## 6. Search-work 효율
+
+Strategy별 120 scheduled cell 전체 합계:
 
 | Strategy | Candidate evaluations | Search transactions | Confirmed | Candidates / confirmed | Search tx / confirmed |
 |---|---:|---:|---:|---:|---:|
@@ -127,13 +134,13 @@ Equivalent yield:
 | Risk | 2.44 | 18.69 |
 | **QUBO** | **6.41** | **29.20** |
 
-QUBO had the highest **search prioritization/yield** in this benchmark.
+이 benchmark에서 QUBO가 가장 높은 **search prioritization/yield**를 보였습니다.
 
-## 7. Solver cost and wall-clock interpretation
+## 7. Solver cost / wall-clock 해석
 
-The QUBO result is not a wall-clock acceleration result.
+이 결과는 QUBO의 wall-clock acceleration을 의미하지 않습니다.
 
-QUBO solver totals:
+QUBO solver 합계:
 
 - calls: 123
 - reads: 7,872
@@ -143,17 +150,22 @@ QUBO solver totals:
 - maximum couplers: 384
 - exact fallback calls: 0
 
-Successful-search conditional mean time was higher for QUBO than the classical baselines because QUBO spends additional compute ranking paths. The result supports this narrower interpretation:
+QUBO는 path ranking에 추가 compute를 사용하므로
+successful-search conditional mean time은 classical baseline보다 높았습니다.
 
-> **QUBO traded solver compute for a higher probability of reaching an executable exploit with fewer candidate/EVM search operations.**
+이 결과가 지지하는 해석은 다음과 같습니다.
 
-The experiment does not establish an end-to-end wall-clock speedup.
+> **QUBO는 추가 solver compute를 사용해 더 적은 candidate/EVM search operation으로 실행 가능한 exploit에 도달할 확률을 높였습니다.**
+
+End-to-end wall-clock speedup은 이 실험으로 입증되지 않았습니다.
 
 ## 8. Censoring
 
-A run that exhausts its budget without a proven exploit is a censored miss, not proof of safety. The reporting layer preserves this distinction and computes a common-horizon restricted-mean summary instead of averaging only successful runs.
+Budget을 소진하고도 proven exploit을 찾지 못한 run은 censored miss이며 safety proof가 아닙니다.
+Reporting layer는 이 구분을 유지하고 성공 run만 평균내는 대신 common-horizon
+restricted-mean summary를 계산합니다.
 
-Counts of censored misses:
+Censored miss 수:
 
 - Coverage: 108/120
 - Random: 99/120
@@ -162,11 +174,16 @@ Counts of censored misses:
 
 ## 9. Seed semantics
 
-Random and simulated annealing consume the seed and therefore produce stochastic replicates.
+Random과 simulated annealing은 seed를 사용하므로 stochastic replicate를 생성합니다.
 
-Risk is effectively deterministic for the current implementation. Repeating an ignored seed is useful for reproducibility checking but **must not be treated as ten independent statistical discoveries**. Family-level inference therefore needs to respect nested/paired structure rather than treating all 480 rows as IID samples.
+현재 Risk 구현은 사실상 deterministic입니다.
+무시되는 seed를 반복하는 것은 reproducibility check에는 유용하지만,
+이를 **10개의 독립된 statistical discovery로 취급하면 안 됩니다.**
 
-## 10. Reproduction
+따라서 family-level inference는 480 row를 IID sample처럼 취급하기보다
+nested/paired structure를 고려해야 합니다.
+
+## 10. 재현 방법
 
 ```bash
 uv run qprover benchmark \
@@ -184,7 +201,7 @@ uv run qprover report \
   --json
 ```
 
-The output directory contains:
+Output directory:
 
 ```text
 matrix.json
@@ -194,18 +211,20 @@ report.json
 report.md
 ```
 
-`runs.jsonl` is label-free and immutable/append-oriented. `scores.jsonl` is created only after the complete matrix is validated and labels are opened by the scorer.
+`runs.jsonl`은 label-free이고 immutable/append-oriented입니다.
+`scores.jsonl`은 complete matrix가 검증되고 scorer가 label을 연 뒤에만 생성됩니다.
 
-## 11. Limitations
+## 11. 한계
 
-MicroBench is narrow:
+MicroBench의 범위는 제한적입니다.
 
-- six synthetic vulnerability families;
-- public white-box fixtures;
-- paired twins are related, not independent;
-- argument/action domains are bounded by manifests;
-- optimization weights were developed on public fixtures;
-- no hidden TRUST404 target is included in these numbers;
-- real protocols have larger cross-contract/state/action spaces.
+- 6개의 synthetic vulnerability family
+- public white-box fixture
+- paired twin은 related sample이며 independent하지 않음
+- argument/action domain은 manifest에 의해 bounded
+- optimization weight는 public fixture에서 개발됨
+- hidden TRUST404 target은 이 수치에 포함되지 않음
+- real protocol은 더 큰 cross-contract/state/action space를 가짐
 
-The benchmark therefore establishes **internal comparative evidence**, not universal superiority or hidden-target performance.
+따라서 이 benchmark는 **내부 비교 근거**를 제공하며,
+보편적인 우월성이나 hidden-target performance를 주장하는 결과는 아닙니다.
